@@ -82,11 +82,13 @@ function pieceFor(seg: Segment, ctx: RenderContext, block: Block): Node {
   if (f.strike) wrap(h("s"));
   if (f.superscript) wrap(h("sup"));
   if (f.subscript) wrap(h("sub"));
-  if (seg.color || seg.background || seg.style) {
+  if (seg.color || seg.background || seg.style || seg.font_family || seg.font_size_pt) {
     const el = wrap(h("span", { class: "i-fmt" }));
+    if (seg.style) applyStyle(el, resolveStyle(ctx.meta, "character", seg.style), false);
     if (seg.color && /^#[0-9a-fA-F]{6}$/.test(seg.color)) el.style.setProperty("color", seg.color);
     if (seg.background && /^#[0-9a-fA-F]{6}$/.test(seg.background)) el.style.setProperty("background-color", seg.background);
-    if (seg.style) applyStyle(el, resolveStyle(ctx.meta, "character", seg.style), false);
+    if (seg.font_family && FONT_SAFE.test(seg.font_family)) el.style.setProperty("font-family", `"${seg.font_family}", serif`);
+    if (typeof seg.font_size_pt === "number" && Number.isFinite(seg.font_size_pt) && seg.font_size_pt >= 4 && seg.font_size_pt <= 400) el.style.setProperty("font-size", `${seg.font_size_pt}pt`);
   }
   if (seg.href) {
     const safe = SAFE_LINK.test(seg.href);
@@ -135,6 +137,13 @@ function textElement(block: Block, ctx: RenderContext): HTMLElement {
   applyStyle(el, resolveStyle(ctx.meta, "paragraph", block.style ?? defaultStyle(block)), true);
   if (block.type === "list_item") el.style.setProperty("margin-left", `${(block.attributes?.depth ?? 0) * 8 + 8}mm`);
   if (typeof block.attributes?.align === "string" && ["left", "center", "right", "justify"].includes(block.attributes.align)) el.style.setProperty("text-align", block.attributes.align);
+  for (const key of ["line_height", "space_before_pt", "space_after_pt", "indent_mm", "first_line_indent_mm"] as const) {
+    const value = block.attributes?.[key];
+    if (typeof value !== "number" || !Number.isFinite(value)) continue;
+    const css = { line_height: "line-height", space_before_pt: "margin-top", space_after_pt: "margin-bottom", indent_mm: "padding-left", first_line_indent_mm: "text-indent" }[key];
+    const unit = key === "line_height" ? "" : key.endsWith("_mm") ? "mm" : "pt";
+    el.style.setProperty(css, `${value}${unit}`);
+  }
   fillText(el, ctx, block);
   return el;
 }

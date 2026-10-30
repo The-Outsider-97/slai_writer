@@ -18,7 +18,8 @@ from typing import Any, Iterable
 OBJ = "￼"
 FORMAT_FLAGS = ("bold", "italic", "underline", "strike", "code", "superscript", "subscript")
 FORMAT_COLOURS = ("color", "background")
-FORMAT_KEYS = FORMAT_FLAGS + FORMAT_COLOURS
+FORMAT_FONTS = ("font_family", "font_size_pt")
+FORMAT_KEYS = FORMAT_FLAGS + FORMAT_COLOURS + FORMAT_FONTS
 OBJECT_KINDS = ("equation", "image")
 
 

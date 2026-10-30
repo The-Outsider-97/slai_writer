@@ -8,6 +8,9 @@ import { closeDocument, needsPassword, withPassword } from "./fileops.js";
 import { api, errorText, rawPost } from "./net.js";
 import { statusDots, themeToggle } from "./shell.js";
 import { signatureGraphicsDialog } from "./sigdialog.js";
+import { FONT_FAMILIES } from "./font_rules.js";
+import { resolveStyle } from "./render.js";
+import { segments } from "./textops.js";
 import { ago, notice, pickFile } from "./widgets.js";
 /** Keep the text selection in the page when a bar button is pressed. */
 function keepSelection(button) { button.addEventListener("mousedown", (e) => e.preventDefault()); }
@@ -278,7 +281,11 @@ export function buildTopBar(ctx, find, nav) {
 export function buildFormatBar(ctx) {
     const { ed } = ctx;
     const cmd = (id) => COMMANDS.find((c) => c.id === id);
-    const fire = (id) => () => { ed.refocus(); void Promise.resolve(cmd(id).run(ctx)).catch((e) => toast(errorText(e), { kind: "error" })); };
+    const run = (task) => {
+        ed.refocus();
+        void Promise.resolve().then(task).catch((e) => toast(errorText(e), { kind: "error" }));
+    };
+    const fire = (id) => () => run(() => cmd(id).run(ctx));
     const toggles = new Map();
     const tool = (id, label, icon, pressable = false) => {
         const c = cmd(id);
@@ -289,30 +296,161 @@ export function buildFormatBar(ctx) {
             toggles.set(id, b);
         return b;
     };
-    const style = h("select", { attrs: { "aria-label": "Paragraph style" } }, [["paragraph", "Normal text"], ["h1", "Heading 1"], ["h2", "Heading 2"], ["h3", "Heading 3"], ["h4", "Heading 4"], ["quote", "Quote"], ["code-block", "Code block"], ["bullets", "Bulleted list"], ["numbered", "Numbered list"]].map(([v, t]) => h("option", { value: v, text: t })));
-    style.addEventListener("change", () => { const id = style.value; ed.refocus(); void Promise.resolve(cmd(id).run(ctx)); });
+    const custom = (label, content, action) => {
+        const b = h("button", { class: "iconbtn", type: "button", attrs: { "aria-label": label, title: label } }, content);
+        keepSelection(b);
+        b.addEventListener("click", action);
+        return b;
+    };
+    const field = (label, node) => h("label", { class: "ribbon-field" }, h("span", { class: "sr-only", text: label }), node);
+    const family = h("input", { class: "ribbon-family", type: "text", maxLength: 100,
+        attrs: { "aria-label": "Font family", list: "writer-font-families", autocomplete: "off", spellcheck: "false", placeholder: "Font family" } });
+    const families = h("datalist", { attrs: { id: "writer-font-families" } }, FONT_FAMILIES.map((name) => h("option", { value: name })));
+    const size = h("input", { class: "ribbon-size", type: "number", min: 4, max: 400, step: 0.5,
+        attrs: { "aria-label": "Font size in points", title: "Font size (pt)" } });
+    family.addEventListener("change", () => {
+        const value = family.value.trim();
+        // Keep font names as plain names, never CSS expressions or URL-bearing strings.
+        if (!value || /[\x00-\x1f\x7f{};<>\\"'`]/.test(value)) {
+            toast("Enter a valid font family name.", { kind: "error" });
+            update();
+            return;
+        }
+        run(() => A.setInlineProperty(ed, "font_family", value));
+    });
+    size.addEventListener("change", () => {
+        const value = Number(size.value);
+        if (!size.value || !Number.isFinite(value) || value < 4 || value > 400) {
+            toast("Font size must be between 4 and 400 pt.", { kind: "error" });
+            update();
+            return;
+        }
+        run(() => A.setInlineProperty(ed, "font_size_pt", value));
+    });
+    const style = h("select", { attrs: { "aria-label": "Paragraph style" } }, [["paragraph", "Normal text"], ["h1", "Heading 1"], ["h2", "Heading 2"], ["h3", "Heading 3"], ["h4", "Heading 4"], ["h5", "Heading 5"], ["h6", "Heading 6"], ["quote", "Quote"], ["code-block", "Code block"], ["bullets", "Bulleted list"], ["numbered", "Numbered list"]].map(([v, t]) => h("option", { value: v, text: t })));
+    style.addEventListener("change", () => { const id = style.value; run(() => cmd(id).run(ctx)); });
     const colour = (key, label, value) => {
         const i = h("input", { type: "color", value, attrs: { "aria-label": label, title: label } });
-        i.addEventListener("change", () => { ed.refocus(); void A.setColour(ed, key, i.value); });
+        i.addEventListener("change", () => run(() => A.setColour(ed, key, i.value)));
         return i;
     };
-    const sep = () => h("span", { class: "sep", attrs: { "aria-hidden": "true" } });
-    const el = h("div", { class: "bar", attrs: { role: "toolbar", "aria-label": "Formatting" } }, style, sep(), tool("bold", "Bold", "bold", true), tool("italic", "Italic", "italic", true), tool("underline", "Underline", "underline", true), tool("strike", "Strikethrough", "strike", true), tool("link", "Link", "link"), sep(), colour("color", "Text colour", "#000000"), colour("background", "Highlight colour", "#fff200"), sep(), tool("align-left", "Align left", "align-left"), tool("align-center", "Align centre", "align-center"), tool("align-right", "Align right", "align-right"), tool("indent", "Indent", "indent"), tool("outdent", "Outdent", "outdent"), sep(), tool("table", "Insert table", "table"), tool("picture", "Insert picture", "image"), tool("equation", "Insert equation", "sigma"), tool("footnote", "Insert footnote", "footnote"), tool("citation", "Insert citation", "book"), tool("comment", "Add comment", "comment"), tool("page-break", "Page break", "page"));
-    const flags = { bold: "bold", italic: "italic", underline: "underline", strike: "strike" };
+    const textColour = colour("color", "Font color", "#000000");
+    const highlight = colour("background", "Highlight color", "#fff200");
+    const reset = (key, label) => custom(label, "×", () => run(() => A.setColour(ed, key, null)));
+    const line = h("select", { class: "ribbon-line", attrs: { "aria-label": "Line spacing" } }, [["1", "Single"], ["1.15", "1.15"], ["1.5", "1.5"], ["2", "Double"], ["2.5", "2.5"], ["3", "Triple"]].map(([v, t]) => h("option", { value: v, text: t })));
+    line.addEventListener("change", () => run(() => A.setBlockAttribute(ed, { line_height: Number(line.value) }, "line spacing")));
+    const spacing = (key, label) => {
+        const i = h("input", { class: "ribbon-spacing", type: "number", min: 0, max: 1000, step: 1,
+            attrs: { "aria-label": label, title: `${label} (pt)` } });
+        i.addEventListener("change", () => {
+            const n = Number(i.value);
+            if (!i.value || !Number.isFinite(n) || n < 0 || n > 1000) {
+                toast(`${label} must be 0–1000 pt.`, { kind: "error" });
+                update();
+                return;
+            }
+            run(() => A.setBlockAttribute(ed, { [key]: n }, "paragraph spacing"));
+        });
+        return i;
+    };
+    const before = spacing("space_before_pt", "Space before paragraph");
+    const after = spacing("space_after_pt", "Space after paragraph");
+    const fontGroup = h("div", { class: "ribbon-group font", attrs: { role: "group", "aria-label": "Font" } }, h("span", { class: "ribbon-controls" }, field("Font family", family), families, field("Font size", size), tool("bold", "Bold", "bold", true), tool("italic", "Italic", "italic", true), tool("underline", "Underline", "underline", true), tool("strike", "Strikethrough", "strike", true), custom("Uppercase selected text", "A↑", () => run(() => A.transformCase(ed, "upper"))), custom("Lowercase selected text", "a↓", () => run(() => A.transformCase(ed, "lower"))), h("span", { class: "ribbon-colour" }, textColour, reset("color", "Reset font color")), h("span", { class: "ribbon-colour" }, highlight, reset("background", "Remove highlight"))), h("span", { class: "ribbon-group-label", text: "Font" }));
+    const paragraphGroup = h("div", { class: "ribbon-group paragraph", attrs: { role: "group", "aria-label": "Paragraph and alignment" } }, h("span", { class: "ribbon-controls" }, style, tool("align-left", "Align left", "align-left", true), tool("align-center", "Align center", "align-center", true), tool("align-right", "Align right", "align-right", true), tool("align-justify", "Justify", "align-justify", true), tool("bullets", "Bulleted list", "list", true), tool("numbered", "Numbered list", "list-ordered", true), tool("outdent", "Decrease indentation", "outdent"), tool("indent", "Increase indentation", "indent"), field("Line spacing", line), h("span", { class: "ribbon-number", attrs: { title: "Space before paragraph (pt)" } }, h("span", { text: "↑" }), before), h("span", { class: "ribbon-number", attrs: { title: "Space after paragraph (pt)" } }, h("span", { text: "↓" }), after)), h("span", { class: "ribbon-group-label", text: "Paragraph / Alignment" }));
+    const el = h("div", { class: "bar format-ribbon", attrs: { role: "toolbar", "aria-label": "Document formatting ribbon" } }, fontGroup, paragraphGroup);
+    const mixed = Symbol("mixed");
+    const valueIn = (block, part, key) => {
+        if (key === "bold" || key === "italic" || key === "underline" || key === "strike") {
+            if (part?.flags[key])
+                return true;
+        }
+        else if (part?.[key] !== undefined)
+            return part[key];
+        const character = resolveStyle(ed.model.meta, "character", part?.style);
+        const paragraph = resolveStyle(ed.model.meta, "paragraph", block.style ?? (block.type === "paragraph" || block.type === "list_item" ? "Body Text" : undefined));
+        return (character[key] ?? paragraph[key]);
+    };
+    const inlineValue = (key) => {
+        const selection = ed.recallSelection();
+        if (!selection)
+            return undefined;
+        if (selection.collapsed && ed.pendingInline.has(key))
+            return ed.pendingInline.get(key) ?? undefined;
+        if (selection.collapsed && ed.pendingFormat.has(key))
+            return true;
+        const ranges = A.textRanges(ed, selection);
+        let found = false;
+        let current;
+        for (const range of ranges) {
+            const parts = segments(range.block);
+            const chosen = selection.collapsed ? parts.filter((p) => p.start < range.from && p.end >= range.from || range.from === 0 && p.start === 0) : parts.filter((p) => p.end > range.from && p.start < range.to);
+            for (const part of chosen.length ? chosen : [null]) {
+                const next = valueIn(range.block, part, key);
+                if (found && !Object.is(current, next))
+                    return mixed;
+                current = next;
+                found = true;
+            }
+        }
+        return current;
+    };
+    const paragraphValue = (key) => {
+        const selection = ed.recallSelection();
+        if (!selection)
+            return undefined;
+        let current;
+        let found = false;
+        for (const { block } of A.textRanges(ed, selection)) {
+            const inherited = resolveStyle(ed.model.meta, "paragraph", block.style ?? (block.type === "paragraph" || block.type === "list_item" ? "Body Text" : undefined));
+            const next = block.attributes?.[key] ?? inherited[key];
+            if (found && !Object.is(current, next))
+                return mixed;
+            current = next;
+            found = true;
+        }
+        return current;
+    };
     const update = () => {
-        const sel = ed.readSelection();
+        const sel = ed.recallSelection();
         const block = sel ? ed.model.block(sel.start.block) : undefined;
         for (const [id, btn] of toggles) {
-            const flag = flags[id];
-            let on = ed.pendingFormat.has(flag);
-            if (block && sel && !on) {
-                const from = sel.start.offset, to = sel.end.offset;
-                on = (block.spans ?? []).some((s) => s.type === "format" && s[flag] === true && (sel.collapsed ? s.start < from && s.end >= from : s.start <= from && s.end >= to));
+            let value;
+            if (["bold", "italic", "underline", "strike"].includes(id))
+                value = inlineValue(id);
+            else if (id === "bullets" || id === "numbered") {
+                const ids = sel ? A.textRanges(ed, sel) : [];
+                value = ids.length > 0 && ids.every(({ block: b }) => b.type === "list_item" && Boolean(b.attributes?.ordered) === (id === "numbered"));
             }
-            btn.setAttribute("aria-pressed", String(on));
+            else
+                value = paragraphValue("align") === id.slice("align-".length);
+            btn.setAttribute("aria-pressed", value === mixed ? "mixed" : String(value === true));
         }
+        const font = inlineValue("font_family");
+        if (font !== mixed && typeof font === "string")
+            family.value = font;
+        else {
+            family.value = "";
+            family.placeholder = font === mixed ? "Mixed fonts" : "Font family";
+        }
+        const pt = inlineValue("font_size_pt");
+        size.value = typeof pt === "number" ? String(pt) : "";
+        size.placeholder = pt === mixed ? "Mixed" : "pt";
+        const text = inlineValue("color");
+        if (typeof text === "string" && /^#[0-9a-fA-F]{6}$/.test(text))
+            textColour.value = text;
+        const bg = inlineValue("background");
+        if (typeof bg === "string" && /^#[0-9a-fA-F]{6}$/.test(bg))
+            highlight.value = bg;
+        const leading = paragraphValue("line_height");
+        line.value = typeof leading === "number" ? String(leading) : "1";
+        if (![...line.options].some((o) => o.value === line.value))
+            line.selectedIndex = -1;
+        const beforeValue = paragraphValue("space_before_pt");
+        const afterValue = paragraphValue("space_after_pt");
+        before.value = typeof beforeValue === "number" ? String(beforeValue) : beforeValue === mixed ? "" : "0";
+        after.value = typeof afterValue === "number" ? String(afterValue) : afterValue === mixed ? "" : "0";
         if (block) {
-            const v = block.type === "heading" ? `h${Math.min(4, block.attributes?.level ?? 1)}` : block.type === "list_item" ? (block.attributes?.ordered ? "numbered" : "bullets") : block.type === "quote" ? "quote" : block.type === "code" ? "code-block" : "paragraph";
+            const v = block.type === "heading" ? `h${Math.min(6, block.attributes?.level ?? 1)}` : block.type === "list_item" ? (block.attributes?.ordered ? "numbered" : "bullets") : block.type === "quote" ? "quote" : block.type === "code" ? "code-block" : "paragraph";
             if ([...style.options].some((o) => o.value === v))
                 style.value = v;
         }

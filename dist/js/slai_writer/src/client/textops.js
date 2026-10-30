@@ -71,6 +71,10 @@ export function segments(block) {
                     seg.color = s.color;
                 if (s.background)
                     seg.background = s.background;
+                if (s.font_family)
+                    seg.font_family = s.font_family;
+                if (s.font_size_pt)
+                    seg.font_size_pt = s.font_size_pt;
             }
             else if (s.type === "link" && s.href)
                 seg.href = s.href;

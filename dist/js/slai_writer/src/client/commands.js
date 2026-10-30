@@ -9,6 +9,7 @@ import { signatureGraphicsDialog } from "./sigdialog.js";
 import { addNoteAtSelection } from "./notesapi.js";
 import { citeDialog, footnoteDialog, xrefDialog } from "./panels/sources.js";
 import { pickFile } from "./widgets.js";
+import { paragraphFontDialog } from "./typography.js";
 const EDITING = (ctx) => (ctx.ed.readOnly ? "This document is read-only." : null);
 const needsCaret = (ctx) => EDITING(ctx) ?? (ctx.ed.recallSelection() ? null : "Place the cursor in the text first.");
 const AI_NOTE = "AI is off or unavailable; writing works without it.";
@@ -33,12 +34,15 @@ export const COMMANDS = [
     { id: "subscript", label: "Subscript", group: "Text", keywords: "chemical", shortcut: "Ctrl+,", unavailable: needsCaret, run: (c) => A.toggleFormat(c.ed, "subscript") },
     { id: "inline-code", label: "Code (inline)", group: "Text", icon: "code", keywords: "monospace", unavailable: needsCaret, run: (c) => A.toggleFormat(c.ed, "code") },
     { id: "clear-format", label: "Clear formatting", group: "Text", shortcut: "Ctrl+\\", unavailable: needsCaret, run: (c) => A.clearFormatting(c.ed) },
+    { id: "paragraph-font", label: "Paragraph font settings…", group: "Text", keywords: "font family size typography", unavailable: needsCaret, run: (c) => paragraphFontDialog(c) },
     { id: "link", label: "Link…", group: "Text", icon: "link", keywords: "url hyperlink", shortcut: "Ctrl+K", unavailable: needsCaret, run: (c) => linkDialog(c) },
     /* paragraph */
     { id: "h1", label: "Heading 1", group: "Paragraph", icon: "heading", keywords: "title chapter", shortcut: "Ctrl+Alt+1", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "heading", { level: 1 }) },
     { id: "h2", label: "Heading 2", group: "Paragraph", icon: "heading", keywords: "section", shortcut: "Ctrl+Alt+2", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "heading", { level: 2 }) },
     { id: "h3", label: "Heading 3", group: "Paragraph", icon: "heading", keywords: "subsection", shortcut: "Ctrl+Alt+3", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "heading", { level: 3 }) },
     { id: "h4", label: "Heading 4", group: "Paragraph", icon: "heading", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "heading", { level: 4 }) },
+    { id: "h5", label: "Heading 5", group: "Paragraph", icon: "heading", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "heading", { level: 5 }) },
+    { id: "h6", label: "Heading 6", group: "Paragraph", icon: "heading", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "heading", { level: 6 }) },
     { id: "paragraph", label: "Normal text", group: "Paragraph", icon: "paragraph", keywords: "body plain", shortcut: "Ctrl+Alt+0", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "paragraph") },
     { id: "bullets", label: "Bulleted list", group: "Paragraph", icon: "list", keywords: "unordered", shortcut: "Ctrl+Shift+8", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "list_item", { ordered: false, depth: 0 }) },
     { id: "numbered", label: "Numbered list", group: "Paragraph", icon: "list-ordered", keywords: "ordered", shortcut: "Ctrl+Shift+7", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "list_item", { ordered: true, depth: 0 }) },

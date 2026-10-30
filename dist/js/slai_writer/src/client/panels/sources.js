@@ -159,7 +159,7 @@ export function createSourcesPanel(ctx) {
     const insertDialog = async (kind) => {
         const where = selectField("Insert it", [["cursor", "After the cursor"], ["end", "At the end of the document"], ["start", "At the start of the document"]], kind === "bibliography" ? "end" : "start");
         const only = checkbox("Only sources I have cited", true);
-        const depth = selectField("Headings to include", [["1", "Level 1"], ["2", "Levels 1–2"], ["3", "Levels 1–3"], ["4", "Levels 1–4"]], "3");
+        const depth = selectField("Headings to include", [["1", "Level 1"], ["2", "Levels 1–2"], ["3", "Levels 1–3"], ["4", "Levels 1–4"], ["5", "Levels 1–5"], ["6", "Levels 1–6"]], "3");
         const handle = openDialog({
             title: kind === "bibliography" ? "Insert a reference list" : "Insert a table of contents", size: "narrow",
             body: h("div", { class: "stack" }, where.root, kind === "bibliography" ? only.root : depth.root, h("p", { class: "fine", text: kind === "bibliography" ? "The list is built from each source's own fields. Check it against the real works before you publish." : "A contents list is a snapshot of the headings now. Make it again after you change the outline." })),

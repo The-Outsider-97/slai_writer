@@ -64,6 +64,13 @@ describe("small helpers", () => {
 });
 
 describe("segments", () => {
+  it("keeps inline font family and point size on exactly the selected text", () => {
+    const out = segments({ text: "abcdef", spans: [{ type: "format", start: 1, end: 4, font_family: "Georgia", font_size_pt: 14.5, color: "#112233" }] });
+    assert.deepEqual(out.map((s) => s.text), ["a", "bcd", "ef"]);
+    assert.equal(out[0]?.font_family, undefined);
+    assert.deepEqual([out[1]?.font_family, out[1]?.font_size_pt, out[1]?.color], ["Georgia", 14.5, "#112233"]);
+    assert.equal(out[2]?.font_size_pt, undefined);
+  });
   it("splits text at span boundaries and carries the flags", () => {
     const out = segments({ text: "abcdef", spans: [{ type: "format", start: 1, end: 3, bold: true }, { type: "format", start: 2, end: 5, italic: true }] } as never);
     assert.deepEqual(out.map((s) => s.text), ["a", "b", "c", "de", "f"]);
