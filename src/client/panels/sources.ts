@@ -143,7 +143,7 @@ export function createSourcesPanel(ctx: DocCtx): Panel {
   const insertDialog = async (kind: "bibliography" | "contents"): Promise<void> => {
     const where = selectField("Insert it", [["cursor", "After the cursor"], ["end", "At the end of the document"], ["start", "At the start of the document"]], kind === "bibliography" ? "end" : "start");
     const only = checkbox("Only sources I have cited", true);
-    const depth = selectField("Headings to include", [["1", "Level 1"], ["2", "Levels 1–2"], ["3", "Levels 1–3"], ["4", "Levels 1–4"]], "3");
+    const depth = selectField("Headings to include", [["1", "Level 1"], ["2", "Levels 1–2"], ["3", "Levels 1–3"], ["4", "Levels 1–4"], ["5", "Levels 1–5"], ["6", "Levels 1–6"]], "3");
     const handle = openDialog<true>({
       title: kind === "bibliography" ? "Insert a reference list" : "Insert a table of contents", size: "narrow",
       body: h("div", { class: "stack" }, where.root, kind === "bibliography" ? only.root : depth.root,
