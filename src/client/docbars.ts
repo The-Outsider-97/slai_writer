@@ -224,7 +224,7 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     return b;
   };
   const style = h("select", { attrs: { "aria-label": "Paragraph style" } },
-    [["paragraph", "Normal text"], ["h1", "Heading 1"], ["h2", "Heading 2"], ["h3", "Heading 3"], ["h4", "Heading 4"], ["quote", "Quote"], ["code-block", "Code block"], ["bullets", "Bulleted list"], ["numbered", "Numbered list"]].map(([v, t]) => h("option", { value: v as string, text: t as string })));
+    [["paragraph", "Normal text"], ["h1", "Heading 1"], ["h2", "Heading 2"], ["h3", "Heading 3"], ["h4", "Heading 4"], ["h5", "Heading 5"], ["h6", "Heading 6"], ["quote", "Quote"], ["code-block", "Code block"], ["bullets", "Bulleted list"], ["numbered", "Numbered list"]].map(([v, t]) => h("option", { value: v as string, text: t as string })));
   style.addEventListener("change", () => { const id = style.value; ed.refocus(); void Promise.resolve(cmd(id).run(ctx)); });
   const colour = (key: "color" | "background", label: string, value: string): HTMLInputElement => {
     const i = h("input", { type: "color", value, attrs: { "aria-label": label, title: label } });
@@ -233,7 +233,7 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
   };
   const sep = (): HTMLElement => h("span", { class: "sep", attrs: { "aria-hidden": "true" } });
   const el = h("div", { class: "bar", attrs: { role: "toolbar", "aria-label": "Formatting" } },
-    style, sep(),
+    style, tool("paragraph-font", "Paragraph font settings", "heading"), sep(),
     tool("bold", "Bold", "bold", true), tool("italic", "Italic", "italic", true), tool("underline", "Underline", "underline", true), tool("strike", "Strikethrough", "strike", true), tool("link", "Link", "link"), sep(),
     colour("color", "Text colour", "#000000"), colour("background", "Highlight colour", "#fff200"), sep(),
     tool("align-left", "Align left", "align-left"), tool("align-center", "Align centre", "align-center"), tool("align-right", "Align right", "align-right"), tool("indent", "Indent", "indent"), tool("outdent", "Outdent", "outdent"), sep(),
@@ -252,7 +252,7 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
       btn.setAttribute("aria-pressed", String(on));
     }
     if (block) {
-      const v = block.type === "heading" ? `h${Math.min(4, block.attributes?.level ?? 1)}` : block.type === "list_item" ? (block.attributes?.ordered ? "numbered" : "bullets") : block.type === "quote" ? "quote" : block.type === "code" ? "code-block" : "paragraph";
+      const v = block.type === "heading" ? `h${Math.min(6, block.attributes?.level ?? 1)}` : block.type === "list_item" ? (block.attributes?.ordered ? "numbered" : "bullets") : block.type === "quote" ? "quote" : block.type === "code" ? "code-block" : "paragraph";
       if ([...style.options].some((o) => o.value === v)) style.value = v;
     }
     const dis = ed.readOnly;
