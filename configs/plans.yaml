@@ -1,1 +1,77 @@
-
+# SLAI Writer plans and entitlements (values from the main specification, page 4: "Plans & Pricing").
+# Prices and limits are launch hypotheses and are meant to be edited here, not in code. Prices are base prices in `currency`, per user and
+# month, excluding VAT (checkout must add it). Nothing in this file moves money: there is no payment provider in SLAI Writer, so a paid
+# plan can only become active through a real billing integration (see docs/OPERATIONS.md); the app never simulates a purchase.
+currency: EUR
+enforcement: strict          # strict: features follow the account's plan. off: nothing is limited on this computer (self-hosted / development).
+yearly_discount_percent: 10
+student_discount_percent: 30 # provisional: eligibility and stacking with other offers are undecided, so nothing is promised
+vat_note: "Displayed base prices exclude applicable VAT, which checkout must include."
+plans:
+  guest:
+    name: Guest
+    monthly: 0
+    local_documents: unlimited
+    cloud_gb: 0
+    hosted_credits: 0
+    local_ai: "Available if compatible model/device"
+    collaboration: "Share and read"
+    live_editors: 0
+    embed_level: view
+    embed: "Safe viewing and approved form use"
+    workspace: "-"
+    support: "Docs"
+  essential:
+    name: Essential
+    monthly: 5
+    local_documents: unlimited
+    cloud_gb: 2
+    hosted_credits: 25
+    local_ai: "Same"
+    collaboration: "Share/read/comment; 2 live editors/document"
+    live_editors: 2
+    embed_level: view
+    embed: "Safe viewing and approved form use"
+    workspace: "-"
+    support: "Email, target 3 business days"
+  creator:
+    name: Creator
+    monthly: 10
+    recommended: true
+    local_documents: unlimited
+    cloud_gb: 20
+    hosted_credits: 150
+    local_ai: "Same"
+    collaboration: "Up to 5 live editors/document"
+    live_editors: 5
+    embed_level: declarative
+    embed: "Declarative templates"
+    workspace: "-"
+    support: "Email, target 3 business days"
+  professional:
+    name: Professional
+    monthly: 20
+    local_documents: unlimited
+    cloud_gb: 100
+    hosted_credits: 500
+    local_ai: "Same"
+    collaboration: "Up to 10 live editors/document"
+    live_editors: 10
+    embed_level: advanced
+    embed: "Advanced declarations and approved transforms"
+    workspace: "Personal projects"
+    support: "Email, target 3 business days"
+  workspace:
+    name: Workspace
+    monthly: 30                # per paid user per month (the main specification's price; the concept document's EUR 25 is superseded)
+    per_seat: true
+    local_documents: unlimited
+    cloud_gb: 100              # per paid seat, pooled
+    hosted_credits: 1000       # per paid user, pooled
+    local_ai: "Same"
+    collaboration: "Up to 25; workspace roles and reviews"
+    live_editors: 25
+    embed_level: team
+    embed: "Team component library and policies"
+    workspace: "Membership, role and retention admin"
+    support: "Admin support, target 1 business day"

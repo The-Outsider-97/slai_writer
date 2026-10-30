@@ -1,0 +1,30 @@
+# SLAI Writer settings, read through SLAI's ConfigRepository. Every value is optional; the numbers below are the defaults.
+# Personal choices (theme, text size, autosave, cursors, spelling ...) are not here: they are saved from Settings and the toolbar.
+app:
+  port: 8770                  # where Writer listens (127.0.0.1 only)
+  max_request_bytes: 8388608  # largest JSON request body the server accepts (the shared server caps JSON at 8 MiB)
+  max_upload_bytes: 33554432  # largest file Writer accepts for import / open-by-upload / images (32 MiB)
+  backup_every_days: 7        # automatic database backup when the newest one is older than this (0 turns it off)
+  backup_keep: 8              # how many automatic backups to keep
+  recovery_seconds: 3         # how soon after an edit a crash-recovery copy of unsaved work is written
+  autosave_default_seconds: 60
+  library_root: ""            # where new documents go by default; empty = Documents/SLAI Writer
+accounts:
+  session_hours: 12           # a session without "Remember me"
+  remember_days: 30           # a session with "Remember me"
+  device_trust_days: 30       # how long a trusted device skips the authenticator code (page 3: initially 30 days)
+  email_code_minutes: 5       # life of the 25-character sign-up code and of password-reset codes
+  resend_seconds: 30          # minimum time between "Resend code"
+  max_attempts: 5             # wrong codes or passwords before a lockout
+  lockout_minutes: 15
+  recovery_delay_hours: 24    # waiting time of "Lost authenticator? Start secure recovery"
+  min_password_chars: 10
+mail:
+  host: ""                    # SMTP server for verification and recovery e-mail. Empty = e-mail is not configured (sign-up is then unavailable)
+  port: 587
+  username: ""                # the password is read from the SLAI_WRITER_SMTP_PASSWORD environment variable, never from this file
+  sender: ""                  # the From address
+  starttls: true
+signatures:
+  max_distinct: 2             # page 1: at most 2 distinct signatures ...
+  max_samples: 20             # ... and at most 20 uploads / samples in total (page 6 says these are not security requirements)

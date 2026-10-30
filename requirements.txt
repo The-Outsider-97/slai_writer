@@ -1,1 +1,16 @@
-
+# SLAI Writer: Python dependencies beyond the standard library and the SLAI checkout. Python 3.10 or newer.
+# The versions in the comments are the ones the test suites were run with; older versions were not tried.
+#
+# Needed for the core features (documents, accounts, signing):
+cryptography          # tested with 50.0.1 : AES-GCM sealing of secrets at rest; Ed25519 document signing
+Pillow                # tested with 12.3.0 : image inspection (pictures, signature graphics, cursors, QR image)
+reportlab             # tested with 5.0.1  : the QR encoder for authenticator enrolment; the PDF writer used by Documaster
+#
+# Needed only by the feature named. Writer says exactly what is missing when one is absent (503 dependency_missing):
+pypdfium2             # tested with 5.13.0 : print preview (rasterises the real PDF)
+pypdf                 # tested with 6.17.0 : PDF preflight (page count, fonts not embedded)
+#
+# Not on PyPI, part of the SLAI checkout:
+#   applications/Documaster   DOCX/ODT/RTF/HTML/Markdown/PDF import and export
+#   src/agents/language       spell checker, grammar and the AI Assistant (used only when the person switches AI on)
+# Optional: tkinter lets Writer show the operating system's file dialog; without it Writer uses its own in-page chooser.
