@@ -1,0 +1,69 @@
+/* The start-up and account screens, as drawn on page 1 of SLAI Writer (main): a soft card with a long shadow, the folder logo standing on its top edge,
+   the design's dark icon tiles beside light fields, dark rounded Login/Signup buttons, and Times-style type. Proportions are the drawing's, in rem. */
+.auth-shell { font-family: "Times New Roman", Times, "Liberation Serif", "Nimbus Roman", "Tinos", serif; background: light-dark(#fff, #1d2026); }
+.auth-shell .titlebar { background: light-dark(#fff, #1d2026); border-bottom: 1px solid light-dark(#1a1a1a, #3a3d44); }
+.auth-shell .titlebar .title { font-weight: 400; font-size: .9rem; }
+.auth-shell .statusbar { background: light-dark(#fff, #1d2026); border-top: 1px solid light-dark(#1a1a1a, #3a3d44); justify-content: center; }
+.auth-shell .btn, .auth-shell input, .auth-shell select, .auth-shell textarea, .auth-shell button { font-family: inherit; }
+
+.auth-shell .auth { padding: 6rem 1rem 3rem; place-items: start center; }
+.auth-shell .auth-card {
+  position: relative; width: min(46rem, 100%); background: light-dark(#fcfcfc, #262a31); border: 0; border-radius: 1.5rem; gap: .35rem;
+  box-shadow: 1.1rem 1.3rem 1.9rem light-dark(rgba(0, 0, 0, .27), rgba(0, 0, 0, .55));
+  padding: 6.2rem clamp(1.2rem, 11.7%, 5.4rem) 3.4rem;
+}
+.auth-shell .auth-logo { position: absolute; top: -4.2rem; left: 50%; width: 8.1rem; height: 8.1rem; margin: 0; transform: translateX(-47.7%); pointer-events: none; }
+.auth-shell .auth-card h2 { font-weight: 400; font-size: 1.7rem; margin: .2rem 0 .6rem; }
+.auth-shell .auth-card p, .auth-shell .auth-card label { color: inherit; }
+
+/* the three rows: icon tile + field */
+.auth-shell .auth-form { gap: 1.5rem; }
+.auth-shell .auth-field { display: flex; align-items: stretch; gap: 0; }
+.auth-shell .auth-tile { width: 3.85rem; height: 3.85rem; flex: none; display: block; border-radius: 0; }
+.auth-shell .auth-field .field { flex: 1 1 auto; min-width: 0; display: block; }
+.auth-shell .auth-field .field > label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.auth-shell .auth-field input {
+  width: 100%; height: 3.85rem; box-sizing: border-box; border: 0; border-radius: 0; padding: 0 1.2rem; margin: 0; min-height: 0;
+  background: light-dark(#f6f6f6, #353941); color: light-dark(#333, #f1f1f1); font-size: 1.9rem; line-height: 1;
+}
+.auth-shell .auth-field input::placeholder { color: light-dark(#454545, #b9bdc6); opacity: 1; }
+.auth-shell .auth-field input:focus-visible { outline: 2px solid light-dark(#1a1a1a, #e4c93a); outline-offset: 1px; }
+
+/* remember me / forgot password */
+.auth-shell .auth-row { margin: -.55rem 0 0; padding: 0 .1rem 0 2.6rem; }
+.auth-shell .check { gap: .35rem; font-size: .82rem; }
+.auth-shell .check input { appearance: none; -webkit-appearance: none; width: 1.3rem; height: 1.3rem; margin: 0; border-radius: .28rem; background: light-dark(#fff, #353941) center / contain no-repeat; border: 1.5px solid light-dark(#333, #8b8f99); }
+.auth-shell .check input:checked { background-color: #333; border-color: #333; background-image: url(/assets/auth-check.png); background-size: 78%; }
+.auth-shell .check input:focus-visible { outline: 2px solid light-dark(#1a1a1a, #e4c93a); outline-offset: 2px; }
+.auth-shell .linkbtn { font-family: inherit; font-size: .82rem; text-decoration: none; color: light-dark(#0b2a6b, #9db8ff); padding: 0; min-height: 0; }
+.auth-shell .linkbtn:hover { text-decoration: underline; }
+
+/* Login / Signup */
+.auth-shell .auth-buttons { gap: .45rem; margin: .1rem 0 0; }
+.auth-shell .auth-buttons .btn {
+  min-width: 0; width: 12.7rem; height: 3.35rem; border: 0; border-radius: 1.6rem; background: light-dark(#333, #4b4f58); color: #fff; font-size: 1.9rem; font-weight: 400; box-shadow: none; padding: 0;
+  transition: background-color .2s ease, transform .15s ease;
+}
+.auth-shell .auth-buttons .btn:hover { background: light-dark(#4a4a4a, #5d626d); }
+.auth-shell .auth-buttons .btn:active { transform: scale(.985); }
+.auth-shell .auth-buttons .btn:focus-visible { outline: 2px solid light-dark(#1a1a1a, #e4c93a); outline-offset: 3px; }
+.auth-shell .auth-form > .fine { margin: 0; padding-left: 2.6rem; font-size: .8rem; color: inherit; }
+
+/* signature box and guest link */
+.auth-shell .signature-box { position: relative; background: light-dark(#f6f6f6, #353941); border-radius: 0; padding: 1rem 1.2rem; margin-top: .3rem; min-height: 8.1rem; box-sizing: border-box; display: block; }
+.auth-shell .signature-box > strong { display: block; font-weight: 400; font-size: 1.9rem; color: light-dark(#333, #f1f1f1); line-height: 1.2; }
+.auth-shell .signature-box > .fine { margin: .2rem 0 0; font-size: .72rem; max-width: 26rem; color: light-dark(#555, #b9bdc6); }
+.auth-shell .upload-sig { position: absolute; right: 1.1rem; bottom: .9rem; display: inline-flex; align-items: center; gap: .3rem; color: light-dark(#333, #e6e8ee); font-size: .82rem; }
+.auth-shell .upload-sig .clip { width: 1.15rem; height: 1rem; background: currentColor; -webkit-mask: url(/assets/auth-clip.png) center / contain no-repeat; mask: url(/assets/auth-clip.png) center / contain no-repeat; display: inline-block; }
+.auth-shell .guest { color: #c0431a; font-size: .85rem; padding: .35rem .3rem; text-decoration: none; justify-self: start; }
+.auth-shell .guest:hover { text-decoration: underline; }
+.auth-shell .auth-notes { margin-top: .4rem; }
+.auth-shell .auth-notes .fine { font-size: .78rem; color: light-dark(#555, #b9bdc6); }
+
+@media (max-width: 34rem) {
+  .auth-shell .auth { padding-top: 5rem; }
+  .auth-shell .auth-card { padding-top: 5rem; }
+  .auth-shell .auth-tile, .auth-shell .auth-field input { height: 3.1rem; width: auto; }
+  .auth-shell .auth-tile { width: 3.1rem; }
+  .auth-shell .auth-field input, .auth-shell .auth-buttons .btn, .auth-shell .signature-box > strong { font-size: 1.45rem; }
+}
