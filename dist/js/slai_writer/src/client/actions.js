@@ -392,21 +392,48 @@ export async function toggleFormat(ed, flag) {
     const ops = ranges.map((r) => (all ? { op: "format", block: r.block.id, start: r.from, end: r.to, unset: [flag] } : { op: "format", block: r.block.id, start: r.from, end: r.to, set: { [flag]: true } }));
     await guarded(ed, async () => { await ed.op(ops.length === 1 ? ops[0] : { op: "batch", ops, label: "formatting" }); ed.restoreSelection(sel); });
 }
-export async function setColour(ed, key, value) {
+export async function setInlineProperty(ed, key, value) {
     const sel = ed.readSelection();
-    if (!sel || sel.collapsed || ed.readOnly) {
-        toast("Select some text first.", { kind: "info" });
+    if (!sel || ed.readOnly)
+        return;
+    if (sel.collapsed) {
+        ed.pendingInline.set(key, value);
+        announce(`${key.replaceAll("_", " ")} ${value === null ? "reset to default" : "set"} for the next text you type`);
         return;
     }
     const ops = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => (value ? { op: "format", block: r.block.id, start: r.from, end: r.to, set: { [key]: value } } : { op: "format", block: r.block.id, start: r.from, end: r.to, unset: [key] }));
     if (ops.length)
-        await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "colour" }); ed.restoreSelection(sel); });
+        await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "inline formatting" }); ed.restoreSelection(sel); });
+}
+export async function setColour(ed, key, value) {
+    await setInlineProperty(ed, key, value);
+}
+/** Change the real text, not a CSS presentation effect; the backend remaps format/link spans. */
+export async function transformCase(ed, mode) {
+    const sel = ed.readSelection();
+    if (!sel || sel.collapsed || ed.readOnly) {
+        toast("Select text to change its case.", { kind: "info" });
+        return;
+    }
+    const ranges = textRanges(ed, sel).filter((r) => r.to > r.from);
+    if (!ranges.length)
+        return;
+    await guarded(ed, async () => {
+        const oldEnd = ed.model.block(sel.end.block)?.text.length ?? 0;
+        // Python string offsets count Unicode code points; browser selections count UTF-16 code units.
+        const codepoints = (source, offset) => Array.from(source.slice(0, offset)).length;
+        const ops = ranges.map((r) => ({ op: "case", block: r.block.id,
+            start: codepoints(r.block.text, r.from), end: codepoints(r.block.text, r.to), mode }));
+        await ed.op({ op: "batch", ops, label: mode === "upper" ? "uppercase" : "lowercase" });
+        const newEnd = ed.model.block(sel.end.block)?.text.length ?? oldEnd;
+        ed.restoreSelection({ ...sel, end: { ...sel.end, offset: sel.end.offset + newEnd - oldEnd } });
+    });
 }
 export async function clearFormatting(ed) {
     const sel = ed.readSelection();
     if (!sel || sel.collapsed || ed.readOnly)
         return;
-    const ops = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => ({ op: "format", block: r.block.id, start: r.from, end: r.to, unset: [...FLAGS, "color", "background"] }));
+    const ops = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => ({ op: "format", block: r.block.id, start: r.from, end: r.to, unset: [...FLAGS, "color", "background", "font_family", "font_size_pt"] }));
     if (ops.length)
         await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "clear formatting" }); ed.restoreSelection(sel); });
 }
@@ -460,12 +487,18 @@ export async function setParagraphStyle(ed, name) {
     await guarded(ed, async () => { await ed.op({ op: "batch", ops: ids.map((id) => ({ op: "block_set", block: id, style: name })), label: "paragraph style" }); ed.restoreSelection(sel); });
 }
 export async function indent(ed, delta) {
-    const ids = selectedTextIds(ed).filter((id) => ed.model.block(id)?.type === "list_item");
+    const ids = selectedTextIds(ed);
     if (!ids.length)
         return false;
     const sel = ed.readSelection();
     await guarded(ed, async () => {
-        const ops = ids.map((id) => ({ op: "block_set", block: id, attributes: { depth: Math.max(0, Math.min(8, (ed.model.block(id)?.attributes?.depth ?? 0) + delta)) } }));
+        const ops = ids.map((id) => {
+            const block = ed.model.block(id);
+            if (block?.type === "list_item")
+                return { op: "block_set", block: id, attributes: { depth: Math.max(0, Math.min(8, (block.attributes?.depth ?? 0) + delta)) } };
+            const current = Number(block?.attributes?.indent_mm ?? 0);
+            return { op: "block_set", block: id, attributes: { indent_mm: Math.max(0, Math.min(1000, current + delta * 5)) } };
+        });
         await ed.op({ op: "batch", ops, label: delta > 0 ? "indent" : "outdent" });
         ed.restoreSelection(sel);
     });

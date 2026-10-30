@@ -25,8 +25,9 @@ import { createSourcesPanel } from "../panels/sources.js";
 import type { DocState } from "../types.js";
 import { button, fill, notice } from "../widgets.js";
 
-const BAR_KEY = "writer.formatBar";
-function barPref(): boolean { try { return window.localStorage.getItem(BAR_KEY) === "1"; } catch { return false; } }
+// A new ribbon is visible on documents by default, independently of the old optional-format-bar preference.
+const BAR_KEY = "writer.documentRibbon";
+function barPref(): boolean { try { return window.localStorage.getItem(BAR_KEY) !== "0"; } catch { return true; } }
 function setBarPref(on: boolean): void { try { window.localStorage.setItem(BAR_KEY, on ? "1" : "0"); } catch { /* a per-viewer convenience only */ } }
 
 export async function docScreen(app: App, route: Route): Promise<Screen> {

@@ -16,7 +16,7 @@ export interface Span {
   type: "format" | "link" | "style" | "ref" | "xref" | "equation" | "image";
   start: number; end: number;
   bold?: boolean; italic?: boolean; underline?: boolean; strike?: boolean; code?: boolean; superscript?: boolean; subscript?: boolean;
-  color?: string; background?: string;
+  color?: string; background?: string; font_family?: string; font_size_pt?: number;
   href?: string; style?: string; ref?: string; target?: string;
   equation?: EquationData; figure?: FigureData;
 }

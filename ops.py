@@ -9,6 +9,7 @@ of them. The module knows the document model (blocks, styles, sections, referenc
 from __future__ import annotations
 
 import copy
+import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ WRITER_EXT = "slai.writer"
 EXT_KEYS = ("guides", "background", "layers", "layer_of", "view", "dictionary", "spell_ignore", "signature_marks", "locks", "versions", "source_status")
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9 _.-]{0,63}$")
 _COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
+_FONT_FAMILY = re.compile(r"^[^\x00-\x1f\x7f{};<>\\\"'`]{1,100}$")
 DEFAULT_SECTION = "s1"
 
 
@@ -299,12 +301,58 @@ def op_format(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
         for key in ("color", "background"):
             if key in set_props and (not isinstance(set_props[key], str) or not _COLOUR.fullmatch(set_props[key])):
                 raise OpError(f"'{key}' must be a #rrggbb colour")
+        if "font_family" in set_props and (not isinstance(set_props["font_family"], str)
+                                           or not _FONT_FAMILY.fullmatch(set_props["font_family"])):
+            raise OpError("font_family must be a safe font family name")
+        if "font_size_pt" in set_props:
+            size = set_props["font_size_pt"]
+            if type(size) not in (int, float) or not math.isfinite(size) or not 4 <= size <= 400:
+                raise OpError("font_size_pt must be between 4 and 400 points")
         for key, value in set_props.items():
             if key in tm.FORMAT_FLAGS and type(value) is not bool:
                 raise OpError(f"'{key}' must be true or false")
         tm.apply_format(block, start, end, set_props, unset)
     except tm.TextError as exc:
         raise OpError(str(exc)) from exc
+    return {}
+
+
+@handler("case")
+def op_case(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
+    """Case-convert selected Unicode text while remapping every inline span boundary."""
+    block = _need_text_block(tr, op.get("block"))
+    start, end = _i(op, "start"), _i(op, "end")
+    mode = _s(op, "mode")
+    if mode not in ("upper", "lower"):
+        raise OpError("Case mode must be upper or lower")
+    try:
+        tm.check_range(block, start, end)
+    except tm.TextError as exc:
+        raise OpError(str(exc)) from exc
+    source = block["text"][start:end]
+    convert = str.upper if mode == "upper" else str.lower
+    result = convert(source)
+    if len(block["text"]) - len(source) + len(result) > MAX_BLOCK_CHARS:
+        raise LimitExceeded("That block would become longer than the format allows")
+    if result == source:
+        return {}
+    offsets = [0]
+    for char in source:
+        offsets.append(offsets[-1] + len(convert(char)))
+    delta = len(result) - len(source)
+
+    def map_position(position: int) -> int:
+        if position <= start:
+            return position
+        if position >= end:
+            return position + delta
+        return start + offsets[position - start]
+
+    for span in block.get("spans", ()):
+        span["start"] = map_position(span["start"])
+        span["end"] = map_position(span["end"])
+    block["text"] = block["text"][:start] + result + block["text"][end:]
+    tm.normalise(block)
     return {}
 
 

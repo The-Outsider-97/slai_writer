@@ -18,12 +18,13 @@ import { createProofPanel } from "../panels/proof.js";
 import { createRightPanel } from "../panels/right.js";
 import { createSourcesPanel } from "../panels/sources.js";
 import { button, fill, notice } from "../widgets.js";
-const BAR_KEY = "writer.formatBar";
+// A new ribbon is visible on documents by default, independently of the old optional-format-bar preference.
+const BAR_KEY = "writer.documentRibbon";
 function barPref() { try {
-    return window.localStorage.getItem(BAR_KEY) === "1";
+    return window.localStorage.getItem(BAR_KEY) !== "0";
 }
 catch {
-    return false;
+    return true;
 } }
 function setBarPref(on) { try {
     window.localStorage.setItem(BAR_KEY, on ? "1" : "0");

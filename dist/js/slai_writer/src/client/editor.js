@@ -39,6 +39,8 @@ export class Editor {
     stale = false;
     /** Formatting switched on with the caret in place (Ctrl+B with nothing selected): applied to the next text typed. */
     pendingFormat = new Set();
+    /** Inline typing attributes for a collapsed selection (same operation stream as bold/italic). */
+    pendingInline = new Map();
     constructor(state, hooks) {
         this.hooks = hooks;
         this.model = new DocModel(state);
@@ -338,10 +340,18 @@ export class Editor {
                 const edit = diffText(was, now, caret && caret.start.block === id && caret.collapsed ? caret.start.offset : undefined);
                 if (edit) {
                     void this.queue.send({ op: "text", block: id, start: edit.start, end: edit.end, insert: edit.insert }).catch((e) => this.failed(e));
-                    if (this.pendingFormat.size && edit.insert) {
+                    if ((this.pendingFormat.size || this.pendingInline.size) && edit.insert) {
                         const set = Object.fromEntries([...this.pendingFormat].map((f) => [f, true]));
+                        const unset = [];
+                        for (const [key, value] of this.pendingInline) {
+                            if (value === null)
+                                unset.push(key);
+                            else
+                                set[key] = value;
+                        }
                         this.pendingFormat.clear();
-                        void this.queue.send({ op: "format", block: id, start: edit.start, end: edit.start + edit.insert.length, set }).catch((e) => this.failed(e));
+                        this.pendingInline.clear();
+                        void this.queue.send({ op: "format", block: id, start: edit.start, end: edit.start + edit.insert.length, set, unset }).catch((e) => this.failed(e));
                     }
                 }
             }
