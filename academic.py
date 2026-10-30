@@ -23,6 +23,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
 from typing import Any, Callable
 
 from ..tools.errors import BadRequest, DependencyMissing, NotFound
@@ -37,6 +38,7 @@ DOI = re.compile(r"^10\.\d{4,9}/\S{1,180}$")
 FOOTNOTE_ANCHOR = "​"
 CROSSREF = "https://api.crossref.org/works/"
 _FIELDS = ("key", "title", "container", "publisher", "volume", "issue", "pages", "note", "authors", "year", "doi", "url", "accessed")
+TOC_EXTENSION = "slai.sldc.toc"
 
 
 def _statuses(doc: dict[str, Any]) -> dict[str, Any]:
@@ -296,21 +298,211 @@ class Academic:
             prev = p["result"]["block"]
         return {"heading": head, "entries": len(entries), "warnings": warnings, "state": session.state()}
 
-    def contents(self, session: DocumentSession, after: str | None, title: str = "Contents", depth: int = 3) -> dict[str, Any]:
-        """A table of contents made from the headings as they are now, with links to them. It is a snapshot: regenerate it after the outline changes."""
-        headings = [h for h in session.outline() if h["level"] <= depth and h["text"].strip()]
+    def contents(self, session: DocumentSession, after: str | None, title: str = "Contents", depth: int = 4) -> dict[str, Any]:
+        """
+        Insert a managed, refreshable TOC.
+
+        The operation is performed as one undoable
+        document transaction.
+
+        TOC metadata is preserved as a namespaced
+        SLDC block extension.
+        """
+
+        with session.lock:
+            return self._contents(session, after, title, depth, toc_id=secrets.token_hex(12))
+
+    def refresh_contents(self, session: DocumentSession, toc_id: str) -> dict[str, Any]:
+        """
+        Refresh one existing managed TOC.
+
+        Only blocks belonging to this TOC are replaced.
+        Unrelated document content is preserved.
+        """
+
+        with session.lock:
+            blocks = session.doc["blocks"]
+
+            owned = [
+                (index, block)
+                for index, block in enumerate(blocks)
+                if block.get(
+                    "extensions", {}
+                ).get(
+                    TOC_EXTENSION, {}
+                ).get("id") == toc_id
+            ]
+
+            titles = [
+                (index, block)
+                for index, block in owned
+                if block["extensions"][
+                    TOC_EXTENSION
+                ].get("role") == "title"
+            ]
+
+            if len(titles) != 1 or not owned:
+                raise BadRequest("This table of contents no longer exists or has invalid metadata.")
+
+            index, title_block = titles[0]
+            settings = title_block["extensions"][TOC_EXTENSION]
+
+            after = (
+                blocks[index - 1]["id"]
+                if index
+                else None
+            )
+
+            return self._contents(
+                session,
+                after,
+                title_block["text"],
+                settings["depth"],
+                toc_id=toc_id,
+                remove=[block["id"] for _, block in owned],
+            )
+
+
+    def _contents(
+        self,
+        session: DocumentSession,
+        after: str | None,
+        title: str,
+        depth: int,
+        toc_id: str,
+        remove: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Build and apply a managed TOC transaction.
+
+        The document's semantic headings are authoritative.
+
+        Existing generated TOC content is excluded from
+        heading collection.
+
+        All changes are applied through the existing
+        document operation system.
+        """
+
+        if (
+            not isinstance(depth, int)
+            or not 1 <= depth <= 6
+        ):
+            raise BadRequest("TOC depth must be between 1 and 6.")
+
+        generated_ids = {
+            block["id"]
+            for block in session.doc["blocks"]
+            if block.get("extensions", {}).get(TOC_EXTENSION)
+        }
+
+        headings = [
+            heading
+            for heading in session.outline()
+            if (
+                heading["level"] <= depth
+                and heading["text"].strip()
+                and heading["block"] not in generated_ids
+            )
+        ]
+
         if not headings:
             raise BadRequest("There are no headings to list yet.")
-        head = session.apply({"op": "block_insert", "after": after, "block": {"type": "heading", "text": title, "attributes": {"level": 1}}}, None)["result"]["block"]
+
+        if (
+            len(headings) > 4998
+            or (remove and len(remove) > 5000)
+        ):
+            raise BadRequest("This document has too many headings for one TOC update.")
+
+        if remove and after in remove:
+            raise BadRequest("Cannot replace a TOC with an invalid insertion anchor.")
+
+        ops: list[dict[str, Any]] = []
+        if remove:
+            ops.append({
+                "op": "block_delete",
+                "blocks": remove,
+            })
+
+        head = "toc_" + secrets.token_hex(12)
+
+        ops.append({
+            "op": "block_insert",
+            "after": after,
+            "block": {
+                "id": head,
+                "type": "paragraph",
+                "text": title,
+                "extensions": {
+                    TOC_EXTENSION: {
+                        "id": toc_id,
+                        "role": "title",
+                        "depth": depth,
+                    },
+                },
+            },
+        })
+
         prev = head
-        for h in headings:
-            label = ("  " * (h["level"] - 1)) + h["text"]
-            p = session.apply({"op": "block_insert", "after": prev, "block": {"type": "list_item", "text": label.lstrip(),
-                                                                                 "attributes": {"level": h["level"]}}}, None)
-            prev = p["result"]["block"]
-            session.apply({"op": "span", "block": prev, "start": 0, "end": len(label.lstrip()), "kind": "xref", "target": h["block"]}, None)
-        return {"heading": head, "entries": len(headings), "generatedAtRevision": session.revision_no,
-                "note": "This list was made from the headings at this moment. Make it again after you change the outline.", "state": session.state()}
+
+        for heading in headings:
+            label = heading["text"].strip()
+
+            new_id = (
+                "toc_" + secrets.token_hex(12)
+            )
+
+            ops.append({
+                "op": "block_insert",
+                "after": prev,
+                "block": {
+                    "id": new_id,
+                    "type": "list_item",
+                    "text": label,
+                    "attributes": {
+                        "ordered": False,
+                        "depth": heading["level"] - 1,
+                    },
+                    "spans": [{
+                        "type": "xref",
+                        "start": 0,
+                        "end": len(label),
+                        "target": heading["block"],
+                    }],
+                    "extensions": {
+                        TOC_EXTENSION: {
+                            "id": toc_id,
+                            "role": "entry",
+                            "heading": heading["block"],
+                        },
+                    },
+                },
+            })
+
+            prev = new_id
+
+        session.apply({
+            "op": "batch",
+            "ops": ops,
+            "label": (
+                "refresh contents"
+                if remove
+                else "insert contents"
+            ),
+        }, None)
+
+        return {
+            "heading": head,
+            "tocId": toc_id,
+            "entries": len(headings),
+            "generatedAtRevision": session.revision_no,
+            "note": (
+                "Use Update contents after changing "
+                "document headings."
+            ),
+            "state": session.state(),
+        }
 
     def cross_reference(self, session: DocumentSession, block_id: str, start: int, end: int, target: str) -> dict[str, Any]:
         return session.apply({"op": "span", "block": block_id, "start": start, "end": end, "kind": "xref", "target": target}, None)

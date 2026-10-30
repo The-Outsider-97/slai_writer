@@ -289,6 +289,12 @@ def contents(app, req: Request):
                                  text(body, "title", required=False, max_len=80, default="Contents") or "Contents", whole(body, "depth", low=1, high=6, default=3) or 3)
 
 
+@router.route("POST", "/api/docs/{sid}/contents/refresh")
+def refresh_contents(app, req: Request):
+    body = req.json()
+    return app.academic.refresh_contents(session_of(app, req), text(body, "tocId", max_len=24))
+
+
 @router.route("POST", "/api/docs/{sid}/xref")
 def xref(app, req: Request):
     body = req.json()
