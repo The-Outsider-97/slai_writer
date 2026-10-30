@@ -420,7 +420,10 @@ export async function transformCase(ed, mode) {
         return;
     await guarded(ed, async () => {
         const oldEnd = ed.model.block(sel.end.block)?.text.length ?? 0;
-        const ops = ranges.map((r) => ({ op: "case", block: r.block.id, start: r.from, end: r.to, mode }));
+        // Python string offsets count Unicode code points; browser selections count UTF-16 code units.
+        const codepoints = (source, offset) => Array.from(source.slice(0, offset)).length;
+        const ops = ranges.map((r) => ({ op: "case", block: r.block.id,
+            start: codepoints(r.block.text, r.from), end: codepoints(r.block.text, r.to), mode }));
         await ed.op({ op: "batch", ops, label: mode === "upper" ? "uppercase" : "lowercase" });
         const newEnd = ed.model.block(sel.end.block)?.text.length ?? oldEnd;
         ed.restoreSelection({ ...sel, end: { ...sel.end, offset: sel.end.offset + newEnd - oldEnd } });
