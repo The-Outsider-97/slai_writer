@@ -88,8 +88,10 @@ export function createRightPanel(ctx: DocCtx): RightPanel {
 
     /* background */
     const colour = ed.model.ext.background?.color;
+    const chooseBackground = button("Choose colour…", () => backgroundDialog(ctx), "", "palette");
+    chooseBackground.disabled = ed.readOnly;
     fresh(bgBox, h("p", {}, h("span", { class: "swatch", css: { background: colour ?? "#ffffff" }, attrs: { "aria-hidden": "true" } }), ` ${colour ? colour.toUpperCase() : "White (default)"}`),
-      button("Change colour…", () => backgroundDialog(ctx), "", "palette"));
+      chooseBackground, h("p", { class: "fine", text: "Choose a preset or enter an exact RGB hex colour." }));
 
     /* illustrations */
     const figures = ed.model.list().filter((b) => b.type === "figure");

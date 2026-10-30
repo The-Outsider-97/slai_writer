@@ -56,6 +56,20 @@ export function installInput(ed: Editor): () => void {
     busy = true;
     running = drain();
   };
+  /** ClipboardEvent is the authoritative source of pasted text. Chromium and Firefox
+   * may expose no DataTransfer on the subsequent beforeinput event, so relying on
+   * beforeinput alone silently discards content copied from other applications. */
+  const pasteText = (text: string, saved = ed.readSelection()): void => {
+    serial(async () => {
+      if (ed.readOnly) return;
+      if (saved) ed.refocus(saved);
+      else if (!(await A.landCaret(ed))) {
+        toast("Click in the document before pasting.", { kind: "info" });
+        return;
+      }
+      await A.insertText(ed, text);
+    });
+  };
   /** Typed characters held behind a structural edit are merged into one insertion, so catching up costs one round trip, not one per key. */
   const holdText = (data: string): void => {
     const last = backlog[backlog.length - 1];
@@ -84,11 +98,11 @@ export function installInput(ed: Editor): () => void {
     const type = e.inputType;
     if (type.startsWith("insertComposition") || type === "insertCompositionText") return;
     const sel = ed.readSelection();
-    if (!sel && !ed.selectedBlock && (type === "insertText" || type === "insertParagraph" || type === "insertLineBreak" || type === "insertFromPaste")) {
+    if (!sel && !ed.selectedBlock && (type === "insertText" || type === "insertParagraph" || type === "insertLineBreak" || (type === "insertFromPaste" && !!e.dataTransfer?.getData("text/plain")))) {
       // Nothing editable holds the caret. The browser would show the text but nothing would send it, so it is held, the caret is placed, and it is replayed.
       e.preventDefault();
       const data = type === "insertText" && typeof e.data === "string" ? e.data : null;
-      if (type === "insertFromPaste") { const text = e.dataTransfer?.getData("text/plain") ?? ""; serial(async () => { if (await A.landCaret(ed)) await A.insertText(ed, text); }); return; }
+      if (type === "insertFromPaste") { pasteText(e.dataTransfer?.getData("text/plain") ?? "", null); return; }
       serial(async () => { const landed = await A.landCaret(ed); if (!landed) return; if (data !== null) await A.insertText(ed, data); else if (landed === "existing") await A.enter(ed); });
       return;
     }
@@ -112,11 +126,16 @@ export function installInput(ed: Editor): () => void {
       case "formatSuperscript": e.preventDefault(); void A.toggleFormat(ed, "superscript"); return;
       case "insertFromDrop": e.preventDefault(); return;
       case "insertFromPaste": case "insertFromPasteAsQuotation": case "insertFromYank": {
+        // The paste handler normally consumes this event first. If a browser
+        // supplies neither clipboard data here nor a usable paste event, allow
+        // native insertion to flow through the editor's input observer.
+        const data = e.dataTransfer;
+        if (!data) return;
         e.preventDefault();
-        const files = Array.from(e.dataTransfer?.files ?? []);
+        const files = Array.from(data.files);
         if (files.length) { ed.events.emit({ type: "files", files, after: sel?.end.block ?? null }); return; }
-        const text = e.dataTransfer?.getData("text/plain") ?? "";
-        if (text) void A.insertText(ed, text);
+        const text = data.getData("text/plain");
+        if (text) pasteText(text, sel);
         return;
       }
       case "insertText": case "insertReplacementText": {
@@ -245,9 +264,16 @@ export function installInput(ed: Editor): () => void {
    *  (a spreadsheet cell copies both) wins: then the text is pasted as usual. A picture that only exists as a web address is not fetched. */
   on("paste", (e) => {
     const data = (e as ClipboardEvent).clipboardData;
-    if (!data || ed.readOnly) return;
+    if (ed.readOnly) { e.preventDefault(); return; }
+    if (!data) return;
     const pictures = Array.from(data.files).filter((f) => f.type.startsWith("image/"));
-    const hasText = data.getData("text/plain").trim() !== "";
+    const text = data.getData("text/plain");
+    const hasText = text.length > 0;
+    if (hasText) {
+      e.preventDefault();
+      pasteText(text);
+      return;
+    }
     if (pictures.length && !hasText) {
       e.preventDefault();
       e.stopPropagation();
@@ -268,10 +294,14 @@ export function installInput(ed: Editor): () => void {
   on("cut", (e) => {
     const sel = ed.readSelection();
     const text = ed.selectionText(sel);
-    if (!sel || !text || ed.readOnly) return;
+    if (!sel || !text || ed.readOnly || !e.clipboardData) return;
     e.preventDefault();
-    e.clipboardData?.setData("text/plain", text);
-    void (async () => { const at = await A.replaceRange(ed, sel, ""); if (at) ed.focusBlock(at.block, at.offset); })();
+    e.clipboardData.setData("text/plain", text);
+    serial(async () => {
+      ed.refocus(sel);
+      const at = await A.replaceRange(ed, sel, "");
+      if (at) ed.focusBlock(at.block, at.offset);
+    });
   });
 
   /* ------------------------------------------------------------------------------------------ drag and drop */

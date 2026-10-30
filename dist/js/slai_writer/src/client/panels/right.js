@@ -92,7 +92,9 @@ export function createRightPanel(ctx) {
         })), newLayerButton, h("p", { class: "fine", text: "A hidden layer is hidden on screen only. It is still in the file and in exports. A locked layer cannot be edited here. A new layer starts empty; use Move selection here to put text or objects on it." }));
         /* background */
         const colour = ed.model.ext.background?.color;
-        fresh(bgBox, h("p", {}, h("span", { class: "swatch", css: { background: colour ?? "#ffffff" }, attrs: { "aria-hidden": "true" } }), ` ${colour ? colour.toUpperCase() : "White (default)"}`), button("Change colour…", () => backgroundDialog(ctx), "", "palette"));
+        const chooseBackground = button("Choose colour…", () => backgroundDialog(ctx), "", "palette");
+        chooseBackground.disabled = ed.readOnly;
+        fresh(bgBox, h("p", {}, h("span", { class: "swatch", css: { background: colour ?? "#ffffff" }, attrs: { "aria-hidden": "true" } }), ` ${colour ? colour.toUpperCase() : "White (default)"}`), chooseBackground, h("p", { class: "fine", text: "Choose a preset or enter an exact RGB hex colour." }));
         /* illustrations */
         const figures = ed.model.list().filter((b) => b.type === "figure");
         const add = button("Insert picture…", async () => {
