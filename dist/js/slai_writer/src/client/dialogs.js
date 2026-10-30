@@ -277,19 +277,69 @@ export async function linkDialog(ctx) {
     await A.setLink(ed, choice === "set" ? url.value.trim() : null);
 }
 /* ------------------------------------------------------------------------------------------------------ page colour */
+const PAGE_COLOUR_PRESETS = [
+    ["White", "#ffffff"], ["Warm paper", "#fff8e7"], ["Soft blue", "#eaf3ff"],
+    ["Soft green", "#eaf6ec"], ["Soft rose", "#fff0f2"], ["Charcoal", "#30343a"],
+];
+/** The SLDC Writer background is a six-digit RGB colour, not an arbitrary CSS value. */
+export function parsePageColour(value) {
+    const colour = value.trim();
+    return /^#[\da-f]{6}$/i.test(colour) ? colour.toLowerCase() : null;
+}
 export async function backgroundDialog(ctx) {
     const { ed } = ctx;
-    const current = ed.model.ext.background?.color ?? "#ffffff";
-    const colour = h("input", { type: "color", value: /^#[0-9a-fA-F]{6}$/.test(current) ? current : "#ffffff", attrs: { "aria-label": "Page colour" } });
+    if (ed.readOnly) {
+        toast("This document is read-only.", { kind: "info" });
+        return;
+    }
+    const current = parsePageColour(ed.model.ext.background?.color ?? "") ?? "#ffffff";
+    const colour = h("input", { type: "color", value: current, attrs: { "aria-label": "Pick page colour" } });
+    const hex = h("input", { type: "text", value: current.toUpperCase(), maxLength: 7,
+        attrs: { "aria-label": "Page colour hexadecimal code", autocomplete: "off", spellcheck: "false", placeholder: "#RRGGBB" } });
+    const error = errorLine();
+    const samples = PAGE_COLOUR_PRESETS.map(([name, value]) => h("button", { type: "button", class: "page-colour-preset",
+        css: { "--preset-colour": value }, attrs: { "aria-label": `${name}, ${value}`, "aria-pressed": String(current === value), title: name } }));
+    const syncPresets = (value) => {
+        for (let index = 0; index < samples.length; index += 1)
+            samples[index]?.setAttribute("aria-pressed", String(value === PAGE_COLOUR_PRESETS[index]?.[1]));
+    };
+    const pick = (value) => {
+        colour.value = value;
+        hex.value = value.toUpperCase();
+        syncPresets(value);
+        error.show(null);
+    };
+    for (let index = 0; index < samples.length; index += 1) {
+        const value = PAGE_COLOUR_PRESETS[index]?.[1];
+        if (value)
+            samples[index]?.addEventListener("click", () => pick(value));
+    }
+    colour.addEventListener("input", () => pick(colour.value));
+    hex.addEventListener("input", () => {
+        const value = parsePageColour(hex.value);
+        if (value)
+            colour.value = value;
+        syncPresets(value);
+        error.show(null);
+    });
     const handle = openDialog({
         title: "Page background", size: "narrow",
-        body: h("div", { class: "stack" }, labelled("Colour", colour), notice("Only a plain colour is supported. A background picture is not, because exported formats cannot reproduce it faithfully. Text colours are not changed, so check that the text stays readable.", "info")),
-        actions: [{ label: "Use white", run: () => "clear" }, { label: "Apply", kind: "primary", run: () => "set" }],
+        body: h("div", { class: "stack" }, labelled("Colour", colour), h("div", {}, h("p", { class: "fine", text: "Presets" }), h("div", { class: "page-colour-presets", attrs: { role: "group", "aria-label": "Page background colour presets" } }, samples)), labelled("Hexadecimal RGB (#RRGGBB)", hex, { hint: "Enter an exact six-digit RGB colour; for example #F5F5F5." }), error.el, notice("Page colour is saved with this SLDC document. Background images and gradients are not yet supported by the export renderer. Check that your text remains readable.", "info")),
+        actions: [{ label: "Use white", run: () => "clear" }, { label: "Apply", kind: "primary", run: () => {
+                    const value = parsePageColour(hex.value);
+                    if (!value) {
+                        error.show("Enter a valid colour such as #F5F5F5.");
+                        hex.focus();
+                        return undefined;
+                    }
+                    pick(value);
+                    return "set";
+                } }],
     });
     const choice = await handle.result;
     if (!choice)
         return;
-    await guarded(ctx, () => ed.op({ op: "ext_set", values: { background: choice === "set" ? { color: colour.value } : null }, label: "page background" }));
+    await guarded(ctx, () => ed.op({ op: "ext_set", values: { background: choice === "set" ? { color: parsePageColour(hex.value) } : null }, label: "page background" }));
 }
 /* ----------------------------------------------------------------------------------------------------- comments */
 export async function commentDialog(ctx) {

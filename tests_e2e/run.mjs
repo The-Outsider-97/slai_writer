@@ -98,6 +98,40 @@ await scenario("guest can create a document, type, and it reaches the server", a
   await until(async () => (await blockTexts()).includes("paragraph:Hello from a guest."), "typed text on the server");
 });
 
+await scenario("external plain-text clipboard paste, copy and cut use real document operations", async () => {
+  await guest(); await newDoc();
+  const first = page.locator('[data-edit="text"]').first();
+  await first.click();
+  const unhandled = await first.evaluate((node) => {
+    const data = new DataTransfer();
+    data.setData("text/plain", "From outside\nSecond line");
+    return node.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+  });
+  ok(!unhandled, "Writer did not intercept the external clipboard payload");
+  await until(async () => {
+    const texts = await blockTexts();
+    return texts[0] === "paragraph:From outside" && texts[1] === "paragraph:Second line";
+  }, "both pasted paragraphs to reach the server");
+
+  const copied = await page.locator('[data-edit="text"]').first().evaluate((node) => {
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    selection.removeAllRanges(); selection.addRange(range);
+    const data = new DataTransfer();
+    node.dispatchEvent(new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData: data }));
+    return data.getData("text/plain");
+  });
+  eq(copied, "From outside", "copy must expose selected model text");
+
+  await page.locator('[data-edit="text"]').first().evaluate((node) => {
+    const data = new DataTransfer();
+    node.dispatchEvent(new ClipboardEvent("cut", { bubbles: true, cancelable: true, clipboardData: data }));
+    if (data.getData("text/plain") !== "From outside") throw new Error("cut did not put the selected text on the clipboard");
+  });
+  await until(async () => (await blockTexts())[0] === "paragraph:", "cut to remove the first paragraph's text");
+});
+
 await scenario("typing straight after Enter lands in the new paragraph (held keystrokes)", async () => {
   await guest(); await newDoc();
   await page.keyboard.type("First"); await page.keyboard.press("Enter"); await page.keyboard.type("Second typed immediately");
