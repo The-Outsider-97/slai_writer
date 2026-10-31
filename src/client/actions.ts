@@ -7,6 +7,8 @@ import { MM_PX } from "./textops.js";
 import { layerList, type LayerRow } from "./model.js";
 import type { Block, DocState, Op, Patch, Span } from "./types.js";
 import { TEXT_TYPES } from "./types.js";
+import { FRONT_MATTER_STYLES } from "./named_styles.js";
+import { ensureBundledFont } from "./font_catalog.js";
 
 const FLAGS = ["bold", "italic", "underline", "strike", "code", "superscript", "subscript"] as const;
 export type FormatFlag = (typeof FLAGS)[number];
@@ -298,25 +300,61 @@ export async function toggleFormat(ed: Editor, flag: FormatFlag): Promise<void> 
   }
   const ranges = textRanges(ed, sel).filter((r) => r.to > r.from);
   if (!ranges.length) return;
-  const all = ranges.every((r) => covered(r.block, r.from, r.to, flag));
-  const ops: Op[] = ranges.map((r) => (all ? { op: "format", block: r.block.id, start: r.from, end: r.to, unset: [flag] } : { op: "format", block: r.block.id, start: r.from, end: r.to, set: { [flag]: true } }));
+  const all = ranges.every((r) => covered(r.block, characterOffset(r.block.text, r.from), characterOffset(r.block.text, r.to), flag));
+  const ops: Op[] = ranges.map((r) => (all
+    ? { op: "format", block: r.block.id, start: characterOffset(r.block.text, r.from), end: characterOffset(r.block.text, r.to), unset: [flag] }
+    : { op: "format", block: r.block.id, start: characterOffset(r.block.text, r.from), end: characterOffset(r.block.text, r.to), set: { [flag]: true } }));
   await guarded(ed, async () => { await ed.op(ops.length === 1 ? (ops[0] as Op) : { op: "batch", ops, label: "formatting" }); ed.restoreSelection(sel); });
 }
 
-export async function setInlineProperty(ed: Editor, key: "color" | "background" | "font_family" | "font_size_pt", value: string | number | null): Promise<void> {
+export type FormattingScope = "selection" | "character" | "word" | "sentence" | "paragraph" | "section" | "page" | "document";
+
+/** Resolve each scope against stable block IDs; visible page numbers are never stored as text identities. */
+export function scopedTextRanges(ed: Editor, sel: Sel, scope: FormattingScope): Array<{ block: Block; from: number; to: number }> {
+  if (scope === "selection") return textRanges(ed, sel);
+  const caret = ed.model.block(sel.start.block);
+  if (!caret || !isTextBlock(caret)) return [];
+  if (["character", "word", "sentence"].includes(scope)) {
+    const text = caret.text;
+    const granularity = scope === "character" ? "grapheme" : scope;
+    const segments = [...new Intl.Segmenter(undefined, { granularity: granularity as "grapheme" | "word" | "sentence" }).segment(text)];
+    const at = sel.start.offset;
+    const part = segments.find((s) => s.index <= at && s.index + s.segment.length > at && (scope !== "word" || s.isWordLike))
+      ?? segments.find((s) => s.index === at && (scope !== "word" || s.isWordLike));
+    return part ? [{ block: caret, from: part.index, to: part.index + part.segment.length }] : [];
+  }
+  if (scope === "paragraph") return textRanges(ed, sel).map(({ block }) => ({ block, from: 0, to: block.text.length }));
+  if (scope === "document") return ed.model.list().filter(isTextBlock).map((block) => ({ block, from: 0, to: block.text.length }));
+  if (scope === "section") {
+    const section = caret.section ?? ed.model.meta.sections?.[0]?.id;
+    return ed.model.list().filter(isTextBlock).filter((block) => (block.section ?? ed.model.meta.sections?.[0]?.id) === section)
+      .map((block) => ({ block, from: 0, to: block.text.length }));
+  }
+  const page = ed.page.sheets.find((sheet) => sheet.blocks.some((node) => node.dataset["id"] === caret.id));
+  const ids = new Set(page?.blocks.map((node) => node.dataset["id"]));
+  return ed.model.list().filter(isTextBlock).filter((block) => ids.has(block.id))
+    .map((block) => ({ block, from: 0, to: block.text.length }));
+}
+
+/** Convert DOM UTF-16 offsets to the Unicode code-point offsets required by SLDC. */
+const characterOffset = (text: string, offset: number): number => [...text.slice(0, offset)].length;
+
+export async function setInlineProperty(ed: Editor, key: "color" | "background" | "font_family" | "font_size_pt" | "letter_spacing_pt" | "word_spacing_pt", value: string | number | null, scope: FormattingScope = "selection"): Promise<void> {
   const sel = ed.readSelection();
   if (!sel || ed.readOnly) return;
-  if (sel.collapsed) {
+  if (sel.collapsed && scope === "selection") {
     ed.pendingInline.set(key, value);
     announce(`${key.replaceAll("_", " ")} ${value === null ? "reset to default" : "set"} for the next text you type`);
     return;
   }
-  const ops: Op[] = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => (value ? { op: "format", block: r.block.id, start: r.from, end: r.to, set: { [key]: value } } : { op: "format", block: r.block.id, start: r.from, end: r.to, unset: [key] }));
+  const ops: Op[] = scopedTextRanges(ed, sel, scope).filter((r) => r.to > r.from).map((r) => (value !== null
+    ? { op: "format", block: r.block.id, start: characterOffset(r.block.text, r.from), end: characterOffset(r.block.text, r.to), set: { [key]: value } }
+    : { op: "format", block: r.block.id, start: characterOffset(r.block.text, r.from), end: characterOffset(r.block.text, r.to), unset: [key] }));
   if (ops.length) await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "inline formatting" }); ed.restoreSelection(sel); });
 }
 
-export async function setColour(ed: Editor, key: "color" | "background", value: string | null): Promise<void> {
-  await setInlineProperty(ed, key, value);
+export async function setColour(ed: Editor, key: "color" | "background", value: string | null, scope: FormattingScope = "selection"): Promise<void> {
+  await setInlineProperty(ed, key, value, scope);
 }
 
 /** Change the real text, not a CSS presentation effect; the backend remaps format/link spans. */
@@ -340,7 +378,7 @@ export async function transformCase(ed: Editor, mode: "upper" | "lower"): Promis
 export async function clearFormatting(ed: Editor): Promise<void> {
   const sel = ed.readSelection();
   if (!sel || sel.collapsed || ed.readOnly) return;
-  const ops: Op[] = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => ({ op: "format", block: r.block.id, start: r.from, end: r.to, unset: [...FLAGS, "color", "background", "font_family", "font_size_pt"] }));
+  const ops: Op[] = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => ({ op: "format", block: r.block.id, start: r.from, end: r.to, unset: [...FLAGS, "color", "background", "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"] }));
   if (ops.length) await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "clear formatting" }); ed.restoreSelection(sel); });
 }
 
@@ -389,6 +427,63 @@ export async function setParagraphStyle(ed: Editor, name: string | null): Promis
   if (!ids.length || ed.readOnly) return;
   const sel = ed.readSelection();
   await guarded(ed, async () => { await ed.op({ op: "batch", ops: ids.map((id) => ({ op: "block_set", block: id, style: name })), label: "paragraph style" }); ed.restoreSelection(sel); });
+}
+
+/** Apply a front-matter style without changing a paragraph into a semantic heading. */
+export async function applyNamedStyle(ed: Editor, name: string): Promise<void> {
+  const ids = selectedTextIds(ed);
+  if (!ids.length || ed.readOnly) return;
+  const defaults = FRONT_MATTER_STYLES[name];
+  if (!defaults) return;
+  const selection = ed.readSelection();
+  const defined = ed.model.meta.styles?.paragraph?.[name] !== undefined;
+  const ops: Op[] = [];
+  if (!defined) ops.push({ op: "style_define", kind: "paragraph", name, props: defaults });
+  for (const id of ids) ops.push({ op: "block_set", block: id, type: "paragraph",
+    style: name, attributes: { ordered: null, depth: null, level: null, language: null } });
+  await guarded(ed, async () => {
+    await ed.op({ op: "batch", ops, label: `apply ${name} style` });
+    ed.restoreSelection(selection);
+    const family = (defined ? ed.model.meta.styles?.paragraph?.[name]?.["font_family"] : defaults["font_family"]);
+    if (typeof family === "string") void ensureBundledFont(family).then(() => ed.layout()).catch(() => {});
+  });
+}
+
+/** Insert a semantic cover section; its editable content lives in the ordinary editor. */
+export async function insertCoverPage(ed: Editor): Promise<void> {
+  if (ed.readOnly) return;
+  await guarded(ed, async () => {
+    await ed.op({ op: "cover_insert" });
+    const first = ed.model.list()[0];
+    if (first) ed.focusBlock(first.id, 0);
+  });
+}
+
+/** Keep first-page content, isolating it as a semantic cover section when needed. */
+export async function convertFirstPageToCover(ed: Editor): Promise<void> {
+  if (ed.readOnly) return;
+  const [first, second] = ed.page.sheets;
+  if (!first) return;
+  if (ed.model.meta.sections?.some((s) => s.role === "cover")) {
+    toast("This document already has a cover page.", { kind: "info" }); return;
+  }
+  const firstSection = first.section ?? ed.model.meta.sections?.[0]?.id ?? "s1";
+  const split = second && second.section === first.section;
+  if (split && (ed.model.meta.sections?.length ?? 0) > 1) {
+    toast("Split the first page into its own section before converting it to a cover.", { kind: "info" }); return;
+  }
+  const splitAt = split ? second?.blocks[0]?.dataset["id"] : undefined;
+  if (split && !splitAt) return;
+  const ops: Op[] = [];
+  if (splitAt) ops.push({ op: "section_break", block: splitAt });
+  ops.push({ op: "page_setup", section: firstSection, role: "cover", numbering: { show: false } });
+  await guarded(ed, () => ed.op({ op: "batch", ops, label: "convert first page to cover" }).then(() => {}));
+}
+
+/** Remove cover designation only, retaining all the document's text and images. */
+export async function removeCoverDesignation(ed: Editor): Promise<void> {
+  if (ed.readOnly) return;
+  await guarded(ed, async () => { await ed.op({ op: "cover_unmark" }); });
 }
 
 export async function indent(ed: Editor, delta: 1 | -1): Promise<boolean> {
