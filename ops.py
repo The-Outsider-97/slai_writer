@@ -308,6 +308,11 @@ def op_format(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
             size = set_props["font_size_pt"]
             if type(size) not in (int, float) or not math.isfinite(size) or not 4 <= size <= 400:
                 raise OpError("font_size_pt must be between 4 and 400 points")
+        for key, (low, high) in {"letter_spacing_pt": (-5, 50), "word_spacing_pt": (-20, 100)}.items():
+            if key in set_props:
+                value = set_props[key]
+                if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
+                    raise OpError(f"{key} must be between {low} and {high} points")
         for key, value in set_props.items():
             if key in tm.FORMAT_FLAGS and type(value) is not bool:
                 raise OpError(f"'{key}' must be true or false")
@@ -471,7 +476,35 @@ def op_block_delete(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
         raise OpError("Choose the blocks to delete")
     for block_id in ids:
         tr.peek(block_id)
-    for block_id in ids:
+    removed = set(ids)
+    toc_extension = "slai.sldc.toc"
+    # A deleted heading must not leave its generated contents entry or a
+    # dangling internal reference behind. Preserve the TOC's title and the
+    # unrelated user-authored content, so a later refresh remains possible.
+    for block in list(tr.doc["blocks"]):
+        if block["id"] in removed:
+            continue
+        toc = block.get("extensions", {}).get(toc_extension)
+        if isinstance(toc, dict) and toc.get("role") == "entry" and toc.get("heading") in removed:
+            removed.add(block["id"])
+    for block in list(tr.doc["blocks"]):
+        if block["id"] in removed:
+            continue
+        toc = block.get("extensions", {}).get(toc_extension)
+        if isinstance(toc, dict) and toc.get("role") == "title":
+            overrides = toc.get("overrides")
+            if isinstance(overrides, dict) and any(key in removed for key in overrides):
+                writable = tr.get(block["id"])
+                ext = copy.deepcopy(writable["extensions"])
+                ext[toc_extension]["overrides"] = {k: v for k, v in overrides.items() if k not in removed}
+                writable["extensions"] = ext
+        if any(span.get("type") == "xref" and span.get("target") in removed for span in block.get("spans", [])):
+            writable = tr.get(block["id"])
+            writable["spans"] = [span for span in writable["spans"]
+                                  if not (span.get("type") == "xref" and span.get("target") in removed)]
+            if not writable["spans"]:
+                writable.pop("spans", None)
+    for block_id in [b["id"] for b in list(tr.doc["blocks"]) if b["id"] in removed]:
         tr.remove(block_id)
     if not tr.doc["blocks"]:                                   # a document always keeps one (empty) paragraph to write in
         tr.insert(0, {"id": fresh_id(tr.doc), "type": "paragraph", "text": ""})
@@ -756,7 +789,7 @@ def op_page_setup(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
             section["page"].pop("size", None)
         if "margins_mm" in page:
             section["page"]["margins_mm"] = {**(section.get("page", {}).get("margins_mm", {})), **page["margins_mm"]}
-    for key in ("columns", "column_gap_mm", "numbering"):
+    for key in ("columns", "column_gap_mm", "numbering", "role"):
         if key in op:
             if op[key] is None:
                 section.pop(key, None)
@@ -801,6 +834,44 @@ def op_section_break(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     return {"section": sid}
 
 
+@handler("cover_insert")
+def op_cover_insert(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
+    """Create one explicit cover section before all content; do not alter existing text."""
+    sections = copy.deepcopy(tr.key("sections") or [])
+    if any(s.get("role") == "cover" for s in sections):
+        raise Conflict("This document already has a cover section")
+    if not sections:
+        sections = [{"id": DEFAULT_SECTION}]
+    primary = sections[0]["id"]
+    for block in tr.doc["blocks"]:
+        if not block.get("section"):
+            tr.get(block["id"])["section"] = primary
+    cover_id = f"cover{uuid.uuid4().hex[:10]}"
+    section = {"id": cover_id, "role": "cover", "numbering": {"show": False}}
+    if sections[0].get("page"):
+        section["page"] = copy.deepcopy(sections[0]["page"])
+    sections.insert(0, section)
+    tr.doc["sections"] = sections
+    block_id = fresh_id(tr.doc)
+    tr.insert(0, {"id": block_id, "type": "paragraph", "text": str(tr.doc.get("title") or "").strip(),
+                  "section": cover_id})
+    return {"section": cover_id, "block": block_id}
+
+
+@handler("cover_unmark")
+def op_cover_unmark(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
+    """Remove the designation only; all cover content and its section survive."""
+    sections = copy.deepcopy(tr.key("sections") or [])
+    cover = next((s for s in sections if s.get("role") == "cover"), None)
+    if cover is None:
+        raise Conflict("There is no cover section")
+    cover.pop("role", None)
+    if cover.get("numbering", {}).get("show") is False:
+        cover.pop("numbering", None)
+    tr.doc["sections"] = sections
+    return {"section": cover["id"]}
+
+
 @handler("style_define")
 def op_style_define(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     kind, name = _s(op, "kind"), _s(op, "name", limit=64)
@@ -809,10 +880,14 @@ def op_style_define(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     styles = copy.deepcopy(tr.key("styles") or {})
     group = styles.setdefault(kind, {})
     if op.get("delete"):
-        group.pop(name, None)
-        used = {b.get("style") for b in tr.doc["blocks"]}
-        if kind == "paragraph" and name in used:
+        if kind == "paragraph" and any(b.get("style") == name for b in tr.doc["blocks"]):
             raise Conflict(f"Style '{name}' is still in use")
+        if kind == "character" and any(s.get("style") == name for b in tr.doc["blocks"]
+                                       for s in b.get("spans", [])):
+            raise Conflict(f"Style '{name}' is still in use")
+        if any(props.get("based_on") == name for key, props in group.items() if key != name):
+            raise Conflict(f"Another style inherits from '{name}'")
+        group.pop(name, None)
     else:
         group[name] = copy.deepcopy(_d(op, "props"))
     if not group:
@@ -821,6 +896,35 @@ def op_style_define(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     if not styles:
         tr.doc.pop("styles", None)
     return {}
+
+
+@handler("style_rename")
+def op_style_rename(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
+    """Rename a style and all of its references in one versioned, undoable edit."""
+    kind, name, new_name = _s(op, "kind"), _s(op, "name", limit=64), _s(op, "new_name", limit=64)
+    if kind not in ("paragraph", "character") or not _NAME.fullmatch(new_name):
+        raise OpError("The style kind or new name is invalid")
+    styles = copy.deepcopy(tr.key("styles") or {})
+    group = styles.get(kind, {})
+    if name not in group:
+        raise OpError(f"The style '{name}' does not exist")
+    if name == new_name:
+        return {"name": name}
+    if new_name in group:
+        raise Conflict(f"The style '{new_name}' already exists")
+    group[new_name] = group.pop(name)
+    for props in group.values():
+        if props.get("based_on") == name:
+            props["based_on"] = new_name
+    tr.doc["styles"] = styles
+    for block in tr.doc["blocks"]:
+        if kind == "paragraph" and block.get("style") == name:
+            tr.get(block["id"])["style"] = new_name
+        if kind == "character" and any(span.get("style") == name for span in block.get("spans", [])):
+            for span in tr.get(block["id"])["spans"]:
+                if span.get("style") == name:
+                    span["style"] = new_name
+    return {"name": new_name}
 
 
 @handler("reference_put")

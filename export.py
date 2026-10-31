@@ -10,6 +10,7 @@ to Writer's sessions and adds the honest account the person needs: what each for
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import os
 import re
@@ -102,6 +103,7 @@ class Exchange:
     def __init__(self, app: Any) -> None:
         self.app = app
         self._cache: OrderedDict[tuple[str, int], bytes] = OrderedDict()
+        self._layout_cache: OrderedDict[tuple[str, int], dict[str, Any]] = OrderedDict()
         self._lock = threading.Lock()
 
     # -------------------------------------------------------------------------------------------------------- helpers
@@ -320,7 +322,7 @@ class Exchange:
         with tempfile.TemporaryDirectory(prefix="wr-pdf-", dir=self._tmp()) as tmp:
             target = Path(tmp) / "preview.pdf"
             try:
-                writers.get_writer("pdf")(package, target, writers.WriteOptions(title=session.title, stem="preview"))
+                result = writers.get_writer("pdf")(package, target, writers.WriteOptions(title=session.title, stem="preview"))
             except errors.DocumasterError as exc:
                 raise map_error(exc) from exc
             except Exception as exc:  # noqa: BLE001
@@ -328,9 +330,23 @@ class Exchange:
             data = target.read_bytes()
         with self._lock:
             self._cache[key] = data
+            if result.layout is not None:
+                self._layout_cache[key] = result.layout
             while len(self._cache) > PREVIEW_CACHE:
-                self._cache.popitem(last=False)
+                dropped, _ = self._cache.popitem(last=False)
+                self._layout_cache.pop(dropped, None)
         return data
+
+    def layout(self, session: DocumentSession) -> dict[str, Any]:
+        """Exact PDF page positions from Documaster's layout pass, cached per document version."""
+        key = (session.sid, session.version)
+        self._pdf_bytes(session)
+        with self._lock:
+            layout = copy.deepcopy(self._layout_cache.get(key))
+        if layout is None:
+            raise DependencyMissing("The installed PDF writer does not expose measured page positions.",
+                                    hint="Update Documaster alongside SLAI Writer.")
+        return {**layout, "version": session.version}
 
     def print_pdf(self, session: DocumentSession) -> bytes:
         return self._pdf_bytes(session)

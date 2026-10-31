@@ -299,18 +299,21 @@ class Academic:
         return {"heading": head, "entries": len(entries), "warnings": warnings, "state": session.state()}
 
     def contents(self, session: DocumentSession, after: str | None, title: str = "Contents", depth: int = 3,
-                 preset: str = "standard") -> dict[str, Any]:
+                 preset: str = "standard", *, show_page_numbers: bool = True, leader_dots: bool = True,
+                 refresh_mode: str = "automatic") -> dict[str, Any]:
         """Insert a managed, refreshable TOC as one undoable document transaction.
 
         Its metadata is an inert namespaced SLDC block extension, so readers can
         preserve it even if they do not know how to regenerate a contents list.
         """
         with session.lock:
-            return self._contents(session, after, title, depth, toc_id=secrets.token_hex(12), preset=preset)
+            return self._contents(session, after, title, depth, toc_id=secrets.token_hex(12), preset=preset,
+                                  show_page_numbers=show_page_numbers, leader_dots=leader_dots, refresh_mode=refresh_mode)
 
     def refresh_contents(self, session: DocumentSession, toc_id: str, *, depth: int | None = None,
                          title: str | None = None, preset: str | None = None,
-                         entry: dict[str, Any] | None = None) -> dict[str, Any]:
+                         entry: dict[str, Any] | None = None, show_page_numbers: bool | None = None,
+                         leader_dots: bool | None = None, refresh_mode: str | None = None) -> dict[str, Any]:
         """Replace only the generated blocks of one TOC; preserve surrounding content."""
         with session.lock:
             blocks = session.doc["blocks"]
@@ -326,7 +329,10 @@ class Academic:
                                   depth if depth is not None else settings["depth"],
                                   toc_id=toc_id, remove=[b["id"] for _, b in owned],
                                   preset=preset if preset is not None else settings.get("preset", "standard"),
-                                  old_blocks=[b for _, b in owned], entry=entry)
+                                  old_blocks=[b for _, b in owned], entry=entry,
+                                  show_page_numbers=show_page_numbers if show_page_numbers is not None else settings.get("show_page_numbers", True),
+                                  leader_dots=leader_dots if leader_dots is not None else settings.get("leader_dots", True),
+                                  refresh_mode=refresh_mode if refresh_mode is not None else settings.get("refresh_mode", "automatic"))
 
     def remove_contents(self, session: DocumentSession, toc_id: str) -> dict[str, Any]:
         """Remove the generated TOC in one undoable transaction without touching headings."""
@@ -341,11 +347,16 @@ class Academic:
     def _contents(self, session: DocumentSession, after: str | None, title: str, depth: int,
                   toc_id: str, remove: list[str] | None = None, preset: str = "standard",
                   old_blocks: list[dict[str, Any]] | None = None,
-                  entry: dict[str, Any] | None = None) -> dict[str, Any]:
+                  entry: dict[str, Any] | None = None, *, show_page_numbers: bool = True,
+                  leader_dots: bool = True, refresh_mode: str = "automatic") -> dict[str, Any]:
         if not isinstance(depth, int) or not 1 <= depth <= 6:
             raise BadRequest("TOC depth must be between 1 and 6.")
         if preset not in ("standard", "compact", "academic"):
             raise BadRequest("Choose a supported TOC preset.")
+        if type(show_page_numbers) is not bool or type(leader_dots) is not bool:
+            raise BadRequest("TOC page-number and leader-dot settings must be booleans.")
+        if refresh_mode not in ("automatic", "manual"):
+            raise BadRequest("Choose automatic or manual TOC refresh.")
         if not isinstance(title, str) or not title.strip() or len(title) > 80:
             raise BadRequest("TOC title must contain 1–80 characters.")
         generated_ids = {b["id"] for b in session.doc["blocks"]
@@ -396,18 +407,40 @@ class Academic:
             if not custom:
                 del overrides[target]
         ops: list[dict[str, Any]] = []
+        # TOC levels are ordinary named paragraph styles. The existing Style
+        # Manager can change their typography and inheritance without a second
+        # TOC-specific style engine.
+        named = session.doc.get("styles", {}).get("paragraph", {})
+        if "TOC Title" not in named:
+            title_props: dict[str, Any] = {"font_size_pt": 20, "bold": True, "space_after_pt": 12}
+            if "Body Text" in named:
+                title_props["based_on"] = "Body Text"
+            ops.append({"op": "style_define", "kind": "paragraph", "name": "TOC Title", "props": title_props})
+        for level in range(1, depth + 1):
+            name = f"TOC Level {level}"
+            if name not in named:
+                props: dict[str, Any] = {"font_size_pt": max(8, round(11 - (level - 1) * 0.35, 2)),
+                                         "space_after_pt": {"compact": 0, "standard": 3, "academic": 5}[preset]}
+                if "Body Text" in named:
+                    props["based_on"] = "Body Text"
+                if level == 1:
+                    props["bold"] = True
+                ops.append({"op": "style_define", "kind": "paragraph", "name": name, "props": props})
         if remove:
             ops.append({"op": "block_delete", "blocks": remove})
         head = "toc_" + secrets.token_hex(12)
         new_title: dict[str, Any] = {"id": head, "type": "paragraph", "text": title,
             "extensions": {TOC_EXTENSION: {"id": toc_id, "role": "title", "depth": depth,
-                                           "preset": preset, "overrides": overrides}}}
+                                           "preset": preset, "overrides": overrides,
+                                           "show_page_numbers": show_page_numbers, "leader_dots": leader_dots,
+                                           "refresh_mode": refresh_mode}}}
         if old_title:
             for attr in ("attributes", "style"):
                 if attr in old_title:
                     new_title[attr] = copy.deepcopy(old_title[attr])
         else:
             new_title["attributes"] = {"space_after_pt": 12}
+            new_title["style"] = "TOC Title"
         ops.append({"op": "block_insert", "after": after, "block": new_title})
         prev = head
         for item in headings:
@@ -423,19 +456,21 @@ class Academic:
                 "indent_mm": spacing[0] * (item["level"] - 1), "space_after_pt": spacing[1]}
             entry: dict[str, Any] = {
                 "id": new_id, "type": "paragraph", "text": label,
+                "style": f"TOC Level {item['level']}",
                 "attributes": attributes,
                 "spans": [{"type": "xref", "start": 0, "end": len(label), "target": item["block"]}],
                 "extensions": {TOC_EXTENSION: {"id": toc_id, "role": "entry", "heading": item["block"],
-                                               "source_text": label}}}
+                                               "source_text": label, "level": item["level"]}}}
             if previous and previous.get("style"):
                 entry["style"] = previous["style"]
             ops.append({"op": "block_insert", "after": prev, "block": entry})
             prev = new_id
         # The session validates the final document and records exactly one undo step.
-        session.apply({"op": "batch", "ops": ops, "label": "refresh contents" if remove else "insert contents"}, None)
-        return {"heading": head, "tocId": toc_id, "entries": len(ops) - (2 if remove else 1),
+        patch = session.apply({"op": "batch", "ops": ops, "label": "refresh contents" if remove else "insert contents"}, None)
+        return {"heading": head, "tocId": toc_id, "entries": len(headings) - sum(1 for h in headings if overrides.get(h["block"], {}).get("hidden")),
                 "generatedAtRevision": session.revision_no,
-                "note": "Use Update contents after changing document headings.", "state": session.state()}
+                "note": "Automatic refresh follows heading edits when enabled; manual Update contents remains available.",
+                "patch": patch, "state": session.state()}
 
     def cross_reference(self, session: DocumentSession, block_id: str, start: int, end: int, target: str) -> dict[str, Any]:
         return session.apply({"op": "span", "block": block_id, "start": start, "end": end, "kind": "xref", "target": target}, None)

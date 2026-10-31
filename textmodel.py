@@ -18,7 +18,7 @@ from typing import Any, Iterable
 OBJ = "￼"
 FORMAT_FLAGS = ("bold", "italic", "underline", "strike", "code", "superscript", "subscript")
 FORMAT_COLOURS = ("color", "background")
-FORMAT_FONTS = ("font_family", "font_size_pt")
+FORMAT_FONTS = ("font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt")
 FORMAT_KEYS = FORMAT_FLAGS + FORMAT_COLOURS + FORMAT_FONTS
 OBJECT_KINDS = ("equation", "image")
 
@@ -36,7 +36,7 @@ def sorted_spans(spans: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def format_props(span: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in span.items() if k in FORMAT_KEYS and v not in (False, None)}
+    return {k: v for k, v in span.items() if k in FORMAT_KEYS and v is not False and v is not None}
 
 
 # ------------------------------------------------------------------------------------------------------------ format runs
@@ -179,7 +179,7 @@ def apply_format(block: dict[str, Any], start: int, end: int, set_props: dict[st
             for key in unset:
                 props.pop(key, None)
             for key, value in set_props.items():
-                if value in (False, None):
+                if value is False or value is None:
                     props.pop(key, None)
                 else:
                     props[key] = value

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ..tools.errors import BadRequest, Conflict, NotFound
-from ..tools.server import Request, created, file_response
+from ..tools.server import Request, Response, created, file_response
 from . import session as S
 from .routes_docs import author_of
 from .routing import base_version, clean_path, flag, need_account, router, session_of, text, whole, who
@@ -20,6 +20,25 @@ from .routing import base_version, clean_path, flag, need_account, router, sessi
 DOWNLOAD_TYPES = {"pdf": "application/pdf", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                   "odt": "application/vnd.oasis.opendocument.text", "rtf": "application/rtf", "html": "text/html; charset=utf-8",
                   "md": "text/markdown; charset=utf-8", "txt": "text/plain; charset=utf-8", "sldc": "application/octet-stream"}
+
+
+@router.route("GET", "/api/fonts")
+def document_fonts(app, req: Request):
+    """Public metadata for the reusable, locally bundled document font faces."""
+    from src.utils.doc.fonts import bundled_catalogue
+    return bundled_catalogue()
+
+
+@router.route("GET", "/api/fonts/{face_id}")
+def document_font_file(app, req: Request):
+    """Serve only a previously indexed, validated face, never a supplied path."""
+    from src.utils.doc.fonts import resolve_bundled_font
+    face = resolve_bundled_font(req.params["face_id"])
+    if face is None:
+        raise NotFound("That document font is unavailable.")
+    mime = {"truetype": "font/ttf", "opentype": "font/otf", "woff": "font/woff", "woff2": "font/woff2"}[face.format]
+    return Response(200, face.path.read_bytes(), mime,
+                    {"Cache-Control": "private, max-age=86400", "X-Content-Type-Options": "nosniff"})
 
 
 # ======================================================================================================== signing
@@ -286,13 +305,28 @@ def bibliography(app, req: Request):
 def contents(app, req: Request):
     body = req.json()
     return app.academic.contents(session_of(app, req), text(body, "after", required=False, max_len=100) or None,
-                                 text(body, "title", required=False, max_len=80, default="Contents") or "Contents", whole(body, "depth", low=1, high=6, default=3) or 3)
+                                 text(body, "title", required=False, max_len=80, default="Contents") or "Contents", whole(body, "depth", low=1, high=6, default=3) or 3,
+                                 text(body, "preset", required=False, max_len=16, default="standard") or "standard",
+                                 show_page_numbers=flag(body, "showPageNumbers", True), leader_dots=flag(body, "leaderDots", True),
+                                 refresh_mode=text(body, "refreshMode", required=False, max_len=16, default="automatic") or "automatic")
 
 
-@router.route("POST", "/api/docs/{sid}/contents/refresh")
+@router.route("POST", "/api/docs/{sid}/contents/{tocid}/refresh")
 def refresh_contents(app, req: Request):
     body = req.json()
-    return app.academic.refresh_contents(session_of(app, req), text(body, "tocId", max_len=24))
+    depth = whole(body, "depth", low=1, high=6, required=True) if "depth" in body else None
+    return app.academic.refresh_contents(session_of(app, req), text(req.params, "tocid", max_len=24),
+                                         title=text(body, "title", max_len=80) if "title" in body else None,
+                                         depth=depth, preset=text(body, "preset", max_len=16) if "preset" in body else None,
+                                         entry=body.get("entry"),
+                                         show_page_numbers=flag(body, "showPageNumbers") if "showPageNumbers" in body else None,
+                                         leader_dots=flag(body, "leaderDots") if "leaderDots" in body else None,
+                                         refresh_mode=text(body, "refreshMode", max_len=16) if "refreshMode" in body else None)
+
+
+@router.route("POST", "/api/docs/{sid}/contents/{tocid}/remove")
+def remove_contents(app, req: Request):
+    return app.academic.remove_contents(session_of(app, req), text(req.params, "tocid", max_len=24))
 
 
 @router.route("POST", "/api/docs/{sid}/xref")
@@ -363,6 +397,12 @@ def preview(app, req: Request):
     pages = body.get("pages")
     wanted = [int(p) for p in pages if isinstance(p, int) and not isinstance(p, bool)][:12] if isinstance(pages, list) else [1]
     return app.exchange.preview(session_of(app, req), wanted or [1], whole(body, "width", low=200, high=1600, default=720) or 720)
+
+
+@router.route("GET", "/api/docs/{sid}/layout")
+def measured_layout(app, req: Request):
+    """Exact printed page labels and native block positions, never approximated editor sheets."""
+    return app.exchange.layout(session_of(app, req))
 
 
 @router.route("POST", "/api/import")
