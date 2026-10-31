@@ -528,6 +528,16 @@ def op_split(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     else:
         block.pop("spans", None)
     right["id"] = op.get("new_id") or fresh_id(tr.doc)
+    # A page break is a one-time boundary, never a paragraph style. Keep it
+    # with the original text: on an initial split that text moves to the right;
+    # otherwise it stays on the left. Most importantly, Enter must not copy
+    # a break to every subsequent paragraph.
+    without_break = block if at == 0 else right
+    attrs_without_break = without_break.get("attributes")
+    if isinstance(attrs_without_break, dict):
+        attrs_without_break.pop("page_break_before", None)
+        if not attrs_without_break:
+            without_break.pop("attributes", None)
     if block["type"] in ("heading", "quote") and not op.get("keep_type"):
         right["type"] = "paragraph"
         right.pop("style", None)
