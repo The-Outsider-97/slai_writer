@@ -3,6 +3,7 @@ import unittest
 
 from applications.tools.errors import BadRequest, DependencyMissing, NotFound
 from applications.slai_writer.academic import Academic, clean_entry, in_text, reference_line, FOOTNOTE_ANCHOR
+from applications.slai_writer.session import sldc
 from .helpers import Workbench
 
 CROSSREF_OK = {"message": {"title": ["Deep learning for document layout"], "issued": {"date-parts": [[2020, 5]]},
@@ -139,8 +140,113 @@ class AcademicTests(Workbench):
         s = self.new_session("report", title="R")
         out = self.ac.contents(s, after=None)
         self.assertGreaterEqual(out["entries"], 1)
-        toc = [b for b in s.doc["blocks"] if b["type"] == "list_item"][:out["entries"]]
+        toc = [b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry"]
+        self.assertTrue(all(b["type"] == "paragraph" for b in toc))
         self.assertTrue(all(any(sp["type"] == "xref" for sp in b.get("spans", [])) for b in toc))
+
+    def test_managed_contents_refresh_is_atomic_and_does_not_include_itself(self):
+        s = self.new_session("report", title="R")
+        initial = self.ac.contents(s, after=None)
+        toc_id = initial["tocId"]
+        before_count = len(s.doc["blocks"])
+        original_title = next(b for b in s.doc["blocks"] if b["id"] == initial["heading"])
+        self.assertEqual(original_title["type"], "paragraph")
+        heading = next(b for b in s.doc["blocks"] if b["type"] == "heading")
+        s.apply({"op": "text", "block": heading["id"], "start": 0, "end": len(heading["text"]), "insert": "Renamed section"}, None)
+        updated = self.ac.refresh_contents(s, toc_id)
+        self.assertEqual(len(s.doc["blocks"]), before_count)
+        self.assertEqual(updated["entries"], initial["entries"])
+        linked = [b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry"]
+        self.assertIn("Renamed section", [b["text"] for b in linked])
+        self.assertNotIn("Contents", [b["text"] for b in linked])
+        self.assertEqual(s.pkg.version, "1.1.0")
+        sldc().validate_package(s.pkg)
+        s.undo(None)
+        linked_after_undo = [b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry"]
+        self.assertNotIn("Renamed section", [b["text"] for b in linked_after_undo])
+
+    def test_missing_managed_toc_does_not_mutate_document(self):
+        s = self.new_session("report", title="R")
+        before = sldc().revision_id(s.pkg)
+        with self.assertRaises(BadRequest):
+            self.ac.refresh_contents(s, "0" * 24)
+        self.assertEqual(sldc().revision_id(s.pkg), before)
+
+    def test_toc_refresh_preserves_custom_label_format_and_preset(self):
+        s = self.new_session("report", title="R")
+        created = self.ac.contents(s, after=None, preset="academic")
+        toc_id = created["tocId"]
+        entry = next(b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry")
+        original_heading = entry["extensions"]["slai.sldc.toc"]["heading"]
+        custom = "My short TOC caption"
+        s.apply({"op": "text", "block": entry["id"], "start": 0, "end": len(entry["text"]), "insert": custom}, None)
+        s.apply({"op": "block_set", "block": entry["id"], "attributes": {"indent_mm": 19}}, None)
+        self.ac.refresh_contents(s, toc_id, depth=6, title="My Contents")
+        entries = [b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry"]
+        self.assertTrue(any(b["text"] == custom and b["attributes"]["indent_mm"] == 19 for b in entries))
+        self.assertEqual(entries[0]["type"], "paragraph")
+        title = next(b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "title")
+        self.assertEqual(title["text"], "My Contents")
+        self.assertEqual(title["extensions"]["slai.sldc.toc"]["preset"], "academic")
+        self.assertEqual(title["extensions"]["slai.sldc.toc"]["overrides"][original_heading]["label"], custom)
+        sldc().validate_package(s.pkg)
+
+    def test_toc_entry_customization_and_removal_are_undoable(self):
+        s = self.new_session("report", title="R")
+        toc_id = self.ac.contents(s, after=None)["tocId"]
+        entry = next(b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry")
+        heading_id = entry["extensions"]["slai.sldc.toc"]["heading"]
+        original_heading = next(b["text"] for b in s.doc["blocks"] if b["id"] == heading_id)
+
+        self.ac.refresh_contents(s, toc_id, entry={"heading": heading_id, "label": "Short label", "hidden": False})
+        entries = [b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry"]
+        self.assertIn("Short label", [b["text"] for b in entries])
+        self.assertEqual(next(b["text"] for b in s.doc["blocks"] if b["id"] == heading_id), original_heading)
+
+        self.ac.refresh_contents(s, toc_id, entry={"heading": heading_id, "hidden": True})
+        entries = [b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry"]
+        self.assertNotIn(heading_id, [b["extensions"]["slai.sldc.toc"]["heading"] for b in entries])
+        self.ac.refresh_contents(s, toc_id, entry={"heading": heading_id, "label": None, "hidden": False})
+        entries = [b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry"]
+        self.assertIn(original_heading, [b["text"] for b in entries])
+
+        before_remove = sldc().revision_id(s.pkg)
+        removed = self.ac.remove_contents(s, toc_id)
+        self.assertGreater(removed["removed"], 0)
+        self.assertFalse([b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc")])
+        self.assertTrue(any(b["id"] == heading_id for b in s.doc["blocks"]))
+        self.assertNotEqual(sldc().revision_id(s.pkg), before_remove)
+        s.undo(None)
+        self.assertTrue(any(b.get("extensions", {}).get("slai.sldc.toc") for b in s.doc["blocks"]))
+        sldc().validate_package(s.pkg)
+
+    def test_toc_rejects_invalid_entry_customizations_without_mutating(self):
+        s = self.new_session("report", title="R")
+        toc_id = self.ac.contents(s, after=None)["tocId"]
+        heading_id = next(b["id"] for b in s.doc["blocks"] if b["type"] == "heading")
+        before = sldc().revision_id(s.pkg)
+        for invalid in ({"heading": heading_id, "label": ""}, {"heading": heading_id, "hidden": "yes"},
+                        {"heading": "missing", "hidden": True}, {"heading": heading_id, "unexpected": 1}):
+            with self.subTest(invalid=invalid), self.assertRaises(BadRequest):
+                self.ac.refresh_contents(s, toc_id, entry=invalid)
+        self.assertEqual(sldc().revision_id(s.pkg), before)
+
+    def test_deleting_heading_removes_only_its_toc_entry_and_dangling_link(self):
+        s = self.new_session("report", title="R")
+        toc_id = self.ac.contents(s, after=None)["tocId"]
+        entry = next(b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry")
+        heading_id = entry["extensions"]["slai.sldc.toc"]["heading"]
+        self.ac.refresh_contents(s, toc_id, entry={"heading": heading_id, "label": "Short label"})
+        before = len([b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry"])
+        s.apply({"op": "block_delete", "blocks": [heading_id]}, None)
+        after = [b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "entry"]
+        self.assertEqual(len(after), before - 1)
+        self.assertFalse(any(b["extensions"]["slai.sldc.toc"]["heading"] == heading_id for b in after))
+        title = next(b for b in s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "title")
+        self.assertNotIn(heading_id, title["extensions"]["slai.sldc.toc"]["overrides"])
+        sldc().validate_package(s.pkg)
+        s.undo(None)
+        self.assertTrue(any(b["id"] == heading_id for b in s.doc["blocks"]))
 
     def test_delete_source_removes_citations(self):
         sid = self.add()["id"]

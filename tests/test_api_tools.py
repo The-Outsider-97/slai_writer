@@ -254,9 +254,16 @@ class Sources(ApiCase):
 
     def test_contents_list_links_to_headings(self):
         state = self.new_doc("TOC", "notes")
-        out = self.web.ok("POST", f"/api/docs/{state['sid']}/contents", {"after": state["blocks"][0]["id"]})
+        out = self.web.ok("POST", f"/api/docs/{state['sid']}/contents", {
+            "after": state["blocks"][0]["id"], "preset": "academic", "showPageNumbers": True,
+            "leaderDots": True, "refreshMode": "automatic"})
         self.assertGreaterEqual(out["entries"], 3)
-        self.assertIn("Make it again", out["note"])
+        self.assertIn("Update contents", out["note"])
+        meta = next(b["extensions"]["slai.sldc.toc"] for b in out["state"]["blocks"]
+                    if b.get("extensions", {}).get("slai.sldc.toc", {}).get("role") == "title")
+        self.assertEqual(meta["preset"], "academic")
+        self.assertTrue(meta["leader_dots"] and meta["show_page_numbers"])
+        self.assertEqual(meta["refresh_mode"], "automatic")
 
 
 class ExportImport(ApiCase):
