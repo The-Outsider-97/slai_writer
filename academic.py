@@ -15,6 +15,7 @@ The language agent can only propose edits to wording (see assist.py); it cannot 
 """
 from __future__ import annotations
 
+import copy
 import difflib
 import json
 import re
@@ -23,7 +24,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-
 from typing import Any, Callable
 
 from ..tools.errors import BadRequest, DependencyMissing, NotFound
@@ -36,9 +36,9 @@ STATUS_LABELS = {"user": "Provided by you", "imported": "Imported with the docum
                  "ai": "AI-suggested, not verified"}
 DOI = re.compile(r"^10\.\d{4,9}/\S{1,180}$")
 FOOTNOTE_ANCHOR = "​"
+TOC_EXTENSION = "slai.sldc.toc"
 CROSSREF = "https://api.crossref.org/works/"
 _FIELDS = ("key", "title", "container", "publisher", "volume", "issue", "pages", "note", "authors", "year", "doi", "url", "accessed")
-TOC_EXTENSION = "slai.sldc.toc"
 
 
 def _statuses(doc: dict[str, Any]) -> dict[str, Any]:
@@ -298,211 +298,144 @@ class Academic:
             prev = p["result"]["block"]
         return {"heading": head, "entries": len(entries), "warnings": warnings, "state": session.state()}
 
-    def contents(self, session: DocumentSession, after: str | None, title: str = "Contents", depth: int = 4) -> dict[str, Any]:
+    def contents(self, session: DocumentSession, after: str | None, title: str = "Contents", depth: int = 3,
+                 preset: str = "standard") -> dict[str, Any]:
+        """Insert a managed, refreshable TOC as one undoable document transaction.
+
+        Its metadata is an inert namespaced SLDC block extension, so readers can
+        preserve it even if they do not know how to regenerate a contents list.
         """
-        Insert a managed, refreshable TOC.
-
-        The operation is performed as one undoable
-        document transaction.
-
-        TOC metadata is preserved as a namespaced
-        SLDC block extension.
-        """
-
         with session.lock:
-            return self._contents(session, after, title, depth, toc_id=secrets.token_hex(12))
+            return self._contents(session, after, title, depth, toc_id=secrets.token_hex(12), preset=preset)
 
-    def refresh_contents(self, session: DocumentSession, toc_id: str) -> dict[str, Any]:
-        """
-        Refresh one existing managed TOC.
-
-        Only blocks belonging to this TOC are replaced.
-        Unrelated document content is preserved.
-        """
-
+    def refresh_contents(self, session: DocumentSession, toc_id: str, *, depth: int | None = None,
+                         title: str | None = None, preset: str | None = None,
+                         entry: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Replace only the generated blocks of one TOC; preserve surrounding content."""
         with session.lock:
             blocks = session.doc["blocks"]
-
-            owned = [
-                (index, block)
-                for index, block in enumerate(blocks)
-                if block.get(
-                    "extensions", {}
-                ).get(
-                    TOC_EXTENSION, {}
-                ).get("id") == toc_id
-            ]
-
-            titles = [
-                (index, block)
-                for index, block in owned
-                if block["extensions"][
-                    TOC_EXTENSION
-                ].get("role") == "title"
-            ]
-
+            owned = [(index, b) for index, b in enumerate(blocks)
+                     if b.get("extensions", {}).get(TOC_EXTENSION, {}).get("id") == toc_id]
+            titles = [(i, b) for i, b in owned if b["extensions"][TOC_EXTENSION].get("role") == "title"]
             if len(titles) != 1 or not owned:
                 raise BadRequest("This table of contents no longer exists or has invalid metadata.")
-
             index, title_block = titles[0]
             settings = title_block["extensions"][TOC_EXTENSION]
+            after = blocks[index - 1]["id"] if index else None
+            return self._contents(session, after, title if title is not None else title_block["text"],
+                                  depth if depth is not None else settings["depth"],
+                                  toc_id=toc_id, remove=[b["id"] for _, b in owned],
+                                  preset=preset if preset is not None else settings.get("preset", "standard"),
+                                  old_blocks=[b for _, b in owned], entry=entry)
 
-            after = (
-                blocks[index - 1]["id"]
-                if index
-                else None
-            )
+    def remove_contents(self, session: DocumentSession, toc_id: str) -> dict[str, Any]:
+        """Remove the generated TOC in one undoable transaction without touching headings."""
+        with session.lock:
+            owned = [b["id"] for b in session.doc["blocks"]
+                     if b.get("extensions", {}).get(TOC_EXTENSION, {}).get("id") == toc_id]
+            if not owned:
+                raise BadRequest("This table of contents no longer exists.")
+            session.apply({"op": "block_delete", "blocks": owned}, None)
+            return {"removed": len(owned), "state": session.state()}
 
-            return self._contents(
-                session,
-                after,
-                title_block["text"],
-                settings["depth"],
-                toc_id=toc_id,
-                remove=[block["id"] for _, block in owned],
-            )
-
-
-    def _contents(
-        self,
-        session: DocumentSession,
-        after: str | None,
-        title: str,
-        depth: int,
-        toc_id: str,
-        remove: list[str] | None = None,
-    ) -> dict[str, Any]:
-        """
-        Build and apply a managed TOC transaction.
-
-        The document's semantic headings are authoritative.
-
-        Existing generated TOC content is excluded from
-        heading collection.
-
-        All changes are applied through the existing
-        document operation system.
-        """
-
-        if (
-            not isinstance(depth, int)
-            or not 1 <= depth <= 6
-        ):
+    def _contents(self, session: DocumentSession, after: str | None, title: str, depth: int,
+                  toc_id: str, remove: list[str] | None = None, preset: str = "standard",
+                  old_blocks: list[dict[str, Any]] | None = None,
+                  entry: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not isinstance(depth, int) or not 1 <= depth <= 6:
             raise BadRequest("TOC depth must be between 1 and 6.")
-
-        generated_ids = {
-            block["id"]
-            for block in session.doc["blocks"]
-            if block.get("extensions", {}).get(TOC_EXTENSION)
-        }
-
-        headings = [
-            heading
-            for heading in session.outline()
-            if (
-                heading["level"] <= depth
-                and heading["text"].strip()
-                and heading["block"] not in generated_ids
-            )
-        ]
-
+        if preset not in ("standard", "compact", "academic"):
+            raise BadRequest("Choose a supported TOC preset.")
+        if not isinstance(title, str) or not title.strip() or len(title) > 80:
+            raise BadRequest("TOC title must contain 1–80 characters.")
+        generated_ids = {b["id"] for b in session.doc["blocks"]
+                         if b.get("extensions", {}).get(TOC_EXTENSION)}
+        headings = [h for h in session.outline() if h["level"] <= depth and h["text"].strip()
+                    and h["block"] not in generated_ids]
         if not headings:
             raise BadRequest("There are no headings to list yet.")
-
-        if (
-            len(headings) > 4998
-            or (remove and len(remove) > 5000)
-        ):
+        if len(headings) > 4998 or (remove and len(remove) > 5000):
             raise BadRequest("This document has too many headings for one TOC update.")
-
         if remove and after in remove:
             raise BadRequest("Cannot replace a TOC with an invalid insertion anchor.")
-
+        old_title = next((b for b in old_blocks or [] if b["extensions"][TOC_EXTENSION]["role"] == "title"), None)
+        old_entries = {b["extensions"][TOC_EXTENSION]["heading"]: b for b in old_blocks or []
+                       if b["extensions"][TOC_EXTENSION]["role"] == "entry"}
+        overrides = copy.deepcopy(old_title["extensions"][TOC_EXTENSION].get("overrides", {})) if old_title else {}
+        for heading, previous in old_entries.items():
+            old_text = previous["extensions"][TOC_EXTENSION].get("source_text")
+            if old_text is not None and previous["text"] != old_text:
+                overrides.setdefault(heading, {})["label"] = previous["text"]
+        # Drop overrides to headings no longer in the document; avoids stale cross-references.
+        present = {h["block"] for h in session.outline()}
+        overrides = {k: v for k, v in overrides.items() if k in present}
+        if entry is not None:
+            if not isinstance(entry, dict) or set(entry) - {"heading", "label", "hidden"}:
+                raise BadRequest("Invalid TOC entry customization.")
+            target = entry.get("heading")
+            if not isinstance(target, str) or target not in present:
+                raise BadRequest("The selected TOC heading no longer exists.")
+            if "hidden" in entry and not isinstance(entry["hidden"], bool):
+                raise BadRequest("TOC entry visibility must be true or false.")
+            label = entry.get("label")
+            if "label" in entry and label is not None and (
+                not isinstance(label, str) or not label.strip() or len(label) > 500
+            ):
+                raise BadRequest("A custom TOC entry label must contain 1–500 characters.")
+            custom = overrides.setdefault(target, {})
+            if "hidden" in entry:
+                if entry["hidden"]:
+                    custom["hidden"] = True
+                else:
+                    custom.pop("hidden", None)
+            if "label" in entry:
+                if label is None:
+                    custom.pop("label", None)
+                else:
+                    custom["label"] = label.strip()
+            if not custom:
+                del overrides[target]
         ops: list[dict[str, Any]] = []
         if remove:
-            ops.append({
-                "op": "block_delete",
-                "blocks": remove,
-            })
-
+            ops.append({"op": "block_delete", "blocks": remove})
         head = "toc_" + secrets.token_hex(12)
-
-        ops.append({
-            "op": "block_insert",
-            "after": after,
-            "block": {
-                "id": head,
-                "type": "paragraph",
-                "text": title,
-                "extensions": {
-                    TOC_EXTENSION: {
-                        "id": toc_id,
-                        "role": "title",
-                        "depth": depth,
-                    },
-                },
-            },
-        })
-
+        new_title: dict[str, Any] = {"id": head, "type": "paragraph", "text": title,
+            "extensions": {TOC_EXTENSION: {"id": toc_id, "role": "title", "depth": depth,
+                                           "preset": preset, "overrides": overrides}}}
+        if old_title:
+            for attr in ("attributes", "style"):
+                if attr in old_title:
+                    new_title[attr] = copy.deepcopy(old_title[attr])
+        else:
+            new_title["attributes"] = {"space_after_pt": 12}
+        ops.append({"op": "block_insert", "after": after, "block": new_title})
         prev = head
-
-        for heading in headings:
-            label = heading["text"].strip()
-
-            new_id = (
-                "toc_" + secrets.token_hex(12)
-            )
-
-            ops.append({
-                "op": "block_insert",
-                "after": prev,
-                "block": {
-                    "id": new_id,
-                    "type": "list_item",
-                    "text": label,
-                    "attributes": {
-                        "ordered": False,
-                        "depth": heading["level"] - 1,
-                    },
-                    "spans": [{
-                        "type": "xref",
-                        "start": 0,
-                        "end": len(label),
-                        "target": heading["block"],
-                    }],
-                    "extensions": {
-                        TOC_EXTENSION: {
-                            "id": toc_id,
-                            "role": "entry",
-                            "heading": heading["block"],
-                        },
-                    },
-                },
-            })
-
+        for item in headings:
+            override = overrides.get(item["block"], {})
+            if override.get("hidden") is True:
+                continue
+            source = item["text"].strip()
+            label = override.get("label", source)
+            new_id = "toc_" + secrets.token_hex(12)
+            previous = old_entries.get(item["block"])
+            spacing = {"compact": (3, 0), "standard": (6, 3), "academic": (7, 5)}[preset]
+            attributes = copy.deepcopy(previous.get("attributes", {})) if previous else {
+                "indent_mm": spacing[0] * (item["level"] - 1), "space_after_pt": spacing[1]}
+            entry: dict[str, Any] = {
+                "id": new_id, "type": "paragraph", "text": label,
+                "attributes": attributes,
+                "spans": [{"type": "xref", "start": 0, "end": len(label), "target": item["block"]}],
+                "extensions": {TOC_EXTENSION: {"id": toc_id, "role": "entry", "heading": item["block"],
+                                               "source_text": label}}}
+            if previous and previous.get("style"):
+                entry["style"] = previous["style"]
+            ops.append({"op": "block_insert", "after": prev, "block": entry})
             prev = new_id
-
-        session.apply({
-            "op": "batch",
-            "ops": ops,
-            "label": (
-                "refresh contents"
-                if remove
-                else "insert contents"
-            ),
-        }, None)
-
-        return {
-            "heading": head,
-            "tocId": toc_id,
-            "entries": len(headings),
-            "generatedAtRevision": session.revision_no,
-            "note": (
-                "Use Update contents after changing "
-                "document headings."
-            ),
-            "state": session.state(),
-        }
+        # The session validates the final document and records exactly one undo step.
+        session.apply({"op": "batch", "ops": ops, "label": "refresh contents" if remove else "insert contents"}, None)
+        return {"heading": head, "tocId": toc_id, "entries": len(ops) - (2 if remove else 1),
+                "generatedAtRevision": session.revision_no,
+                "note": "Use Update contents after changing document headings.", "state": session.state()}
 
     def cross_reference(self, session: DocumentSession, block_id: str, start: int, end: int, target: str) -> dict[str, Any]:
         return session.apply({"op": "span", "block": block_id, "start": start, "end": end, "kind": "xref", "target": target}, None)
