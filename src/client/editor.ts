@@ -614,16 +614,21 @@ export class Editor {
   }
 
   private async moveGuide(axis: "v" | "h", index: number, mm: number | null): Promise<void> {
+    if (this.readOnly) return;
     const guides = { v: [...(this.model.ext.guides?.v ?? [])], h: [...(this.model.ext.guides?.h ?? [])] };
     const list = guides[axis];
     if (index < 0 || index >= list.length) return;
-    if (mm !== null && !Number.isFinite(mm)) return;
+    const g = this.model.geometry();
+    const limit = axis === "v" ? g.widthMm : g.heightMm;
+    if (mm !== null && (!Number.isFinite(mm) || mm < 0 || mm > limit)) return;
     if (mm === null) list.splice(index, 1); else list[index] = Math.round(mm * 2) / 2;
     try { await this.op({ op: "ext_set", values: { guides: guides.v.length || guides.h.length ? guides : null }, label: "guides" }); } catch (e) { this.failed(e); }
   }
 
   async addGuide(axis: "v" | "h", mm: number): Promise<void> {
     if (!Number.isFinite(mm) || this.readOnly) return;
+    const g = this.model.geometry();
+    if (mm < 0 || mm > (axis === "v" ? g.widthMm : g.heightMm)) return;
     const guides = { v: [...(this.model.ext.guides?.v ?? [])], h: [...(this.model.ext.guides?.h ?? [])] };
     if (guides[axis].length >= 200) return;
     guides[axis].push(Math.round(mm * 2) / 2);

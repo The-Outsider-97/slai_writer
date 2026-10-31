@@ -527,6 +527,7 @@ export class PageView {
       g.addEventListener("contextmenu", context);
       g.addEventListener("keydown", (e) => { if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) context(e); });
       g.addEventListener("keydown", (e) => {
+        if (this.locked) return;
         if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); this.events.guideMove(axis, index, null); }
         const step = e.shiftKey ? 5 : 1;
         const delta = axis === "v" ? (e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0) : (e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0);
@@ -540,6 +541,7 @@ export class PageView {
   }
 
   private dragGuide(e: PointerEvent, el: HTMLElement, sheet: Sheet, axis: "v" | "h", index: number): void {
+    if (this.locked || e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
     el.setPointerCapture(e.pointerId);
@@ -548,16 +550,21 @@ export class PageView {
     const toMm = (ev: PointerEvent): number => ((axis === "v" ? ev.clientX - rect.left : ev.clientY - rect.top) / this.zoom) / MM_PX;
     this.dragging = true;
     const move = (ev: PointerEvent): void => { const at = Math.max(0, Math.min(limit, toMm(ev))); el.style.setProperty(axis === "v" ? "left" : "top", `${at * MM_PX}px`); this.showReadout(sheet, axis, Math.round(at * 2) / 2, "Guide"); };
-    const up = (ev: PointerEvent): void => {
+    const finish = (ev: PointerEvent, apply: boolean): void => {
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
+      el.removeEventListener("pointercancel", cancel);
       this.dragging = false;
       this.hideReadout();
+      if (!apply) { el.style.setProperty(axis === "v" ? "left" : "top", `${(this.last?.guides[axis]?.[index] ?? 0) * MM_PX}px`); return; }
       const mm = toMm(ev);
       this.events.guideMove(axis, index, mm < 0 || mm > limit ? null : Math.round(mm * 2) / 2);
     };
+    const up = (ev: PointerEvent): void => finish(ev, true);
+    const cancel = (ev: PointerEvent): void => finish(ev, false);
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
+    el.addEventListener("pointercancel", cancel);
   }
 
   private ticks(lengthMm: number, vertical: boolean, sheet: Sheet, kinds: LineKind[], label: string): SVGSVGElement {
