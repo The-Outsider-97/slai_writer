@@ -1,6 +1,7 @@
 """Integration regression for real bundled fonts, cover semantics, and SLDC spans."""
 import tempfile
 import unittest
+import shutil
 from pathlib import Path
 
 from applications.slai_writer.session import sldc
@@ -10,6 +11,21 @@ from src.utils.doc.fonts import FONT_ROOT, bundled_catalogue, discover_fonts, re
 
 
 class BundledFontTests(unittest.TestCase):
+    def test_bundled_font_requires_a_discoverable_licence(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            family = root / "SampleFamily"
+            nested = family / "static" / "ttf"
+            nested.mkdir(parents=True)
+            example = next(FONT_ROOT.rglob("*.ttf"))
+            shutil.copyfile(example, nested / "Sample.ttf")
+            self.assertFalse(discover_fonts(root), "Unlicensed font files must not be exposed as bundled faces")
+            (family / "LICENSE.txt").write_text("Sample license", encoding="utf-8")
+            discover_fonts.cache_clear()
+            found = discover_fonts(root)
+            self.assertEqual(len(found), 1)
+            self.assertEqual(found[0].license_file, "SampleFamily/LICENSE.txt")
+
     def test_font_catalogue_has_real_faces_and_no_filesystem_paths(self):
         self.assertTrue(FONT_ROOT.is_dir())
         catalog = bundled_catalogue()
