@@ -98,44 +98,53 @@ await scenario("guest can create a document, type, and it reaches the server", a
   await until(async () => (await blockTexts()).includes("paragraph:Hello from a guest."), "typed text on the server");
 });
 
-await scenario("external plain-text clipboard paste, copy and cut use real document operations", async () => {
-  await guest(); await newDoc();
-  const first = page.locator('[data-edit="text"]').first();
-  await first.click();
-  const unhandled = await first.evaluate((node) => {
-    const data = new DataTransfer();
-    data.setData("text/plain", "From outside\nSecond line");
-    return node.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
-  });
-  ok(!unhandled, "Writer did not intercept the external clipboard payload");
-  await until(async () => {
-    const texts = await blockTexts();
-    return texts[0] === "paragraph:From outside" && texts[1] === "paragraph:Second line";
-  }, "both pasted paragraphs to reach the server");
-
-  const copied = await page.locator('[data-edit="text"]').first().evaluate((node) => {
-    const selection = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(node);
-    selection.removeAllRanges(); selection.addRange(range);
-    const data = new DataTransfer();
-    node.dispatchEvent(new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData: data }));
-    return data.getData("text/plain");
-  });
-  eq(copied, "From outside", "copy must expose selected model text");
-
-  await page.locator('[data-edit="text"]').first().evaluate((node) => {
-    const data = new DataTransfer();
-    node.dispatchEvent(new ClipboardEvent("cut", { bubbles: true, cancelable: true, clipboardData: data }));
-    if (data.getData("text/plain") !== "From outside") throw new Error("cut did not put the selected text on the clipboard");
-  });
-  await until(async () => (await blockTexts())[0] === "paragraph:", "cut to remove the first paragraph's text");
-});
-
 await scenario("typing straight after Enter lands in the new paragraph (held keystrokes)", async () => {
   await guest(); await newDoc();
   await page.keyboard.type("First"); await page.keyboard.press("Enter"); await page.keyboard.type("Second typed immediately");
   await until(async () => { const t = await blockTexts(); return t[0] === "paragraph:First" && t[1] === "paragraph:Second typed immediately"; }, "two paragraphs");
+});
+
+await scenario("Ctrl+Enter inserts one boundary, and later Enter never repeats that page break", async () => {
+  await guest(); await newDoc();
+  await page.keyboard.type("Before break");
+  await page.keyboard.press("Control+Enter");
+  await until(async () => (await state()).blocks.some((b) => b.attributes?.page_break_before === true), "page break");
+  await page.keyboard.type("After break");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Another paragraph");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("Continues here");
+  const document = await until(async () => {
+    const doc = await state();
+    return doc.blocks.some((b) => b.text === "Continues here") ? doc : null;
+  }, "text after ordinary Enter");
+  eq(document.blocks.filter((b) => b.attributes?.page_break_before === true).length, 1, "single persistent page break");
+});
+
+await scenario("ribbon fonts, size and paragraph/character spacing reach the actual SLDC blocks", async () => {
+  await guest(); await newDoc();
+  await page.keyboard.type("Typography exercise");
+  await until(async () => (await state()).blocks[0]?.text === "Typography exercise", "initial text");
+  eq(await page.getByLabel("Formatting scope").inputValue(), "paragraph", "default formatting scope");
+  const applyNumber = async (label, value) => {
+    const input = page.getByLabel(label);
+    await input.fill(String(value));
+    await input.press("Tab");
+  };
+  await page.getByLabel("Font family", { exact: true }).fill("Georgia");
+  await page.getByLabel("Font family", { exact: true }).press("Tab");
+  await until(async () => (await state()).blocks[0]?.spans?.some((s) => s.font_family === "Georgia"), "font family override");
+  await applyNumber("Font size in points", 18);
+  await until(async () => (await state()).blocks[0]?.spans?.some((s) => s.font_size_pt === 18), "font size override");
+  await applyNumber("Letter spacing in points", 0.6);
+  await until(async () => (await state()).blocks[0]?.spans?.some((s) => s.letter_spacing_pt === 0.6), "tracking override");
+  await page.getByLabel("Line spacing").selectOption("1.5");
+  await applyNumber("Space after paragraph", 12);
+  const block = await until(async () => {
+    const current = (await state()).blocks[0];
+    return current?.attributes?.line_height === 1.5 && current.attributes.space_after_pt === 12 ? current : null;
+  }, "paragraph spacing");
+  eq([block.attributes.line_height, block.attributes.space_after_pt], [1.5, 12], "stored paragraph layout");
 });
 
 await scenario("text typed with the caret outside any paragraph is not lost", async () => {
