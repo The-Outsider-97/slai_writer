@@ -144,19 +144,114 @@ export function createSourcesPanel(ctx: DocCtx): Panel {
     const where = selectField("Insert it", [["cursor", "After the cursor"], ["end", "At the end of the document"], ["start", "At the start of the document"]], kind === "bibliography" ? "end" : "start");
     const only = checkbox("Only sources I have cited", true);
     const depth = selectField("Headings to include", [["1", "Level 1"], ["2", "Levels 1–2"], ["3", "Levels 1–3"], ["4", "Levels 1–4"], ["5", "Levels 1–5"], ["6", "Levels 1–6"]], "3");
+    const titleField = h("input", { type: "text", value: "Contents", maxLength: 80, attrs: { "aria-label": "Contents title" } });
+    const preset = selectField("Contents appearance", [["standard", "Standard"], ["compact", "Compact"], ["academic", "Academic"]], "standard");
+    const pageNumbers = checkbox("Right-aligned printed page references", true);
+    const leaderDots = checkbox("Leader dots between entries and page references", true);
+    const automatic = checkbox("Automatically refresh when headings change", true);
     const handle = openDialog<true>({
       title: kind === "bibliography" ? "Insert a reference list" : "Insert a table of contents", size: "narrow",
-      body: h("div", { class: "stack" }, where.root, kind === "bibliography" ? only.root : depth.root,
-        h("p", { class: "fine", text: kind === "bibliography" ? "The list is built from each source's own fields. Check it against the real works before you publish." : "A contents list is a snapshot of the headings now. Make it again after you change the outline." })),
+      body: h("div", { class: "stack" }, where.root, kind === "bibliography" ? only.root : h("div", { class: "stack" }, labelled("Title", titleField), depth.root, preset.root, pageNumbers.root, leaderDots.root, automatic.root),
+        h("p", { class: "fine", text: kind === "bibliography" ? "The list is built from each source's own fields. Check it against the real works before you publish." : "Contents entries use stable heading references. Printed page numbers are measured by the PDF layout engine; custom entry labels and formatting survive refresh." })),
       actions: [{ label: "Insert", kind: "primary", run: async () => {
         try {
           const after = place(where.select.value);
           const reply = await mutate(ctx, () => kind === "bibliography"
             ? api.post<{ state: DocState; warnings?: string[]; note?: string }>(url(ctx, "bibliography"), { onlyCited: only.input.checked, after, heading: "References" })
-            : api.post<{ state: DocState; warnings?: string[]; note?: string }>(url(ctx, "contents"), { after, title: "Contents", depth: Number(depth.select.value) }));
+            : api.post<{ state: DocState; warnings?: string[]; note?: string }>(url(ctx, "contents"), { after, title: titleField.value, depth: Number(depth.select.value), preset: preset.select.value,
+              showPageNumbers: pageNumbers.input.checked, leaderDots: leaderDots.input.checked, refreshMode: automatic.input.checked ? "automatic" : "manual" }));
           const warnings = (reply as { warnings?: string[] }).warnings ?? [];
           if (warnings.length) toast(warnings.slice(0, 3).join(" "), { kind: "info", timeoutMs: 9000 });
           else toast(kind === "bibliography" ? "Reference list inserted." : "Table of contents inserted.", { kind: "ok" });
+          return true;
+        } catch (e) { toast(errorText(e), { kind: "error" }); return undefined; }
+      } }],
+    });
+    await handle.result;
+    await paint();
+  };
+
+  const updateContentsDialog = async (): Promise<void> => {
+    const entries = ctx.ed.model.list().filter((b) => {
+      const meta = (b.extensions?.["slai.sldc.toc"] ?? {}) as { role?: string };
+      return meta.role === "title";
+    });
+    if (!entries.length) { toast("Insert a table of contents first.", { kind: "info" }); return; }
+    const choice = selectField("Table of contents", entries.map((b) => {
+      const meta = b.extensions?.["slai.sldc.toc"] as { id: string };
+      return [meta.id, b.text] as [string, string];
+    }), (entries[0]?.extensions?.["slai.sldc.toc"] as { id: string }).id);
+    const titleField = h("input", { type: "text", maxLength: 80, attrs: { "aria-label": "Contents title" } });
+    const depth = selectField("Heading depth", [["1", "Level 1"], ["2", "Levels 1–2"], ["3", "Levels 1–3"], ["4", "Levels 1–4"], ["5", "Levels 1–5"], ["6", "Levels 1–6"]], "3");
+    const preset = selectField("Appearance", [["standard", "Standard"], ["compact", "Compact"], ["academic", "Academic"]], "standard");
+    const pageNumbers = checkbox("Right-aligned printed page references", true);
+    const leaderDots = checkbox("Leader dots between entries and page references", true);
+    const automatic = checkbox("Automatically refresh when headings change", true);
+    const headings = ctx.ed.model.list().filter((b) => b.type === "heading" && !b.extensions?.["slai.sldc.toc"]);
+    const individual = selectField("Individual entry", [["", "No individual change"], ...headings.map((b) => [b.id, b.text || "(Untitled heading)"] as [string, string])], "");
+    const custom = checkbox("Use a custom entry label (leave the heading unchanged)", false);
+    const label = h("input", { type: "text", maxLength: 500, attrs: { "aria-label": "Custom TOC entry label" } });
+    const hidden = checkbox("Hide this heading in this TOC", false);
+    const entryControls = h("div", { class: "stack" }, individual.root, custom.root, labelled("Entry label", label), hidden.root);
+    const updateEntryState = (): void => {
+      const enabled = !!individual.select.value;
+      custom.input.disabled = !enabled;
+      hidden.input.disabled = !enabled;
+      label.disabled = !enabled || !custom.input.checked;
+    };
+    const fillEntry = (): void => {
+      const title = entries.find((b) => (b.extensions?.["slai.sldc.toc"] as { id: string }).id === choice.select.value);
+      const heading = individual.select.value;
+      const meta = title?.extensions?.["slai.sldc.toc"] as { overrides?: Record<string, { label?: string; hidden?: boolean }> } | undefined;
+      const override = meta?.overrides?.[heading];
+      const actual = ctx.ed.model.list().find((b) => {
+        const m = b.extensions?.["slai.sldc.toc"] as { role?: string; id?: string; heading?: string; source_text?: string } | undefined;
+        return m?.role === "entry" && m.id === choice.select.value && m.heading === heading;
+      });
+      const m = actual?.extensions?.["slai.sldc.toc"] as { source_text?: string } | undefined;
+      const manuallyEdited = !!actual && m?.source_text !== undefined && actual.text !== m.source_text;
+      custom.input.checked = !!override?.label || manuallyEdited;
+      label.value = override?.label ?? (manuallyEdited ? actual?.text ?? "" : "");
+      hidden.input.checked = override?.hidden === true;
+      updateEntryState();
+    };
+    const fillSettings = (): void => {
+      const current = entries.find((b) => (b.extensions?.["slai.sldc.toc"] as { id: string }).id === choice.select.value);
+      if (!current) return;
+      const meta = current.extensions?.["slai.sldc.toc"] as { depth: number; preset?: string; show_page_numbers?: boolean; leader_dots?: boolean; refresh_mode?: string };
+      titleField.value = current.text;
+      depth.select.value = String(meta.depth);
+      preset.select.value = meta.preset ?? "standard";
+      pageNumbers.input.checked = meta.show_page_numbers !== false;
+      leaderDots.input.checked = meta.leader_dots !== false;
+      automatic.input.checked = meta.refresh_mode !== "manual";
+      fillEntry();
+    };
+    choice.select.addEventListener("change", fillSettings);
+    individual.select.addEventListener("change", fillEntry);
+    custom.input.addEventListener("change", updateEntryState);
+    fillSettings();
+    const handle = openDialog<true>({ title: "Update table of contents", size: "narrow",
+      body: h("div", { class: "stack" }, choice.root, labelled("Title", titleField), depth.root, preset.root,
+        pageNumbers.root, leaderDots.root, automatic.root, entryControls,
+        notice("Refresh follows heading IDs, not heading text. Custom labels and level-specific paragraph typography survive refresh. Printed page references come from the PDF layout engine.", "info")),
+      actions: [{ label: "Remove TOC", run: async () => {
+        const confirmed = await confirmDialog({ title: "Remove this table of contents?", message: "All generated TOC entries will be removed. Original headings and other document content will remain.", confirmLabel: "Remove TOC", danger: true });
+        if (!confirmed) return undefined;
+        try {
+          await mutate(ctx, () => api.post<{ state: DocState }>(url(ctx, `contents/${encodeURIComponent(choice.select.value)}/remove`), {}));
+          toast("Table of contents removed.", { kind: "ok" });
+          return true;
+        } catch (e) { toast(errorText(e), { kind: "error" }); return undefined; }
+      } }, { label: "Update", kind: "primary", run: async () => {
+        try {
+          const entry = individual.select.value ? { heading: individual.select.value,
+            label: custom.input.checked ? label.value : null, hidden: hidden.input.checked } : undefined;
+          await mutate(ctx, () => api.post<{ state: DocState }>(url(ctx, `contents/${encodeURIComponent(choice.select.value)}/refresh`),
+            { title: titleField.value, depth: Number(depth.select.value), preset: preset.select.value, entry,
+              showPageNumbers: pageNumbers.input.checked, leaderDots: leaderDots.input.checked,
+              refreshMode: automatic.input.checked ? "automatic" : "manual" }));
+          toast("Table of contents updated.", { kind: "ok" });
           return true;
         } catch (e) { toast(errorText(e), { kind: "error" }); return undefined; }
       } }],
@@ -227,7 +322,7 @@ export function createSourcesPanel(ctx: DocCtx): Panel {
     h("h2", { text: "Sources" }),
     h("p", { class: "fine", text: "Writer never invents a source. Each one shows who provided it and whether it was checked; only a DOI-registry match is shown as verified." }),
     h("div", { class: "actions" }, button("Add a source…", async () => { const id = await sourceDialog(ctx); if (id) await paint(); }, "primary", "plus"), button("Cross-reference…", () => xrefDialog(ctx), "", "link")),
-    h("div", { class: "actions" }, button("Insert reference list…", () => insertDialog("bibliography"), "", "book"), button("Insert contents…", () => insertDialog("contents"), "", "list")),
+    h("div", { class: "actions" }, button("Insert reference list…", () => insertDialog("bibliography"), "", "book"), button("Insert contents…", () => insertDialog("contents"), "", "list"), button("Update contents…", () => updateContentsDialog(), "", "list")),
     list);
   void statusBadge;
   return { el: root, refresh: paint };
