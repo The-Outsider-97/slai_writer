@@ -11,7 +11,7 @@ import { closeDocument, needsPassword, withPassword } from "./fileops.js";
 import { api, errorText, rawPost } from "./net.js";
 import { statusDots, themeToggle } from "./shell.js";
 import { signatureGraphicsDialog } from "./sigdialog.js";
-import { FONT_FAMILIES } from "./font_rules.js";
+import { FONT_FAMILIES, parseRibbonNumber } from "./font_rules.js";
 import { bundledFonts, ensureBundledFont } from "./font_catalog.js";
 import { resolveStyle } from "./render.js";
 import { segments } from "./textops.js";
@@ -220,7 +220,9 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
   const { ed } = ctx;
   const cmd = (id: string): Command => COMMANDS.find((c) => c.id === id) as Command;
   const run = (task: () => Promise<unknown> | unknown): void => {
-    ed.refocus();
+    // Editing a ribbon field takes browser focus away from the page. Restore
+    // the actual selected text/caret before reading ranges for an operation.
+    ed.refocus(ed.recallSelection());
     void Promise.resolve().then(task).catch((e: unknown) => toast(errorText(e), { kind: "error" }));
   };
   const fire = (id: string) => (): void => run(() => cmd(id).run(ctx));
@@ -243,21 +245,35 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
   const scope = h("select", { class: "ribbon-scope", attrs: { "aria-label": "Formatting scope", title: "Apply character formatting to" } },
     [["selection", "Selection"], ["character", "Character"], ["word", "Word"], ["sentence", "Sentence"], ["paragraph", "Paragraph"], ["section", "Section"], ["page", "Current page"], ["document", "Entire document"]]
       .map(([id, label]) => h("option", { value: id, text: label })));
+  // A bare caret should format existing text immediately. Selection remains
+  // available for precise character-level edits and next-typed-text styling.
+  scope.value = "paragraph";
   const activeScope = (): A.FormattingScope => scope.value as A.FormattingScope;
   const family = h("input", { class: "ribbon-family", type: "text", maxLength: 100,
     attrs: { "aria-label": "Font family", list: "writer-font-families", autocomplete: "off", spellcheck: "false", placeholder: "Font family" } });
   const families = h("datalist", { attrs: { id: "writer-font-families" } }, FONT_FAMILIES.map((name) => h("option", { value: name })));
+  const availableFamilies = new Set<string>(FONT_FAMILIES);
   const size = h("input", { class: "ribbon-size", type: "number", min: 4, max: 400, step: 0.5,
     attrs: { "aria-label": "Font size in points", title: "Font size (pt)" } });
-  family.addEventListener("change", () => {
-    const value = family.value.trim();
+  const applyFamily = (value: string): void => {
     // Keep font names as plain names, never CSS expressions or URL-bearing strings.
     if (!value || /[\x00-\x1f\x7f{};<>\\"'`]/.test(value)) { toast("Enter a valid font family name.", { kind: "error" }); update(); return; }
-    run(async () => { await ensureBundledFont(value).catch(() => {}); await A.setInlineProperty(ed, "font_family", value, activeScope()); });
+    run(async () => {
+      await A.setInlineProperty(ed, "font_family", value, activeScope());
+      try { await ensureBundledFont(value); ed.layout(); }
+      catch { toast(`Could not load the bundled font ${value}. A system fallback may be shown.`, { kind: "error" }); }
+    });
+  };
+  family.addEventListener("change", () => applyFamily(family.value.trim()));
+  const fontPicker = custom("Choose a bundled or system font", h("span", {}, chevron("down")), () => {
+    openMenu(fontPicker, [...availableFamilies].sort((a, b) => a.localeCompare(b)).map((name): MenuEntry => ({
+      label: name, run: () => { family.value = name; applyFamily(name); },
+    })), { label: "Document fonts" });
   });
+  fontPicker.classList.add("ribbon-font-picker");
   size.addEventListener("change", () => {
-    const value = Number(size.value);
-    if (!size.value || !Number.isFinite(value) || value < 4 || value > 400) { toast("Font size must be between 4 and 400 pt.", { kind: "error" }); update(); return; }
+    const value = parseRibbonNumber(size.value, 4, 400);
+    if (value === undefined) { toast("Font size must be between 4 and 400 pt.", { kind: "error" }); update(); return; }
     run(() => A.setInlineProperty(ed, "font_size_pt", value, activeScope()));
   });
   const style = h("select", { attrs: { "aria-label": "Paragraph style" } },
@@ -277,13 +293,16 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
   const reset = (key: "color" | "background", label: string): HTMLElement => custom(label, "×", () => run(() => A.setColour(ed, key, null, activeScope())));
   const line = h("select", { class: "ribbon-line", attrs: { "aria-label": "Line spacing" } },
     [["1", "Single"], ["1.15", "1.15"], ["1.5", "1.5"], ["2", "Double"], ["2.5", "2.5"], ["3", "Triple"]].map(([v, t]) => h("option", { value: v, text: t })));
-  line.addEventListener("change", () => run(() => A.setBlockAttribute(ed, { line_height: Number(line.value) }, "line spacing")));
+  line.addEventListener("change", () => {
+    const leading = Number(line.value);
+    run(() => A.setBlockAttribute(ed, { line_height: leading }, "line spacing"));
+  });
   const spacing = (key: "space_before_pt" | "space_after_pt", label: string): HTMLInputElement => {
     const i = h("input", { class: "ribbon-spacing", type: "number", min: 0, max: 1000, step: 1,
       attrs: { "aria-label": label, title: `${label} (pt)` } });
     i.addEventListener("change", () => {
-      const n = Number(i.value);
-      if (!i.value || !Number.isFinite(n) || n < 0 || n > 1000) { toast(`${label} must be 0–1000 pt.`, { kind: "error" }); update(); return; }
+      const n = parseRibbonNumber(i.value, 0, 1000);
+      if (n === undefined) { toast(`${label} must be 0–1000 pt.`, { kind: "error" }); update(); return; }
       run(() => A.setBlockAttribute(ed, { [key]: n }, "paragraph spacing"));
     });
     return i;
@@ -294,8 +313,8 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     const i = h("input", { class: "ribbon-tracking", type: "number", min, max, step: 0.1,
       attrs: { "aria-label": `${label} in points`, title: `${label} (pt)` } });
     i.addEventListener("change", () => {
-      const value = Number(i.value);
-      if (!i.value || !Number.isFinite(value) || value < min || value > max) {
+      const value = parseRibbonNumber(i.value, min, max);
+      if (value === undefined) {
         toast(`${label} must be between ${min} and ${max} pt.`, { kind: "error" }); update(); return;
       }
       run(() => A.setInlineProperty(ed, key, value, activeScope()));
@@ -308,7 +327,7 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
   };
   const trackingInputs = new Map<"letter_spacing_pt" | "word_spacing_pt", HTMLInputElement>();
   const fontGroup = h("div", { class: "ribbon-group font", attrs: { role: "group", "aria-label": "Font" } },
-    h("span", { class: "ribbon-controls" }, field("Scope", scope), field("Font family", family), families, field("Font size", size),
+    h("span", { class: "ribbon-controls" }, field("Scope", scope), field("Font family", family), fontPicker, families, field("Font size", size),
       tool("bold", "Bold", "bold", true), tool("italic", "Italic", "italic", true),
       tool("underline", "Underline", "underline", true), tool("strike", "Strikethrough", "strike", true),
       custom("Uppercase selected text", "A↑", () => run(() => A.transformCase(ed, "upper"))),
@@ -383,14 +402,16 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
       btn.setAttribute("aria-pressed", value === mixed ? "mixed" : String(value === true));
     }
     const font = inlineValue("font_family");
-    if (font !== mixed && typeof font === "string") family.value = font;
-    else { family.value = ""; family.placeholder = font === mixed ? "Mixed fonts" : "Font family"; }
+    if (document.activeElement !== family) {
+      if (font !== mixed && typeof font === "string") family.value = font;
+      else { family.value = ""; family.placeholder = font === mixed ? "Mixed fonts" : "Font family"; }
+    }
     const pt = inlineValue("font_size_pt");
-    size.value = typeof pt === "number" ? String(pt) : "";
+    if (document.activeElement !== size) size.value = typeof pt === "number" ? String(pt) : "";
     size.placeholder = pt === mixed ? "Mixed" : "pt";
     for (const [key, input] of trackingInputs) {
       const value = inlineValue(key);
-      input.value = typeof value === "number" ? String(value) : "";
+      if (document.activeElement !== input) input.value = typeof value === "number" ? String(value) : "";
       input.placeholder = value === mixed ? "Mixed" : "0";
     }
     const text = inlineValue("color");
@@ -398,12 +419,14 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     const bg = inlineValue("background");
     if (typeof bg === "string" && /^#[0-9a-fA-F]{6}$/.test(bg)) highlight.value = bg;
     const leading = paragraphValue("line_height");
-    line.value = typeof leading === "number" ? String(leading) : "1";
-    if (![...line.options].some((o) => o.value === line.value)) line.selectedIndex = -1;
+    if (document.activeElement !== line) {
+      line.value = typeof leading === "number" ? String(leading) : "1";
+      if (![...line.options].some((o) => o.value === line.value)) line.selectedIndex = -1;
+    }
     const beforeValue = paragraphValue("space_before_pt");
     const afterValue = paragraphValue("space_after_pt");
-    before.value = typeof beforeValue === "number" ? String(beforeValue) : beforeValue === mixed ? "" : "0";
-    after.value = typeof afterValue === "number" ? String(afterValue) : afterValue === mixed ? "" : "0";
+    if (document.activeElement !== before) before.value = typeof beforeValue === "number" ? String(beforeValue) : beforeValue === mixed ? "" : "0";
+    if (document.activeElement !== after) after.value = typeof afterValue === "number" ? String(afterValue) : afterValue === mixed ? "" : "0";
     if (block) {
       for (const option of Array.from(style.options)) if (option.dataset["customStyle"]) option.remove();
       for (const name of Object.keys(ed.model.meta.styles?.paragraph ?? {}).sort()) {
@@ -419,6 +442,7 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     el.querySelectorAll<HTMLButtonElement | HTMLSelectElement | HTMLInputElement>("button, select, input").forEach((c) => { c.disabled = dis; });
   };
   void bundledFonts().then(async (data) => {
+    data.families.forEach((name) => availableFamilies.add(name));
     families.replaceChildren(...[...new Set([...FONT_FAMILIES, ...data.families])].sort((a, b) => a.localeCompare(b)).map((name) => h("option", { value: name })));
     const used = new Set<string>();
     for (const row of ed.model.list()) {

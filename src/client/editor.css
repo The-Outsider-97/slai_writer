@@ -120,6 +120,7 @@
 .format-ribbon .iconbtn:disabled, .format-ribbon :is(input, select):disabled { opacity: .4; cursor: not-allowed; }
 .format-ribbon :is(input, select) { min-height: 30px; height: 30px; border: 1px solid #d4d4d4; background: white; color: #333; border-radius: 6px; font-size: 12px; padding: 2px 5px; box-shadow: none; }
 .format-ribbon .ribbon-family { width: 122px; }
+.format-ribbon .ribbon-font-picker { width: 19px; padding: 0; margin-left: -3px; }
 .format-ribbon .ribbon-scope { width: 102px; }
 .format-ribbon .ribbon-size { width: 51px; }
 .format-ribbon select[aria-label='Paragraph style'] { width: 103px; }
