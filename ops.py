@@ -12,6 +12,7 @@ import copy
 import math
 import re
 import uuid
+
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -24,6 +25,8 @@ STRUCTURAL = ("table", "figure", "equation", "embed")
 MAX_BLOCK_CHARS = 2_000_000
 MAX_TABLE_CELLS = 20_000
 WRITER_EXT = "slai.writer"
+SEMANTIC_STYLES = frozenset({"Body Text", "Quote", "Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"}
+                             | {f"Heading {n}" for n in range(1, 7)} | {f"TOC Level {n}" for n in range(1, 7)})
 EXT_KEYS = ("guides", "background", "layers", "layer_of", "view", "dictionary", "spell_ignore", "signature_marks", "locks", "versions", "source_status")
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9 _.-]{0,63}$")
 _COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -788,6 +791,11 @@ def op_page_setup(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
         sections.append(section)
     if "page" in op:
         page = copy.deepcopy(_d(op, "page"))
+        # Preserve the original margins before updating the page.  A ruler drag
+        # sends only one side; taking margins from section["page"] *after* the
+        # shallow merge would read the new partial object and lose the other
+        # three sides (which then silently defaulted to 25 mm).
+        prior_margins = copy.deepcopy(section.get("page", {}).get("margins_mm", {}))
         section["page"] = {**section.get("page", {}), **page}
         for band in ("header_mm", "footer_mm"):                 # null puts the header or footer back to its default place
             if section["page"].get(band, 0) is None:
@@ -798,7 +806,7 @@ def op_page_setup(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
         elif "width_mm" in page or "height_mm" in page:         # a custom size replaces a named one (the format allows only one of the two)
             section["page"].pop("size", None)
         if "margins_mm" in page:
-            section["page"]["margins_mm"] = {**(section.get("page", {}).get("margins_mm", {})), **page["margins_mm"]}
+            section["page"]["margins_mm"] = {**prior_margins, **page["margins_mm"]}
     for key in ("columns", "column_gap_mm", "numbering", "role"):
         if key in op:
             if op[key] is None:
@@ -890,6 +898,8 @@ def op_style_define(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     styles = copy.deepcopy(tr.key("styles") or {})
     group = styles.setdefault(kind, {})
     if op.get("delete"):
+        if kind == "paragraph" and name in SEMANTIC_STYLES:
+            raise OpError("Built-in semantic paragraph styles may be reset, but not deleted")
         if kind == "paragraph" and any(b.get("style") == name for b in tr.doc["blocks"]):
             raise Conflict(f"Style '{name}' is still in use")
         if kind == "character" and any(s.get("style") == name for b in tr.doc["blocks"]
@@ -903,6 +913,15 @@ def op_style_define(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     if not group:
         styles.pop(kind, None)
     tr.doc["styles"] = styles
+    # Native heading and body paragraphs historically omitted explicit style
+    # references. Attach a defined semantic style to these unstyled blocks so
+    # the editor and PDF use the same effective style without direct formatting.
+    if kind == "paragraph" and not op.get("delete"):
+        for block in tr.doc["blocks"]:
+            semantic = (f"Heading {block.get('attributes', {}).get('level', 1)}" if block["type"] == "heading"
+                        else "Body Text" if block["type"] == "paragraph" else "Quote" if block["type"] == "quote" else None)
+            if semantic == name and not block.get("style"):
+                tr.get(block["id"])["style"] = name
     if not styles:
         tr.doc.pop("styles", None)
     return {}
@@ -914,6 +933,8 @@ def op_style_rename(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     kind, name, new_name = _s(op, "kind"), _s(op, "name", limit=64), _s(op, "new_name", limit=64)
     if kind not in ("paragraph", "character") or not _NAME.fullmatch(new_name):
         raise OpError("The style kind or new name is invalid")
+    if kind == "paragraph" and name in SEMANTIC_STYLES:
+        raise OpError("Built-in semantic paragraph styles cannot be renamed")
     styles = copy.deepcopy(tr.key("styles") or {})
     group = styles.get(kind, {})
     if name not in group:
@@ -1023,6 +1044,19 @@ def _check_layer_of(value: Any) -> None:
             raise OpError("layer_of maps a block id to a layer id")
 
 
+def _check_guides(value: Any) -> None:
+    """Validate the existing lightweight nonprinting guide representation."""
+    if not isinstance(value, dict) or set(value) - {"v", "h"}:
+        raise OpError("Guides must contain vertical and/or horizontal positions")
+    for axis in ("v", "h"):
+        positions = value.get(axis, [])
+        if not isinstance(positions, list) or len(positions) > 200:
+            raise OpError("Each guide direction allows at most 200 positions")
+        for position in positions:
+            if isinstance(position, bool) or not isinstance(position, (int, float)) or not math.isfinite(position) or not 0 <= position <= 2000:
+                raise OpError("Guide positions must be finite millimetre values")
+
+
 @handler("ext_set")
 def op_ext_set(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     """Writer's own notes in the document (guides, page background, view): stored under extensions['slai.writer'], which other
@@ -1036,6 +1070,8 @@ def op_ext_set(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
             _check_layers(value)
         if value is not None and key == "layer_of":
             _check_layer_of(value)
+        if value is not None and key == "guides":
+            _check_guides(value)
         if value is None:
             mine.pop(key, None)
         else:

@@ -111,6 +111,12 @@ export const COMMANDS: Command[] = [
   { id: "zoom-100", label: "Zoom 100%", group: "View", shortcut: "Ctrl+0", run: (c) => c.ui.setZoom(100) },
   { id: "rulers", label: "Show or hide rulers", group: "View", icon: "ruler", run: (c) => toggleView(c, "show_rulers") },
   { id: "guides", label: "Show or hide margin and guide lines", group: "View", run: (c) => toggleView(c, "show_guides") },
+  { id: "guide-vertical", label: "Add a vertical guide", group: "View", keywords: "page layout ruler guide vertical", unavailable: EDITING,
+    run: (c) => { const g = c.ed.model.geometry(c.ed.model.block(c.ed.recallSelection()?.start.block ?? "")?.section);
+      return c.ed.addGuide("v", (g.margins.left + g.widthMm - g.margins.right) / 2); } },
+  { id: "guide-horizontal", label: "Add a horizontal guide", group: "View", keywords: "page layout ruler guide horizontal", unavailable: EDITING,
+    run: (c) => { const g = c.ed.model.geometry(c.ed.model.block(c.ed.recallSelection()?.start.block ?? "")?.section);
+      return c.ed.addGuide("h", (g.margins.top + g.heightMm - g.margins.bottom) / 2); } },
   { id: "clear-guides", label: "Remove all guides", group: "View", unavailable: (c) => EDITING(c) ?? ((c.ed.model.ext.guides?.v?.length ?? 0) + (c.ed.model.ext.guides?.h?.length ?? 0) ? null : "There are no guides."), run: async (c) => { await c.ed.op({ op: "ext_set", values: { guides: null }, label: "guides" }); } },
   { id: "hide", label: "Hide or reveal (dim everything except the page)", group: "View", icon: "eye", keywords: "privacy blur cover", run: (c) => c.ui.toggleHidden() },
   { id: "layer-new", label: "New layer", group: "Document", icon: "layers", keywords: "add layer", shortcut: "Ctrl+Alt+Shift+N", unavailable: EDITING, run: async (c) => { const id = await A.newLayer(c.ed); if (id) c.ui.showLayers(); } },

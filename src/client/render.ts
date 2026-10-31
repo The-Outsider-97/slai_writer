@@ -157,6 +157,8 @@ function textElement(block: Block, ctx: RenderContext): HTMLElement {
 }
 
 function defaultStyle(block: Block): string | undefined {
+  if (block.type === "heading") return `Heading ${Math.min(6, Math.max(1, block.attributes?.level ?? 1))}`;
+  if (block.type === "quote") return "Quote";
   return block.type === "paragraph" || block.type === "list_item" ? "Body Text" : undefined;
 }
 

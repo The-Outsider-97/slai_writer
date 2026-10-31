@@ -7,6 +7,7 @@ import * as A from "../actions.js";
 import type { DocCtx, Panel } from "../docctx.js";
 import { api, errorText } from "../net.js";
 import type { DocState, Patch, SourceRow } from "../types.js";
+import { tocCoverAnchor } from "../toc_position.js";
 import { button, checkbox, emptyState, notice, selectField, statusBadge, fill } from "../widgets.js";
 
 interface SourcesData { sources: SourceRow[]; statuses: Record<string, string>; unverified: string[] }
@@ -135,13 +136,19 @@ export function createSourcesPanel(ctx: DocCtx): Panel {
 
   const place = (where: string): string | null => {
     const order = ctx.ed.model.order;
+    if (where === "cover") return tocCoverAnchor(ctx.ed.model.list(), ctx.ed.model.meta.sections ?? []);
     if (where === "start") return null;
     if (where === "end") return order[order.length - 1] ?? null;
     return A.anchorBlock(ctx.ed);
   };
 
   const insertDialog = async (kind: "bibliography" | "contents"): Promise<void> => {
-    const where = selectField("Insert it", [["cursor", "After the cursor"], ["end", "At the end of the document"], ["start", "At the start of the document"]], kind === "bibliography" ? "end" : "start");
+    if (kind === "contents" && ctx.ed.model.list().some((block) => (block.extensions?.["slai.sldc.toc"] as { role?: string } | undefined)?.role === "title")) {
+      toast("A table of contents already exists. Use Update table of contents to edit it.", { kind: "info" });
+      return;
+    }
+    const hasCover = (ctx.ed.model.meta.sections ?? []).some((s) => s.role === "cover") && tocCoverAnchor(ctx.ed.model.list(), ctx.ed.model.meta.sections ?? []) !== null;
+    const where = selectField("Insert it", [...(kind === "contents" && hasCover ? [["cover", "Immediately after cover"] as [string, string]] : []), ["cursor", "After the cursor"], ["end", "At the end of the document"], ["start", "At the start of the document"]], kind === "bibliography" ? "end" : hasCover ? "cover" : "start");
     const only = checkbox("Only sources I have cited", true);
     const depth = selectField("Headings to include", [["1", "Level 1"], ["2", "Levels 1–2"], ["3", "Levels 1–3"], ["4", "Levels 1–4"], ["5", "Levels 1–5"], ["6", "Levels 1–6"]], "3");
     const titleField = h("input", { type: "text", value: "Contents", maxLength: 80, attrs: { "aria-label": "Contents title" } });
