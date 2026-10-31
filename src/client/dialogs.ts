@@ -278,6 +278,13 @@ export async function linkDialog(ctx: DocCtx): Promise<void> {
 }
 
 /* ------------------------------------------------------------------------------------------------------ page colour */
+/** A page colour is precisely one opaque six-digit RGB value, never a CSS expression. */
+export function parsePageColour(value: string): string | null {
+  if (typeof value !== "string") return null;
+  const candidate = value.trim();
+  return /^#[0-9a-fA-F]{6}$/.test(candidate) ? candidate.toLowerCase() : null;
+}
+
 export async function backgroundDialog(ctx: DocCtx): Promise<void> {
   const { ed } = ctx;
   const current = ed.model.ext.background?.color ?? "#ffffff";
@@ -289,7 +296,9 @@ export async function backgroundDialog(ctx: DocCtx): Promise<void> {
   });
   const choice = await handle.result;
   if (!choice) return;
-  await guarded(ctx, () => ed.op({ op: "ext_set", values: { background: choice === "set" ? { color: colour.value } : null }, label: "page background" }));
+  const selected = parsePageColour(colour.value);
+  if (choice === "set" && selected === null) { toast("Choose an RGB colour in #rrggbb format.", { kind: "error" }); return; }
+  await guarded(ctx, () => ed.op({ op: "ext_set", values: { background: choice === "set" ? { color: selected } : null }, label: "page background" }));
 }
 
 /* ----------------------------------------------------------------------------------------------------- comments */
