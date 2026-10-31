@@ -78,6 +78,34 @@ class RibbonFormatting(Workbench):
         session.undo(None)
         self.assertEqual(session.doc["blocks"][-1]["text"], "Straße and Blue")
 
+    def test_page_break_is_not_inherited_by_enter_or_subsequent_paragraphs(self):
+        session, first_id = self.make("First paragraph")
+        session.apply({"op": "block_set", "block": first_id,
+                       "attributes": {"page_break_before": True}}, None)
+        session.apply({"op": "split", "block": first_id, "at": 5,
+                       "new_id": "after-break"}, None)
+        session.apply({"op": "split", "block": "after-break", "at": 3,
+                       "new_id": "ordinary-enter"}, None)
+        blocks = session.doc["blocks"]
+        self.assertTrue(blocks[0].get("attributes", {}).get("page_break_before"))
+        self.assertFalse(blocks[1].get("attributes", {}).get("page_break_before", False))
+        self.assertFalse(blocks[2].get("attributes", {}).get("page_break_before", False))
+        saved = sldc().loads_package(session.to_bytes()).document["blocks"]
+        self.assertEqual(sum(b.get("attributes", {}).get("page_break_before") is True
+                             for b in saved), 1)
+
+    def test_enter_at_start_moves_existing_page_break_with_original_text(self):
+        session, first_id = self.make("Original text")
+        session.apply({"op": "block_set", "block": first_id,
+                       "attributes": {"page_break_before": True}}, None)
+        session.apply({"op": "split", "block": first_id, "at": 0,
+                       "new_id": "original-after-enter"}, None)
+        left, right = session.doc["blocks"]
+        self.assertEqual(left["text"], "")
+        self.assertFalse(left.get("attributes", {}).get("page_break_before", False))
+        self.assertEqual(right["text"], "Original text")
+        self.assertTrue(right.get("attributes", {}).get("page_break_before"))
+
 
 if __name__ == "__main__":
     unittest.main()
