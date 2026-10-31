@@ -282,6 +282,25 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     const id = style.value;
     run(() => id.startsWith("user:") ? A.setParagraphStyle(ed, id.slice(5)) : cmd(id).run(ctx));
   });
+  // Native <select> option popups do not expose portable per-option context
+  // events. The keyboard/context-menu equivalent targets the selected style
+  // and offers the full manager for other styles.
+  const editSelectedStyle = (): void => {
+    const selected = style.selectedOptions[0]?.textContent?.trim() ?? "Body Text";
+    const name = selected === "Normal text" ? "Body Text" : selected;
+    void manageStyles(ctx, name);
+  };
+  const styleContext = (e: Event): void => {
+    e.preventDefault();
+    openMenu(style, [
+      { label: `Edit ${style.selectedOptions[0]?.textContent ?? "selected style"}…`, disabled: ed.readOnly, run: editSelectedStyle },
+      { label: "Manage all named styles…", disabled: ed.readOnly, run: () => { void manageStyles(ctx); } },
+    ], { label: "Paragraph style options" });
+  };
+  style.addEventListener("contextmenu", styleContext);
+  style.addEventListener("keydown", (e) => {
+    if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) styleContext(e);
+  });
   const manageStyle = custom("Manage named styles", "Aa", () => { void manageStyles(ctx); });
   const colour = (key: "color" | "background", label: string, value: string): HTMLInputElement => {
     const i = h("input", { type: "color", value, attrs: { "aria-label": label, title: label } });
@@ -347,6 +366,29 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
       h("span", { class: "ribbon-number", attrs: { title: "Space after paragraph (pt)" } }, h("span", { text: "↓" }), after)),
     h("span", { class: "ribbon-group-label", text: "Paragraph / Alignment" }));
   const el = h("div", { class: "bar format-ribbon", attrs: { role: "toolbar", "aria-label": "Document formatting ribbon" } }, fontGroup, paragraphGroup);
+  const GROUPS_KEY = "writer.ribbonGroups.v1";
+  const groupRows = [{ id: "font", label: "Font", element: fontGroup }, { id: "paragraph", label: "Paragraph / Alignment", element: paragraphGroup }];
+  const readHidden = (): Set<string> => {
+    try { const stored = JSON.parse(window.localStorage.getItem(GROUPS_KEY) ?? "[]") as unknown;
+      return new Set(Array.isArray(stored) ? stored.filter((s): s is string => typeof s === "string" && groupRows.some((g) => g.id === s)) : []);
+    } catch { return new Set(); }
+  };
+  const hiddenGroups = readHidden();
+  const applyGroups = (): void => { for (const row of groupRows) row.element.hidden = hiddenGroups.has(row.id); };
+  const saveGroups = (): void => { try { window.localStorage.setItem(GROUPS_KEY, JSON.stringify([...hiddenGroups])); } catch { /* UI preference */ } applyGroups(); };
+  const groupMenu = (ev: Event): void => {
+    ev.preventDefault();
+    openMenu(el, [
+      ...groupRows.map((row): MenuEntry => ({ label: `${hiddenGroups.has(row.id) ? "☐" : "☑"} ${row.label}`, run: () => { if (hiddenGroups.has(row.id)) hiddenGroups.delete(row.id); else hiddenGroups.add(row.id); saveGroups(); } })),
+      { label: "Show all sections", run: () => { hiddenGroups.clear(); saveGroups(); } },
+      { label: "Restore default ribbon layout", run: () => { hiddenGroups.clear(); saveGroups(); } },
+      { label: "Hide ribbon", run: () => ctx.ui.toggleFormatBar() },
+    ], { label: "Ribbon section visibility" });
+  };
+  el.addEventListener("contextmenu", groupMenu);
+  el.tabIndex = 0;
+  el.addEventListener("keydown", (e) => { if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) groupMenu(e); });
+  applyGroups();
   const mixed = Symbol("mixed");
   type InlineKey = "bold" | "italic" | "underline" | "strike" | "font_family" | "font_size_pt" | "color" | "background" | "letter_spacing_pt" | "word_spacing_pt";
   const valueIn = (block: Block, part: ReturnType<typeof segments>[number] | null, key: InlineKey): string | number | boolean | undefined => {

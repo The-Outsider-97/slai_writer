@@ -86,6 +86,22 @@ export async function pageSetupDialog(ctx: DocCtx): Promise<void> {
   const width = numberInput(Math.round(g.widthMm * 10) / 10, 50, 1000, 0.5), height = numberInput(Math.round(g.heightMm * 10) / 10, 50, 1000, 0.5);
   const margin = (v: number): HTMLInputElement => numberInput(v, 0, 200, 0.5);
   const top = margin(g.margins.top), right = margin(g.margins.right), bottom = margin(g.margins.bottom), left = margin(g.margins.left);
+  const preset = selectField("Margin preset", [["custom", "Custom"], ["normal", "Normal (25 mm)"], ["narrow", "Narrow (15 mm)"], ["wide", "Wide (35 mm)"]], "custom");
+  preset.select.addEventListener("change", () => {
+    const value = ({ normal: 25, narrow: 15, wide: 35 } as Record<string, number>)[preset.select.value];
+    if (value === undefined) return;
+    for (const input of [top, right, bottom, left]) input.value = String(value);
+  });
+  const header = numberInput(g.headerMm, 0, 500, 0.5), footer = numberInput(g.footerMm, 0, 500, 0.5);
+  const defaultHeader = checkbox("Automatic header position", page.header_mm === undefined);
+  const defaultFooter = checkbox("Automatic footer position", page.footer_mm === undefined);
+  const syncBand = (): void => { header.disabled = defaultHeader.input.checked; footer.disabled = defaultFooter.input.checked; };
+  defaultHeader.input.addEventListener("change", syncBand);
+  defaultFooter.input.addEventListener("change", syncBand);
+  syncBand();
+  const showRulers = checkbox("Show rulers", ctx.app.prefs.show_rulers);
+  const showGuides = checkbox("Show editing guides", ctx.app.prefs.show_guides);
+  const units = selectField("Ruler units", [["mm", "Millimetres"], ["in", "Inches"]], ctx.app.prefs.units);
   const custom = h("div", { class: "grid-2" }, labelled("Width (mm)", width), labelled("Height (mm)", height));
   const all = sections.length > 1 ? checkbox("Apply to every section", false) : null;
   const error = errorLine();
@@ -95,24 +111,42 @@ export async function pageSetupDialog(ctx: DocCtx): Promise<void> {
   const body = h("div", { class: "stack" },
     sections.length > 1 ? h("p", { class: "muted", text: `Editing ${sectionLabel(sections, sectionId)}.` }) : null,
     h("div", { class: "grid-2" }, size.root, orientation.root), custom,
-    h("fieldset", {}, h("legend", { text: "Margins (mm)" }), h("div", { class: "grid-4" }, labelled("Top", top), labelled("Right", right), labelled("Bottom", bottom), labelled("Left", left))),
+    h("fieldset", {}, h("legend", { text: "Margins (mm)" }), preset.root, h("div", { class: "grid-4" }, labelled("Top", top), labelled("Right", right), labelled("Bottom", bottom), labelled("Left", left))),
+    h("details", {}, h("summary", { text: "Header and footer positions" }),
+      h("div", { class: "grid-2" }, labelled("Header distance from top (mm)", header), labelled("Footer distance from bottom (mm)", footer), defaultHeader.root, defaultFooter.root)),
+    h("details", {}, h("summary", { text: "Ruler and guide preferences" }),
+      h("div", { class: "stack" }, showRulers.root, showGuides.root, units.root)),
     notice("Pages on screen are laid out block by block, so the page count here is approximate. The exact count comes from Print preview, which uses the same layout as the exported PDF.", "info"),
     all?.root ?? null, error.el);
   const handle = openDialog<true>({
     title: "Page dimensions", body,
     actions: [{ label: "Apply", kind: "primary", run: async () => {
       error.show(null);
-      const mm = (i: HTMLInputElement): number => Math.round((Number(i.value) || 0) * 2) / 2;
+      const mm = (i: HTMLInputElement): number => i.value.trim() ? Math.round(Number(i.value) * 2) / 2 : NaN;
       const wMm = size.select.value === "custom" ? mm(width) : (PAGE_MM[size.select.value]?.[0] ?? 210);
       const hMm = size.select.value === "custom" ? mm(height) : (PAGE_MM[size.select.value]?.[1] ?? 297);
       const pageWidth = orientation.select.value === "landscape" ? Math.max(wMm, hMm) : Math.min(wMm, hMm);
       const pageHeight = orientation.select.value === "landscape" ? Math.min(wMm, hMm) : Math.max(wMm, hMm);
       const m = { top: mm(top), right: mm(right), bottom: mm(bottom), left: mm(left) };
+      if (![pageWidth, pageHeight, ...Object.values(m)].every((v) => Number.isFinite(v) && v >= 0)) {
+        error.show("Enter valid finite page dimensions and margins."); return undefined;
+      }
       if (m.left + m.right > pageWidth - 25 || m.top + m.bottom > pageHeight - 25) { error.show("The margins leave less than 25 mm for text. Make them smaller."); return undefined; }
-      const pageProps: Record<string, unknown> = size.select.value === "custom" ? { width_mm: pageWidth, height_mm: pageHeight, orientation: orientation.select.value, margins_mm: m } : { size: size.select.value, orientation: orientation.select.value, margins_mm: m };
+      const headerMm = defaultHeader.input.checked ? null : mm(header);
+      const footerMm = defaultFooter.input.checked ? null : mm(footer);
+      if ((headerMm !== null && (!Number.isFinite(headerMm) || headerMm < 0)) ||
+          (footerMm !== null && (!Number.isFinite(footerMm) || footerMm < 0)) ||
+          (headerMm ?? 0) + (footerMm ?? 0) > pageHeight - 25) {
+        error.show("Header and footer positions must leave at least 25 mm between them."); return undefined;
+      }
+      const pageProps: Record<string, unknown> = size.select.value === "custom" ? { width_mm: pageWidth, height_mm: pageHeight, orientation: orientation.select.value, margins_mm: m, header_mm: headerMm, footer_mm: footerMm } : { size: size.select.value, orientation: orientation.select.value, margins_mm: m, header_mm: headerMm, footer_mm: footerMm };
       const ids = all?.input.checked ? sections.map((s) => s.id) : [sectionId];
       const ops = ids.map((id) => ({ op: "page_setup", section: id, page: pageProps }));
       const ok = await guarded(ctx, () => ed.op(ops.length === 1 ? (ops[0] as { op: string }) : { op: "batch", ops, label: "page setup" }));
+      if (ok) {
+        try { await ctx.app.setPrefs({ show_rulers: showRulers.input.checked, show_guides: showGuides.input.checked, units: units.select.value as "mm" | "in" }); ed.layout(); }
+        catch (e) { toast(errorText(e), { kind: "error" }); }
+      }
       return ok ? true : undefined;
     } }],
   });

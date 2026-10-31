@@ -3,7 +3,7 @@
  *  Pagination is deliberately block-granular: a block moves to the next sheet when it does not fit, and a paragraph is never split in
  *  the middle. The exact page count of a printed or exported document comes from the PDF preview (Documaster's own layout), so the
  *  page count shown here is an approximation, and the status bar says so. */
-import { h, s, glyph } from "./kit.js";
+import { h, s, glyph, openMenu, promptDialog } from "./kit.js";
 import { MM_PX, roman } from "./textops.js";
 import type { PageGeometry } from "./model.js";
 import type { GuideSet, HeaderFooter, Margins } from "./types.js";
@@ -25,11 +25,12 @@ export interface LayoutInput {
 
 export interface PageEvents {
   rulerDouble(): void;
-  pageDouble(section: string | undefined, xMm: number, yMm: number): void;
+  pageDouble(sheetIndex: number, section: string | undefined, xMm: number, yMm: number): void;
   margin(section: string | undefined, side: keyof Margins, mm: number): void;
   /** Where the header or the footer text sits: millimetres from the top edge (header) or the bottom edge (footer) of the page. */
   band(section: string | undefined, edge: "header" | "footer", mm: number): void;
   guideMove(axis: "v" | "h", index: number, mm: number | null): void;
+  guideAdd(axis: "v" | "h", mm: number): void;
 }
 
 export interface Sheet {
@@ -482,6 +483,12 @@ export class PageView {
         attrs: { tabindex: "0", role: "slider", "aria-orientation": spec.axis === "v" ? "horizontal" : "vertical", "aria-label": spec.name, "aria-valuemin": spec.min, "aria-valuemax": spec.max, "aria-valuenow": spec.mm, "aria-valuetext": this.describe(spec) },
       });
       l.style.setProperty(spec.axis === "v" ? "left" : "top", `${spec.mm * MM_PX}px`);
+      // Header/footer boundaries are contained within the writable horizontal
+      // span. Margin guides themselves still reach the page edges for dragging.
+      if (kind === "header" || kind === "footer") {
+        l.style.setProperty("left", `${sheet.geometry.margins.left * MM_PX}px`);
+        l.style.setProperty("right", `${sheet.geometry.margins.right * MM_PX}px`);
+      }
       l.addEventListener("pointerdown", (e) => this.startDrag(e, l, sheet, kind));
       l.addEventListener("pointerenter", () => { if (!this.dragging) this.showReadout(sheet, spec.axis, this.spec(sheet, kind).mm, spec.name); });
       l.addEventListener("pointerleave", () => this.hideReadout());
@@ -504,6 +511,21 @@ export class PageView {
       g.addEventListener("focus", () => this.showReadout(sheet, axis, mm, "Guide"));
       g.addEventListener("blur", () => this.hideReadout());
       g.addEventListener("dblclick", (e) => { e.stopPropagation(); this.events.guideMove(axis, index, null); });
+      const context = (e: Event): void => {
+        e.preventDefault(); e.stopPropagation();
+        openMenu(g, [
+          { label: "Edit position…", disabled: this.locked, run: () => { void (async () => {
+            const result = await promptDialog({ title: "Guide position", label: "Position (mm from page edge)", value: String(mm),
+              validate: (value) => { const n = Number(value); const max = axis === "v" ? sheet.geometry.widthMm : sheet.geometry.heightMm;
+                return value.trim() && Number.isFinite(n) && n >= 0 && n <= max ? null : `Choose a number from 0 to ${max} mm.`; } });
+            if (result !== null) this.events.guideMove(axis, index, Number(result));
+          })(); } },
+          { label: "Duplicate guide", disabled: this.locked, run: () => this.events.guideAdd(axis, mm) },
+          { label: "Remove guide", disabled: this.locked, run: () => this.events.guideMove(axis, index, null) },
+        ], { label: "Page guide" });
+      };
+      g.addEventListener("contextmenu", context);
+      g.addEventListener("keydown", (e) => { if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) context(e); });
       g.addEventListener("keydown", (e) => {
         if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); this.events.guideMove(axis, index, null); }
         const step = e.shiftKey ? 5 : 1;
@@ -669,7 +691,7 @@ export class PageView {
     const sheet = this.sheetOf(target);
     if (!sheet) return;
     const rect = sheet.el.getBoundingClientRect();
-    this.events.pageDouble(sheet.section, ((e.clientX - rect.left) / this.zoom) / MM_PX, ((e.clientY - rect.top) / this.zoom) / MM_PX);
+    this.events.pageDouble(this.sheets.indexOf(sheet), sheet.section, ((e.clientX - rect.left) / this.zoom) / MM_PX, ((e.clientY - rect.top) / this.zoom) / MM_PX);
   }
 
   get total(): number { return this.sheets.length; }

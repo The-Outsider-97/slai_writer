@@ -403,9 +403,11 @@ export async function setBlockType(ed: Editor, type: "paragraph" | "heading" | "
   const same = ids.every((id) => { const b = ed.model.block(id); return b?.type === type && Object.entries(attrs).every(([k, v]) => b.attributes?.[k] === v); });
   const target = same && type !== "paragraph" ? "paragraph" : type;
   const attributes = target === "paragraph" ? clear : { ...clear, ...attrs };
+  const semanticName = target === "heading" ? `Heading ${String(attrs["level"] ?? 1)}` : target === "paragraph" ? "Body Text" : target === "quote" ? "Quote" : null;
+  const definedStyle = semanticName && ed.model.meta.styles?.paragraph?.[semanticName] ? semanticName : null;
   const sel = ed.readSelection();
   await guarded(ed, async () => {
-    const ops: Op[] = ids.map((id) => ({ op: "block_set", block: id, type: target, attributes }));
+    const ops: Op[] = ids.map((id) => ({ op: "block_set", block: id, type: target, attributes, style: definedStyle }));
     await ed.op(ops.length === 1 ? (ops[0] as Op) : { op: "batch", ops, label: "paragraph type" });
     ed.restoreSelection(sel);
   });

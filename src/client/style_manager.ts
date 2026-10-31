@@ -4,6 +4,7 @@ import type { DocCtx } from "./docctx.js";
 import { errorText } from "./net.js";
 import { FRONT_MATTER_STYLES } from "./named_styles.js";
 import { ensureBundledFont } from "./font_catalog.js";
+import { applyStyle, resolveStyle } from "./render.js";
 import { checkbox, selectField } from "./widgets.js";
 
 type Props = Record<string, unknown>;
@@ -19,7 +20,7 @@ const fields: Array<[string, string, string, number, number]> = [
 ];
 
 /** Create, duplicate, rename, inherit, edit, reset and delete styles in existing document transactions. */
-export async function manageStyles(ctx: DocCtx): Promise<void> {
+export async function manageStyles(ctx: DocCtx, initialStyle?: string): Promise<void> {
   const { ed } = ctx;
   if (ed.readOnly) return;
   const kinds = selectField("Style category", [["paragraph", "Paragraph styles"], ["character", "Character styles"]], "paragraph");
@@ -30,6 +31,10 @@ export async function manageStyles(ctx: DocCtx): Promise<void> {
   const color = h("input", { type: "text", maxLength: 7, attrs: { "aria-label": "Font colour", placeholder: "Inherit colour or #rrggbb" } });
   const bold = selectField("Bold", [["", "Inherit"], ["true", "On"], ["false", "Off"]], "");
   const italic = selectField("Italic", [["", "Inherit"], ["true", "On"], ["false", "Off"]], "");
+  const underline = selectField("Underline", [["", "Inherit"], ["true", "On"], ["false", "Off"]], "");
+  const strike = selectField("Strikethrough", [["", "Inherit"], ["true", "On"], ["false", "Off"]], "");
+  const keepNext = selectField("Keep with next", [["", "Inherit"], ["true", "On"], ["false", "Off"]], "");
+  const highlight = h("input", { type: "text", maxLength: 7, attrs: { "aria-label": "Highlight colour", placeholder: "Inherit or #rrggbb" } });
   const alignment = selectField("Alignment", [["", "Inherit"], ["left", "Left"], ["center", "Centre"], ["right", "Right"], ["justify", "Justified"]], "");
   const numbers = new Map<string, HTMLInputElement>();
   const numeric = fields.map(([key, label, step, min, max]) => {
@@ -38,6 +43,7 @@ export async function manageStyles(ctx: DocCtx): Promise<void> {
     return labelled(label, input);
   });
   const includeOriginal = checkbox("Duplicate the current properties when creating a copy", true);
+  const preview = h("p", { class: "style-live-preview", text: "The quick brown fox jumps over the lazy dog. 0123456789" });
   const group = (): Record<string, Props> => ed.model.meta.styles?.[kinds.select.value as "paragraph" | "character"] ?? {};
   const inherited = (): Props => group()[existing.select.value] ?? {};
   const populate = (): void => {
@@ -48,12 +54,17 @@ export async function manageStyles(ctx: DocCtx): Promise<void> {
     parent.select.value = String(props["based_on"] ?? "");
     font.value = String(props["font_family"] ?? "");
     color.value = String(props["color"] ?? "");
+    highlight.value = String(props["background"] ?? "");
     bold.select.value = props["bold"] === undefined ? "" : String(props["bold"]);
     italic.select.value = props["italic"] === undefined ? "" : String(props["italic"]);
+    underline.select.value = props["underline"] === undefined ? "" : String(props["underline"]);
+    strike.select.value = props["strike"] === undefined ? "" : String(props["strike"]);
+    keepNext.select.value = props["keep_with_next"] === undefined ? "" : String(props["keep_with_next"]);
     alignment.select.value = String(props["align"] ?? "");
     for (const [key, input] of numbers) input.value = props[key] === undefined ? "" : String(props[key]);
     const character = kinds.select.value === "character";
     alignment.root.hidden = character;
+    keepNext.root.hidden = character;
     for (const key of ["line_height", "space_before_pt", "space_after_pt", "indent_mm", "first_line_indent_mm"]) {
       const input = numbers.get(key);
       if (input) input.parentElement!.hidden = character;
@@ -69,12 +80,17 @@ export async function manageStyles(ctx: DocCtx): Promise<void> {
   kinds.select.addEventListener("change", syncOptions);
   existing.select.addEventListener("change", populate);
   syncOptions();
+  if (initialStyle) {
+    if (group()[initialStyle]) { existing.select.value = initialStyle; populate(); }
+    else { existing.select.value = ""; populate(); name.value = initialStyle; }
+  }
 
   const collect = (): Props => {
     const props: Props = { ...inherited() };
     const update = (key: string, input: string): void => { if (input.trim()) props[key] = input.trim(); else delete props[key]; };
     update("font_family", font.value);
     update("color", color.value);
+    update("background", highlight.value);
     update("based_on", parent.select.value);
     for (const [key, input] of numbers) {
       if (kinds.select.value === "character" && ["line_height", "space_before_pt", "space_after_pt", "indent_mm", "first_line_indent_mm"].includes(key)) {
@@ -85,13 +101,28 @@ export async function manageStyles(ctx: DocCtx): Promise<void> {
       if (!Number.isFinite(n)) throw new Error(`Invalid ${key}`);
       props[key] = n;
     }
-    for (const [key, value] of [["bold", bold.select.value], ["italic", italic.select.value]] as Array<[string, string]>) {
+    for (const [key, value] of [["bold", bold.select.value], ["italic", italic.select.value], ["underline", underline.select.value], ["strike", strike.select.value], ["keep_with_next", kinds.select.value === "paragraph" ? keepNext.select.value : ""]] as Array<[string, string]>) {
       if (!value) delete props[key]; else props[key] = value === "true";
     }
     if (kinds.select.value === "paragraph") update("align", alignment.select.value);
     else delete props["align"];
     return props;
   };
+  const updatePreview = (): void => {
+    try {
+      const props = collect();
+      preview.removeAttribute("style");
+      const kind = kinds.select.value as "paragraph" | "character";
+      const based = typeof props["based_on"] === "string" ? props["based_on"] : undefined;
+      applyStyle(preview, { ...resolveStyle(ed.model.meta, kind, based), ...props }, kind === "paragraph");
+    } catch { /* The input currently being typed may be incomplete. */ }
+  };
+  for (const el of [name, font, color, highlight, ...numbers.values(), kinds.select, existing.select, parent.select,
+    bold.select, italic.select, underline.select, strike.select, alignment.select, keepNext.select]) {
+    el.addEventListener("input", updatePreview);
+    el.addEventListener("change", updatePreview);
+  }
+  updatePreview();
   const apply = async (action: "save" | "duplicate" | "rename" | "reset" | "delete"): Promise<true | undefined> => {
     const source = existing.select.value;
     const chosen = name.value.trim();
@@ -124,9 +155,9 @@ export async function manageStyles(ctx: DocCtx): Promise<void> {
 
   const handle = openDialog<true>({ title: "Manage named styles", size: "wide",
     body: h("div", { class: "stack" }, kinds.root, existing.root, labelled("Name / new name", name), parent.root,
-      h("div", { class: "grid-2" }, labelled("Font family", font), labelled("Font colour (#rrggbb)", color)),
-      h("div", { class: "grid-3" }, bold.root, italic.root, alignment.root),
-      h("div", { class: "grid-3" }, ...numeric), includeOriginal.root),
+      h("div", { class: "grid-3" }, labelled("Font family", font), labelled("Font colour (#rrggbb)", color), labelled("Highlight colour (#rrggbb)", highlight)),
+      h("div", { class: "grid-3" }, bold.root, italic.root, underline.root, strike.root, alignment.root, keepNext.root),
+      h("div", { class: "grid-3" }, ...numeric), labelled("Live style preview", preview), includeOriginal.root),
     actions: [{ label: "Delete", run: () => apply("delete") }, { label: "Reset", run: () => apply("reset") },
       { label: "Rename", run: () => apply("rename") }, { label: "Duplicate", run: () => apply("duplicate") },
       { label: "Save style", kind: "primary", run: () => apply("save") }],

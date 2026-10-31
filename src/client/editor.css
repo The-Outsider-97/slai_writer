@@ -111,6 +111,8 @@
 .format-ribbon .ribbon-group { display: flex; flex: 0 0 auto; flex-direction: column; min-width: 0; justify-content: space-between;
   gap: 2px; padding: 0 9px; border-right: 1px solid #dedede; }
 .format-ribbon .ribbon-group:last-child { border-right: 0; }
+.format-ribbon .ribbon-group[hidden] { display: none; }
+.style-live-preview { border: 1px solid var(--line, #c9c9c9); padding: 12px; min-height: 56px; border-radius: 8px; }
 .format-ribbon .ribbon-controls { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 .format-ribbon .ribbon-group-label { align-self: center; color: #737373; font-size: 10px; line-height: 13px; }
 .format-ribbon .iconbtn { flex: 0 0 auto; width: 30px; height: 30px; padding: 3px; border-radius: 6px; }

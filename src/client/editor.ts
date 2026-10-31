@@ -29,7 +29,7 @@ export type EditorEvent =
   | { type: "context"; x: number; y: number }
   | { type: "files"; files: File[]; after: string | null }
   | { type: "note-from-match"; block: string; start: number; end: number }
-  | { type: "page-double"; section: string | undefined; xMm: number; yMm: number }
+  | { type: "page-double"; sheetIndex: number; section: string | undefined; xMm: number; yMm: number }
   | { type: "ruler-double" }
   | { type: "link"; href: string }
   | { type: "reference"; id: string }
@@ -81,10 +81,11 @@ export class Editor {
     this.model = new DocModel(state);
     const pageEvents: PageEvents = {
       rulerDouble: () => this.events.emit({ type: "ruler-double" }),
-      pageDouble: (section, xMm, yMm) => this.events.emit({ type: "page-double", section, xMm, yMm }),
+      pageDouble: (sheetIndex, section, xMm, yMm) => this.events.emit({ type: "page-double", sheetIndex, section, xMm, yMm }),
       margin: (section, side, mm) => { void this.setMargin(section, side, mm); },
       band: (section, edge, mm) => { void this.setBand(section, edge, mm); },
       guideMove: (axis, index, mm) => { void this.moveGuide(axis, index, mm); },
+      guideAdd: (axis, mm) => { void this.addGuide(axis, mm); },
     };
     this.page = new PageView(pageEvents, this.model.readOnly ? "false" : EDIT_MODE);
     this.decor = new Decor((id) => this.textEl(id));
@@ -615,13 +616,61 @@ export class Editor {
   private async moveGuide(axis: "v" | "h", index: number, mm: number | null): Promise<void> {
     const guides = { v: [...(this.model.ext.guides?.v ?? [])], h: [...(this.model.ext.guides?.h ?? [])] };
     const list = guides[axis];
+    if (index < 0 || index >= list.length) return;
+    if (mm !== null && !Number.isFinite(mm)) return;
     if (mm === null) list.splice(index, 1); else list[index] = Math.round(mm * 2) / 2;
     try { await this.op({ op: "ext_set", values: { guides: guides.v.length || guides.h.length ? guides : null }, label: "guides" }); } catch (e) { this.failed(e); }
+  }
+
+  async addGuide(axis: "v" | "h", mm: number): Promise<void> {
+    if (!Number.isFinite(mm) || this.readOnly) return;
+    const guides = { v: [...(this.model.ext.guides?.v ?? [])], h: [...(this.model.ext.guides?.h ?? [])] };
+    if (guides[axis].length >= 200) return;
+    guides[axis].push(Math.round(mm * 2) / 2);
+    try { await this.op({ op: "ext_set", values: { guides }, label: "add guide" }); } catch (e) { this.failed(e); }
   }
 
   async addGuides(xMm: number, yMm: number): Promise<void> {
     const guides = { v: [...(this.model.ext.guides?.v ?? []), Math.round(xMm * 2) / 2], h: [...(this.model.ext.guides?.h ?? []), Math.round(yMm * 2) / 2] };
     try { await this.op({ op: "ext_set", values: { guides }, label: "guides" }); } catch (e) { this.failed(e); }
+  }
+
+  /** Begin the next ordinary flow paragraph at a blank-page double-click.
+   * Uses existing paragraph indentation and leading space (both SLDC and PDF
+   * supported), never absolute CSS or a run of blank paragraphs. As preceding
+   * content changes, this remains a flow paragraph rather than a fixed frame. */
+  async placeTextAt(sheetIndex: number, xMm: number, yMm: number): Promise<boolean> {
+    if (this.readOnly || !Number.isFinite(xMm) || !Number.isFinite(yMm)) return false;
+    const sheet = this.page.sheets[sheetIndex];
+    if (!sheet) return false;
+    const { widthMm, heightMm, margins } = sheet.geometry;
+    if (xMm < margins.left || xMm > widthMm - margins.right - 5 ||
+        yMm < margins.top || yMm > heightMm - margins.bottom - 5) return false;
+    const last = sheet.blocks[sheet.blocks.length - 1];
+    if (!last) return false;
+    const lastId = last.dataset["id"];
+    const block = lastId ? this.model.block(lastId) : undefined;
+    if (!block) return false;
+    const reuseEmpty = block.type === "paragraph" && block.text.length === 0 && !block.spans?.length;
+    const previous = reuseEmpty ? sheet.blocks[sheet.blocks.length - 2] : last;
+    const sheetRect = sheet.el.getBoundingClientRect();
+    const previousBottom = previous ? (previous.getBoundingClientRect().bottom - sheetRect.top) / this.page.zoom / MM_PX : margins.top;
+    // A paragraph cannot be moved on top of earlier content. A positive gap
+    // is a genuine paragraph-space-before value, not artificial newlines.
+    if (yMm < previousBottom + (previous ? 2 : 0)) return false;
+    const before = Math.round(Math.max(0, yMm - previousBottom) * 72 / 25.4 * 10) / 10;
+    const indent = Math.round((xMm - margins.left) * 10) / 10;
+    const attrs = { space_before_pt: before, indent_mm: indent };
+    const guides = { v: [...(this.model.ext.guides?.v ?? []), Math.round(xMm * 2) / 2],
+      h: [...(this.model.ext.guides?.h ?? []), Math.round(yMm * 2) / 2] };
+    const newId = reuseEmpty ? lastId : NEW_ID();
+    if (!newId) return false;
+    const edit: Op = reuseEmpty
+      ? { op: "block_set", block: lastId, attributes: attrs }
+      : { op: "block_insert", after: lastId, block: { id: newId, type: "paragraph", text: "", attributes: attrs, ...(sheet.section ? { section: sheet.section } : {}) } };
+    await this.op({ op: "batch", ops: [edit, { op: "ext_set", values: { guides } }], label: "position paragraph with guides" });
+    this.focusBlock(newId, 0);
+    return true;
   }
 
   setCursors(prefs: Prefs, custom: Array<{ id: string; hotspot: number[] }>): void {

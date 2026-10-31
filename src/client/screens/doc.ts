@@ -15,7 +15,7 @@ import { externalDialog, saveAsDialog, saveDocument } from "../docsave.js";
 import { Editor } from "../editor.js";
 import { Find } from "../find.js";
 import { installInput } from "../input.js";
-import { announce, clear, h, toast } from "../kit.js";
+import { announce, clear, h, openMenu, toast } from "../kit.js";
 import { api, errorText } from "../net.js";
 import { createEmbedDrawer } from "../panels/embed.js";
 import { createCommentsPanel, createNotesPanel, loadNotes, noteFromMatch, paintCommentMarks, paintNoteMarks, type NoteRow } from "../panels/notes.js";
@@ -90,6 +90,22 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
   const top = buildTopBar(ctx, find, () => nav);
   nav = createNavMenu(ctx, () => top.menuButton, (open) => top.setMenuOpen(open));
   const format = buildFormatBar(ctx);
+  const headerMenu = (e: Event): void => {
+    const target = e.target;
+    if (target instanceof Element && target.closest("button, input, select, a, [role=button]")) return;
+    e.preventDefault();
+    openMenu(top.el, [
+      { label: format.el.hidden ? "Show ribbon" : "Hide ribbon", run: () => ui.toggleFormatBar() },
+      { label: "Show ribbon and all sections", run: () => {
+        if (format.el.hidden) ui.toggleFormatBar();
+        try { window.localStorage.removeItem("writer.ribbonGroups.v1"); } catch { /* preference */ }
+        format.el.querySelectorAll<HTMLElement>(".ribbon-group").forEach((group) => { group.hidden = false; });
+      } },
+    ], { label: "Application header" });
+  };
+  top.el.addEventListener("contextmenu", headerMenu);
+  top.el.tabIndex = 0;
+  top.el.addEventListener("keydown", (e) => { if (e.target === top.el && (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))) headerMenu(e); });
   format.el.hidden = !barPref();
   const status = buildStatusBar(ctx, (r) => setZoom(r));
   const currentSheet = (): number => Math.max(0, ed.currentPage() - 1);
@@ -244,7 +260,13 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
         break;
       }
       case "note-from-match": void (async () => { try { const id = await noteFromMatch(ctx, e.block, e.start, e.end); if (id) { openPanel("yellow", "notes"); } } catch (err) { toast(errorText(err), { kind: "error" }); } })(); break;
-      case "page-double": if (ed.readOnly) toast("This document is read-only, so guides cannot be added.", { kind: "info" }); else void ed.addGuides(e.xMm, e.yMm); break;
+      case "page-double": {
+        if (ed.readOnly) { toast("This document is read-only.", { kind: "info" }); break; }
+        void ed.placeTextAt(e.sheetIndex, e.xMm, e.yMm).then((ok) => {
+          if (!ok) toast("Choose blank writable space below the existing text, inside the page margins.", { kind: "info" });
+        }).catch((error) => toast(errorText(error), { kind: "error" }));
+        break;
+      }
       case "ruler-double": if (!ed.readOnly) void pageSetupDialog(ctx); break;
       case "link": if (/^(https?:|mailto:)/i.test(e.href)) window.open(e.href, "_blank", "noopener,noreferrer"); break;
       case "reference": openPanel("yellow", "sources"); break;

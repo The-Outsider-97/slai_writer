@@ -2,6 +2,7 @@
 import unittest
 
 from applications.slai_writer.session import sldc
+from applications.slai_writer.ops import OpError
 from applications.slai_writer.tests.helpers import Workbench, png
 
 
@@ -55,6 +56,54 @@ class PageBands(Workbench):
         self.assertNotIn("header_mm", page)
         self.assertEqual(page["footer_mm"], 9)
         self.assertEqual(sldc().loads_package(session.to_bytes()).document["sections"][0]["page"]["footer_mm"], 9)
+
+    def test_margin_patches_preserve_all_other_sides_and_round_trip(self):
+        session = self.new_session()
+        margins = {"top": 15, "right": 20, "bottom": 25, "left": 30}
+        session.apply({"op": "page_setup", "page": {"margins_mm": margins}}, None)
+        session.apply({"op": "page_setup", "page": {"margins_mm": {"left": 35}}}, None)
+        expected = {**margins, "left": 35}
+        self.assertEqual(session.doc["sections"][0]["page"]["margins_mm"], expected)
+        session.apply({"op": "page_setup", "page": {"margins_mm": {"top": 18}}}, None)
+        expected["top"] = 18
+        self.assertEqual(session.doc["sections"][0]["page"]["margins_mm"], expected)
+        self.assertEqual(sldc().loads_package(session.to_bytes()).document["sections"][0]["page"]["margins_mm"], expected)
+
+    def test_guides_and_flow_positioning_are_one_undoable_change(self):
+        session = self.new_session()
+        original = session.doc["blocks"][-1]["id"]
+        session.apply({"op": "batch", "ops": [
+            {"op": "block_insert", "after": original, "block": {"id": "placed", "type": "paragraph", "text": "", "attributes": {"indent_mm": 25, "space_before_pt": 45}}},
+            {"op": "ext_set", "values": {"guides": {"v": [55], "h": [110]}}},
+        ], "label": "position paragraph with guides"}, None)
+        saved = sldc().loads_package(session.to_bytes()).document
+        placed = next(b for b in saved["blocks"] if b["id"] == "placed")
+        self.assertEqual(placed["attributes"]["indent_mm"], 25)
+        self.assertEqual(placed["attributes"]["space_before_pt"], 45)
+        self.assertEqual(saved["extensions"]["slai.writer"]["guides"], {"v": [55], "h": [110]})
+        session.undo(None)
+        self.assertFalse(any(b["id"] == "placed" for b in session.doc["blocks"]))
+        self.assertNotIn("guides", session.doc.get("extensions", {}).get("slai.writer", {}))
+
+    def test_bad_guide_data_does_not_enter_document(self):
+        session = self.new_session()
+        for positions in ([float("nan")], [-1], [float("inf")], list(range(201)), [True]):
+            with self.subTest(positions=str(positions[:3])):
+                with self.assertRaises(OpError):
+                    session.apply({"op": "ext_set", "values": {"guides": {"v": positions, "h": []}}}, None)
+
+    def test_margin_edit_does_not_modify_another_section(self):
+        session = self.new_session()
+        original = session.doc["blocks"][-1]["id"]
+        session.apply({"op": "page_setup", "section": "s1", "page": {
+            "margins_mm": {"top": 15, "right": 20, "bottom": 25, "left": 30}}}, None)
+        session.apply({"op": "section_break", "block": original}, None)
+        second = session.doc["sections"][-1]["id"]
+        session.apply({"op": "page_setup", "section": second, "page": {"margins_mm": {"right": 36}}}, None)
+        first_page = session.doc["sections"][0]["page"]
+        second_page = session.doc["sections"][-1]["page"]
+        self.assertEqual(first_page["margins_mm"], {"top": 15, "right": 20, "bottom": 25, "left": 30})
+        self.assertEqual(second_page["margins_mm"], {"top": 15, "right": 36, "bottom": 25, "left": 30})
 
 
 class OrphanPictures(Workbench):
