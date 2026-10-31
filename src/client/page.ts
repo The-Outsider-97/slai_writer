@@ -44,6 +44,25 @@ function alpha(n: number): string { let out = ""; let v = Math.max(1, n); while 
 
 export function formatPageNumber(n: number, format: string | undefined): string { return (NUMBER_FORMATS[format ?? "decimal"] ?? NUMBER_FORMATS["decimal"] as (n: number) => string)(n); }
 
+export interface NumberedSheet { section?: string; role?: string; numbering?: { start?: number; format?: string; show?: boolean } }
+
+/** Printed numbers are distinct from physical pages and derived from section semantics. */
+export function printedPageNumbers(sheets: NumberedSheet[]): Array<string | null> {
+  let current = 0;
+  let previousSection: string | undefined;
+  return sheets.map((sheet) => {
+    const config = sheet.numbering ?? {};
+    if (sheet.role === "cover" || config.show === false) {
+      previousSection = sheet.section;
+      return null;
+    }
+    if (sheet.section !== previousSection && config.start !== undefined) current = config.start - 1;
+    previousSection = sheet.section;
+    current += 1;
+    return formatPageNumber(current, config.format);
+  });
+}
+
 export function fillTemplate(text: string, values: { page: string; pages: string; title: string }): string {
   return text.replace(/\{\{|\}\}|\{page\}|\{pages\}|\{title\}/g, (m) => m === "{{" ? "{" : m === "}}" ? "}" : m === "{page}" ? values.page : m === "{pages}" ? values.pages : values.title);
 }
@@ -99,7 +118,7 @@ export class PageView {
   sheets: Sheet[] = [];
   zoom = 1;
   private last: LayoutInput | null = null;
-  private headerFooter: (section: string | undefined) => { header?: HeaderFooter; footer?: HeaderFooter; numbering?: { start?: number; format?: string } } = () => ({});
+  private headerFooter: (section: string | undefined) => { header?: HeaderFooter; footer?: HeaderFooter; role?: string; numbering?: { start?: number; format?: string; show?: boolean } } = () => ({});
 
   constructor(private readonly events: PageEvents, editable: string) {
     this.host = h("div", { class: "sheets", attrs: { contenteditable: editable, role: "textbox", "aria-multiline": "true", "aria-label": "Document", spellcheck: "false", id: "main" } });
@@ -298,15 +317,12 @@ export class PageView {
   /** Headers, footers, margin lines, guides and vertical rulers: all drawn per sheet once the page count is known. */
   private decorate(input: LayoutInput): void {
     const pages = this.sheets.length;
-    const counters = new Map<string, number>();
+    const labels = printedPageNumbers(this.sheets.map((sheet) => ({ section: sheet.section, ...this.headerFooter(sheet.section) })));
     this.sheets.forEach((sheet, i) => {
       const hf = this.headerFooter(sheet.section);
-      const numbering = hf.numbering ?? {};
-      const key = sheet.section ?? "";
-      const seen = counters.get(key) ?? 0;
-      counters.set(key, seen + 1);
-      const shown = (numbering.start ?? 1) + (numbering.start ? seen : i);
-      const values = { page: formatPageNumber(shown, numbering.format), pages: String(pages), title: input.title };
+      const printed = labels[i] ?? null;
+      sheet.el.dataset["printed"] = printed ?? "";
+      const values = { page: printed ?? "", pages: String(pages), title: input.title };
       const m = sheet.geometry.margins;
       const band = (edge: "header" | "footer", spec: HeaderFooter | undefined): HTMLElement | null => {
         if (!spec || (!spec.left && !spec.center && !spec.right)) return null;
@@ -317,8 +333,10 @@ export class PageView {
         row.style.setProperty("right", `${m.right * MM_PX}px`);
         return row;
       };
-      const extras: Array<HTMLElement | null> = [band("header", hf.header), band("footer", hf.footer)];
-      extras.push(h("div", { class: "page-no", attrs: { contenteditable: "false", "aria-hidden": "true" }, text: `${i + 1}` }));
+      // Hiding the printed number must not remove unrelated header/footer text.
+      // The explicitly designated cover, however, starts with empty page bands.
+      const extras: Array<HTMLElement | null> = hf.role === "cover" ? [] : [band("header", hf.header), band("footer", hf.footer)];
+      if (printed !== null) extras.push(h("div", { class: "page-no", attrs: { contenteditable: "false", "aria-hidden": "true" }, text: printed }));
       if (input.showMargins) extras.push(this.marginLines(sheet));
       if (input.showGuides) extras.push(this.guideLines(sheet, input.guides));
       for (const e of extras) if (e) sheet.el.appendChild(e);

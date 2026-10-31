@@ -48,6 +48,9 @@ const NEW_ID = (): string => `b${uid().slice(0, 16)}`;
 const SIG = (b: Block): string => JSON.stringify([b.type, b.style, b.attributes, b.spans, b.table, b.figure, b.equation, b.embed, b.type === "table" || b.type === "figure" ? b.text : 0]);
 
 export class Editor {
+  /** Measured PDF layout, never the editor's approximate block-granular sheet positions. */
+  printLayout: { version: number; pages: number; blockPages: Record<string, number>; blockLabels: Record<string, string>;
+                 printedLabels: Array<string | null>; sectionIds: string[] } | null = null;
   readonly model: DocModel;
   readonly queue: OpQueue;
   readonly page: PageView;
@@ -64,6 +67,9 @@ export class Editor {
   private reflowTimer: number | undefined;
   private settleTimer: number | undefined;
   private flushTimer: number | undefined;
+  private printLayoutTimer: number | undefined;
+  private tocRefreshTimer: number | undefined;
+  private lastTocHeadingSignature = "";
   private destroyed = false;
   stale = false;
   /** Formatting switched on with the caret in place (Ctrl+B with nothing selected): applied to the next text typed. */
@@ -85,13 +91,16 @@ export class Editor {
     this.queue = new OpQueue(this.model, (patch, op) => this.afterPatch(patch, op, true), () => { this.stale = true; this.events.emit({ type: "stale" }); });
     this.page.setHeaderFooter((section) => {
       const sec = (this.model.meta.sections ?? []).find((x) => x.id === section) ?? (this.model.meta.sections ?? [])[0];
-      const hf: { header?: HeaderFooter; footer?: HeaderFooter; numbering?: { start?: number; format?: string } } = {};
+      const hf: { header?: HeaderFooter; footer?: HeaderFooter; role?: string; numbering?: { start?: number; format?: string; show?: boolean } } = {};
       if (sec?.header) hf.header = sec.header;
       if (sec?.footer) hf.footer = sec.footer;
-      if (sec?.numbering) hf.numbering = sec.numbering as { start?: number; format?: string };
+      if (sec?.numbering) hf.numbering = sec.numbering as { start?: number; format?: string; show?: boolean };
+      if (sec?.role) hf.role = sec.role;
       return hf;
     });
     this.renderAll();
+    this.lastTocHeadingSignature = this.headingSignature();
+    this.schedulePrintLayout();
     document.addEventListener("selectionchange", this.onSelectionChange);
   }
 
@@ -101,6 +110,8 @@ export class Editor {
     window.clearTimeout(this.reflowTimer);
     window.clearTimeout(this.settleTimer);
     window.clearTimeout(this.flushTimer);
+    window.clearTimeout(this.printLayoutTimer);
+    window.clearTimeout(this.tocRefreshTimer);
     this.decor.clear();
   }
 
@@ -189,7 +200,78 @@ export class Editor {
     if (!onLine) this.restoreSelection(saved);
     if (this.selectedBlock) this.els.get(this.selectedBlock)?.setAttribute("data-selected", "");   // the block was drawn again: keep showing that it is selected
     this.decor.refresh();
+    this.paintTocNumbers();
     this.events.emit({ type: "layout" });
+  }
+
+  /** Exact TOC page labels are non-editable CSS decorations, not serialized text. */
+  private paintTocNumbers(): void {
+    const labels = this.printLayout?.blockLabels ?? {};
+    const titles = new Map<string, { show_page_numbers?: boolean; leader_dots?: boolean }>();
+    for (const block of this.model.list()) {
+      const toc = block.extensions?.["slai.sldc.toc"] as { role?: string; id?: string; show_page_numbers?: boolean; leader_dots?: boolean } | undefined;
+      if (toc?.role === "title" && toc.id) titles.set(toc.id, toc);
+    }
+    for (const element of this.els.values()) {
+      const heading = element.dataset["tocEntry"];
+      if (!heading) continue;
+      const text = element.querySelector<HTMLElement>("[data-edit=text]");
+      if (!text) continue;
+      const options = titles.get(element.dataset["tocId"] ?? "");
+      const label = options?.show_page_numbers === false ? "" : labels[heading] ?? "";
+      // Keep the editable text element's inline formatting and selection model
+      // untouched; page references are decorations on its block wrapper.
+      if (label) element.dataset["tocPage"] = label;
+      else delete element.dataset["tocPage"];
+      element.toggleAttribute("data-no-leaders", options?.leader_dots === false);
+    }
+  }
+
+  private headingSignature(): string {
+    return JSON.stringify(this.model.list().filter((b) => b.type === "heading")
+      .map((b) => [b.id, b.text, b.attributes?.level ?? 1]));
+  }
+
+  /** Refresh only managed automatic TOCs after the heading outline actually changes.
+   * Each refresh is an ordinary server transaction and patch, so undo and local
+   * selections are preserved. Debouncing avoids regenerating on every keypress. */
+  private scheduleTocRefresh(): void {
+    window.clearTimeout(this.tocRefreshTimer);
+    this.tocRefreshTimer = window.setTimeout(async () => {
+      if (this.destroyed || this.model.readOnly) return;
+      await this.flush();
+      await this.queue.idle();
+      if (this.destroyed) return;
+      const ids = this.model.list().flatMap((b) => {
+        const meta = b.extensions?.["slai.sldc.toc"] as { id?: string; role?: string; refresh_mode?: string } | undefined;
+        return meta?.role === "title" && meta.refresh_mode !== "manual" && meta.id ? [meta.id] : [];
+      });
+      for (const id of ids) {
+        if (this.destroyed) return;
+        try {
+          await this.call(() => api.post<{ patch: Patch }>(`/docs/${encodeURIComponent(this.sid)}/contents/${encodeURIComponent(id)}/refresh`, {}),
+            (result) => result.patch);
+        } catch (error) { this.events.emit({ type: "error", error }); return; }
+      }
+    }, 1000);
+  }
+
+  /** Debounced PDF measurement: one native layout source for preview and TOC references. */
+  schedulePrintLayout(): void {
+    window.clearTimeout(this.printLayoutTimer);
+    this.printLayout = null;
+    this.paintTocNumbers();
+    this.printLayoutTimer = window.setTimeout(async () => {
+      if (this.destroyed || this.queue.pending) { if (!this.destroyed) this.schedulePrintLayout(); return; }
+      const version = this.model.version;
+      try {
+        const layout = await api.get<NonNullable<Editor["printLayout"]>>(`/docs/${encodeURIComponent(this.sid)}/layout`);
+        if (this.destroyed || this.model.version !== version || layout.version !== version) return;
+        this.printLayout = layout;
+        this.paintTocNumbers();
+        this.events.emit({ type: "layout" });
+      } catch { /* Local editing still works if Documaster is not installed. */ }
+    }, 1200);
   }
 
   scheduleReflow(): void {
@@ -401,6 +483,7 @@ export class Editor {
     this.dirty.clear();
     this.deferred.clear();
     this.model.load(fresh);
+    this.lastTocHeadingSignature = this.headingSignature();
     this.stale = false;
     this.renderAll();
     this.restoreSelection(saved);
@@ -429,6 +512,11 @@ export class Editor {
 
   private afterPatch(patch: Patch, op: Op, local: boolean): void {
     const { changed, removed, reordered, documentChanged } = this.model.applyPatch(patch);
+    const headingSignature = this.headingSignature();
+    if (headingSignature !== this.lastTocHeadingSignature) {
+      this.lastTocHeadingSignature = headingSignature;
+      this.scheduleTocRefresh();
+    }
     this.invalidate();
     const ctx = this.ctx();
     let relayout = reordered || documentChanged;
@@ -474,6 +562,7 @@ export class Editor {
     } else this.scheduleReflow();
     if (documentChanged || relayout) this.decor.refresh();
     this.events.emit({ type: "patch", patch, local });
+    this.schedulePrintLayout();
     void op;
   }
 

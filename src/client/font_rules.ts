@@ -1,9 +1,9 @@
-/** SLDC-compatible paragraph font values; kept independent of UI and runtime dependencies. */
+/** SLDC-compatible paragraph font values; the catalogue augments these system-font suggestions at runtime. */
 export const FONT_FAMILIES = ["Arial", "Calibri", "Cambria", "Georgia", "Helvetica", "Times New Roman", "Verdana", "Courier New"] as const;
 
 export function paragraphFontProps(styles: Record<string, unknown>, family: string, size: number): Record<string, unknown> {
-  if (!FONT_FAMILIES.some((f) => f === family) || !Number.isFinite(size) || size < 4 || size > 400) {
-    throw new RangeError("Unsupported font family or size (4–400 pt).");
+  if (!family || family.length > 100 || /[\x00-\x1f\x7f{};<>\\"'`]/.test(family) || !Number.isFinite(size) || size < 4 || size > 400) {
+    throw new RangeError("Font family must be a plain name and font size 4–400 pt.");
   }
   const resolved = { ...styles };
   delete resolved["based_on"];

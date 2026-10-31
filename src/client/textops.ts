@@ -35,7 +35,7 @@ export function diffText(before: string, after: string, caretAfter?: number): Te
 export interface Segment {
   start: number; end: number; text: string;
   flags: { bold?: boolean; italic?: boolean; underline?: boolean; strike?: boolean; code?: boolean; superscript?: boolean; subscript?: boolean };
-  color?: string; background?: string; font_family?: string; font_size_pt?: number; href?: string; style?: string; ref?: string; target?: string; object?: Span;
+  color?: string; background?: string; font_family?: string; font_size_pt?: number; letter_spacing_pt?: number; word_spacing_pt?: number; href?: string; style?: string; ref?: string; target?: string; object?: Span;
 }
 
 const FLAGS = ["bold", "italic", "underline", "strike", "code", "superscript", "subscript"] as const;
@@ -63,6 +63,8 @@ export function segments(block: Pick<Block, "text" | "spans">): Segment[] {
         if (s.background) seg.background = s.background;
         if (s.font_family) seg.font_family = s.font_family;
         if (s.font_size_pt) seg.font_size_pt = s.font_size_pt;
+        if (s.letter_spacing_pt !== undefined) seg.letter_spacing_pt = s.letter_spacing_pt;
+        if (s.word_spacing_pt !== undefined) seg.word_spacing_pt = s.word_spacing_pt;
       } else if (s.type === "link" && s.href) seg.href = s.href;
       else if (s.type === "style" && s.style) seg.style = s.style;
       else if (s.type === "ref" && s.ref) seg.ref = s.ref;

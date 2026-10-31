@@ -52,6 +52,10 @@ export function applyStyle(el: HTMLElement, props: StyleProps, paragraph: boolea
   const set = (k: string, v: string): void => el.style.setProperty(k, v);
   if (typeof props["font_family"] === "string" && FONT_SAFE.test(props["font_family"])) set("font-family", `"${props["font_family"]}", serif`);
   if (typeof props["font_size_pt"] === "number") set("font-size", `${props["font_size_pt"]}pt`);
+  for (const [key, css, low, high] of [["letter_spacing_pt", "letter-spacing", -5, 50], ["word_spacing_pt", "word-spacing", -20, 100]] as const) {
+    const value = props[key];
+    if (typeof value === "number" && Number.isFinite(value) && value >= low && value <= high) set(css, `${value}pt`);
+  }
   if (props["bold"]) set("font-weight", "700");
   if (props["italic"]) set("font-style", "italic");
   const deco = [props["underline"] ? "underline" : "", props["strike"] ? "line-through" : ""].filter(Boolean).join(" ");
@@ -82,13 +86,17 @@ function pieceFor(seg: Segment, ctx: RenderContext, block: Block): Node {
   if (f.strike) wrap(h("s"));
   if (f.superscript) wrap(h("sup"));
   if (f.subscript) wrap(h("sub"));
-  if (seg.color || seg.background || seg.style || seg.font_family || seg.font_size_pt) {
+  if (seg.color || seg.background || seg.style || seg.font_family || seg.font_size_pt || seg.letter_spacing_pt !== undefined || seg.word_spacing_pt !== undefined) {
     const el = wrap(h("span", { class: "i-fmt" }));
     if (seg.style) applyStyle(el, resolveStyle(ctx.meta, "character", seg.style), false);
     if (seg.color && /^#[0-9a-fA-F]{6}$/.test(seg.color)) el.style.setProperty("color", seg.color);
     if (seg.background && /^#[0-9a-fA-F]{6}$/.test(seg.background)) el.style.setProperty("background-color", seg.background);
     if (seg.font_family && FONT_SAFE.test(seg.font_family)) el.style.setProperty("font-family", `"${seg.font_family}", serif`);
     if (typeof seg.font_size_pt === "number" && Number.isFinite(seg.font_size_pt) && seg.font_size_pt >= 4 && seg.font_size_pt <= 400) el.style.setProperty("font-size", `${seg.font_size_pt}pt`);
+    for (const [key, css, low, high] of [["letter_spacing_pt", "letter-spacing", -5, 50], ["word_spacing_pt", "word-spacing", -20, 100]] as const) {
+      const value = seg[key];
+      if (typeof value === "number" && Number.isFinite(value) && value >= low && value <= high) el.style.setProperty(css, `${value}pt`);
+    }
   }
   if (seg.href) {
     const safe = SAFE_LINK.test(seg.href);
@@ -241,6 +249,12 @@ export function footnoteNumbers(blocks: Block[], meta: DocMeta): Map<string, num
 
 export function renderBlock(block: Block, ctx: RenderContext): HTMLElement {
   const wrap = h("div", { class: `blk b-${block.type}`, data: { id: block.id, type: block.type } });
+  const toc = block.extensions?.["slai.sldc.toc"] as { role?: string; heading?: string; id?: string; level?: number } | undefined;
+  if (toc?.role === "entry" && toc.heading) {
+    wrap.dataset["tocEntry"] = toc.heading;
+    wrap.dataset["tocId"] = toc.id ?? "";
+    wrap.dataset["tocLevel"] = String(toc.level ?? 1);
+  }
   if (block.type === "list_item") wrap.appendChild(h("span", { class: "marker", text: ctx.markers.get(block.id) ?? "•", attrs: { "aria-hidden": "true", contenteditable: "false" } }));
   if (!ctx.readOnly) wrap.appendChild(h("button", { class: "grip", type: "button", attrs: { "aria-label": "Move block (or Alt+Shift+arrow keys)", title: "Drag to move", draggable: "true", tabindex: "-1" }, data: { grip: "" } }, glyph("drag")));
   switch (block.type) {

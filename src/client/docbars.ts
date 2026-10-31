@@ -15,6 +15,7 @@ import { FONT_FAMILIES } from "./font_rules.js";
 import { bundledFonts, ensureBundledFont } from "./font_catalog.js";
 import { resolveStyle } from "./render.js";
 import { segments } from "./textops.js";
+import { manageStyles } from "./style_manager.js";
 import type { Block } from "./types.js";
 import { ago, notice, pickFile } from "./widgets.js";
 
@@ -261,7 +262,11 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
   });
   const style = h("select", { attrs: { "aria-label": "Paragraph style" } },
     [["paragraph", "Normal text"], ["style-title", "Title"], ["style-subtitle", "Subtitle"], ["style-slogan", "Slogan"], ["style-author", "Author"], ["style-document-date", "Document Date"], ["style-toc-title", "TOC Title"], ["h1", "Heading 1"], ["h2", "Heading 2"], ["h3", "Heading 3"], ["h4", "Heading 4"], ["h5", "Heading 5"], ["h6", "Heading 6"], ["quote", "Quote"], ["code-block", "Code block"], ["bullets", "Bulleted list"], ["numbered", "Numbered list"]].map(([v, t]) => h("option", { value: v as string, text: t as string })));
-  style.addEventListener("change", () => { const id = style.value; run(() => cmd(id).run(ctx)); });
+  style.addEventListener("change", () => {
+    const id = style.value;
+    run(() => id.startsWith("user:") ? A.setParagraphStyle(ed, id.slice(5)) : cmd(id).run(ctx));
+  });
+  const manageStyle = custom("Manage named styles", "Aa", () => { void manageStyles(ctx); });
   const colour = (key: "color" | "background", label: string, value: string): HTMLInputElement => {
     const i = h("input", { type: "color", value, attrs: { "aria-label": label, title: label } });
     i.addEventListener("change", () => run(() => A.setColour(ed, key, i.value, activeScope())));
@@ -314,7 +319,7 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
       tracking("word_spacing_pt", "Word spacing", -20, 100)),
     h("span", { class: "ribbon-group-label", text: "Font" }));
   const paragraphGroup = h("div", { class: "ribbon-group paragraph", attrs: { role: "group", "aria-label": "Paragraph and alignment" } },
-    h("span", { class: "ribbon-controls" }, style,
+    h("span", { class: "ribbon-controls" }, style, manageStyle,
       tool("align-left", "Align left", "align-left", true), tool("align-center", "Align center", "align-center", true),
       tool("align-right", "Align right", "align-right", true), tool("align-justify", "Justify", "align-justify", true),
       tool("bullets", "Bulleted list", "list", true), tool("numbered", "Numbered list", "list-ordered", true),
@@ -400,7 +405,14 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     before.value = typeof beforeValue === "number" ? String(beforeValue) : beforeValue === mixed ? "" : "0";
     after.value = typeof afterValue === "number" ? String(afterValue) : afterValue === mixed ? "" : "0";
     if (block) {
-      const v = block.type === "heading" ? `h${Math.min(6, block.attributes?.level ?? 1)}` : block.type === "list_item" ? (block.attributes?.ordered ? "numbered" : "bullets") : block.type === "quote" ? "quote" : block.type === "code" ? "code-block" : block.style && ["Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"].includes(block.style) ? `style-${block.style.toLowerCase().replaceAll(" ", "-")}` : "paragraph";
+      for (const option of Array.from(style.options)) if (option.dataset["customStyle"]) option.remove();
+      for (const name of Object.keys(ed.model.meta.styles?.paragraph ?? {}).sort()) {
+        if (["Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"].includes(name)) continue;
+        const option = h("option", { value: `user:${name}`, text: name });
+        option.dataset["customStyle"] = "true";
+        style.appendChild(option);
+      }
+      const v = block.type === "heading" ? `h${Math.min(6, block.attributes?.level ?? 1)}` : block.type === "list_item" ? (block.attributes?.ordered ? "numbered" : "bullets") : block.type === "quote" ? "quote" : block.type === "code" ? "code-block" : block.style && ["Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"].includes(block.style) ? `style-${block.style.toLowerCase().replaceAll(" ", "-")}` : block.style ? `user:${block.style}` : "paragraph";
       if ([...style.options].some((o) => o.value === v)) style.value = v;
     }
     const dis = ed.readOnly;
@@ -430,7 +442,7 @@ export interface StatusBar { el: HTMLElement; update(): void; setZoom(percent: n
  *  and the status dots in the middle; the zoom to page height or width and the percentage slider on the right. */
 export function buildStatusBar(ctx: DocCtx, onZoom: (request: number | "height" | "width") => void): StatusBar {
   const { app, ed } = ctx;
-  const pageLine = h("span", { class: "page-line", attrs: { title: "Pages are laid out block by block here, so this count is approximate. Print preview shows the exact count." } });
+  const pageLine = h("span", { class: "page-line", attrs: { title: "The editor page count is an approximate block layout. The PDF page count and TOC references are measured by Documaster." } });
   const words = h("span", {});
   const version = h("span", {});
   const last = h("span", {});
@@ -465,8 +477,12 @@ export function buildStatusBar(ctx: DocCtx, onZoom: (request: number | "height" 
     const state = ed.model.state;
     const total = Math.max(1, ed.page.total);
     const cur = Math.min(total, ed.currentPage());
-    const printed = ed.page.sheets[cur - 1]?.el.dataset["printed"];
-    pageLine.textContent = `Page ${String(cur).padStart(2, "0")} of ${String(total).padStart(2, "0")} (approx.)${printed ? ` · Printed: ${printed}` : ""}`;
+    const layout = ed.printLayout;
+    const active = ed.recallSelection()?.start.block;
+    const physical = active ? layout?.blockPages[active] : undefined;
+    const printed = physical ? layout?.printedLabels[physical - 1] : undefined;
+    pageLine.textContent = `Editor ${String(cur).padStart(2, "0")}/${String(total).padStart(2, "0")} (approx.)` +
+      (layout ? ` · PDF ${physical ? `${physical}/` : ""}${layout.pages} (exact)${printed ? ` · Printed: ${printed}` : ""}` : "");
     words.textContent = `${ed.model.stats.words.toLocaleString()} words - ${ed.model.stats.characters.toLocaleString()} characters`;
     version.textContent = `Version: ${state.revision.number}`;
     version.title = `Revision ${state.revision.number}. Revision id ${state.revision.id.slice(0, 12)}…`;
