@@ -6,7 +6,7 @@ import * as A from "./actions.js";
 import { blockIdOf, editableOf } from "./domtext.js";
 import type { Editor } from "./editor.js";
 import { highlightsSupported } from "./decor.js";
-import { parseMarkdownTable } from "./textops.js";
+import { markdownParagraphTable, parseMarkdownTable } from "./textops.js";
 
 interface DropPoint { node: Node; offset: number }
 
@@ -76,6 +76,24 @@ export function installInput(ed: Editor): () => void {
       await A.insertText(ed, text);
     });
   };
+  /** Convert a completed, consecutively typed GFM table. Never consume code
+   * blocks, unrelated paragraphs or incomplete table rows. */
+  const markdownChanged = new Set<string>();
+  let markdownTimer: number | undefined;
+  const stopMarkdown = ed.events.on((e) => {
+    if (e.type !== "patch" || !e.local || ed.readOnly) return;
+    for (const id of Object.keys(e.patch.blocks)) markdownChanged.add(id);
+    window.clearTimeout(markdownTimer);
+    markdownTimer = window.setTimeout(() => {
+      const changed = new Set(markdownChanged); markdownChanged.clear();
+      const candidate = markdownParagraphTable(ed.model.list(), changed);
+      if (!candidate || candidate.ids.some((id) => lockedBlock(ed, id))) return;
+      serial(async () => {
+        await A.convertMarkdownBlocks(ed, candidate.ids, candidate.lines, candidate.table);
+      });
+    }, 650);
+  });
+  off.push(() => { window.clearTimeout(markdownTimer); stopMarkdown(); });
   /** Typed characters held behind a structural edit are merged into one insertion, so catching up costs one round trip, not one per key. */
   const holdText = (data: string): void => {
     const last = backlog[backlog.length - 1];
