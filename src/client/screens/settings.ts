@@ -81,7 +81,7 @@ export async function settingsScreen(app: App): Promise<Screen> {
     aiState.appendChild(h("p", { class: "fine", text: ai.privacy }));
   };
   const proof = section("Proofing and AI",
-    notice("Spelling and grammar preferences are on by default; switch either off here. Spelling checks locally while typing. Grammar currently requires enabling the local SLAI Language Agent through Assistance below. Corrections are never automatic.", "info"),
+    notice("Spelling and grammar are on by default. Both run locally while typing, independently of AI rewriting. You can switch either off here, and suggested corrections are never applied automatically.", "info"),
     spell.root, grammar.root, online.root, h("hr"),
     aiOn.root, aiCloud.root, labelled("Cloud credit budget per request", budget, { hint: "Cloud processing needs your approval each time and stays within this budget. 0 means none." }), aiNotes.root, aiState);
 
