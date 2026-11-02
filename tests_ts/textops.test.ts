@@ -1,6 +1,18 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { cleanInsert, countWords, diffText, mapOffset, roman, segments, splitLines, wordAt, PAGE_MM, clampNumber } from "../src/client/textops.js";
+import { cleanInsert, countWords, diffText, mapOffset, roman, segments, splitLines, wordAt, PAGE_MM, clampNumber, parseMarkdownTable } from "../src/client/textops.js";
+
+describe("Markdown table recognition", () => {
+  it("recognizes a complete pipe table and unescapes cell delimiters", () => {
+    const table = parseMarkdownTable("| Name | Value |\n| :--- | ---: |\n| A\\|B | 123 |\n| C |  |");
+    assert.equal(table?.columns, 2);
+    assert.equal(table?.header_rows, 1);
+    assert.deepEqual(table?.rows.map((row) => row.map((c) => c.text)), [["Name", "Value"], ["A|B", "123"], ["C", ""]]);
+  });
+  it("does not consume prose, incomplete tables, or fenced code", () => {
+    for (const source of ["A | B", "A | B\n--- | nope", "```markdown\n| A | B |\n| --- | --- |\n```"]) assert.equal(parseMarkdownTable(source), null);
+  });
+});
 
 describe("diffText", () => {
   it("returns null when nothing changed", () => assert.equal(diffText("same", "same"), null));
