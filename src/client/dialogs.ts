@@ -227,8 +227,7 @@ export async function tableDialog(ctx: DocCtx): Promise<void> {
     title: "Insert table", size: "narrow", body: h("div", { class: "grid-2" }, labelled("Rows", rows), labelled("Columns", cols)),
     actions: [{ label: "Insert table", kind: "primary", run: async () => {
       const r = Math.max(1, Math.min(200, Math.round(Number(rows.value) || 3))), c = Math.max(1, Math.min(40, Math.round(Number(cols.value) || 3)));
-      await guarded(ctx, () => A.insertTable(ctx.ed, r, c, selection));
-      return true as const;
+      return await A.insertTable(ctx.ed, r, c, selection) ? true as const : undefined;
     } }],
   });
   await handle.result;
