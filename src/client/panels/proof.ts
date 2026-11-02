@@ -1,7 +1,7 @@
 /** The red panel: spelling and grammar marks, and the AI Assistant.
  *
- *  Enabled checks run on changed text. Grammar still needs the existing
- *  Language Agent privacy gate; no suggestion changes text until accepted. */
+ *  Enabled checks run on changed text via SLAI local linguistic processors.
+ *  AI rewriting remains opt-in; no suggestion changes text until accepted. */
 import { ApiError, announce, clear, h, labelled, toast } from "../kit.js";
 import type { DocCtx, Panel } from "../docctx.js";
 import { api, errorText } from "../net.js";
@@ -28,6 +28,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
   let issues: Issue[] = [];
   let checkedVersion = -1;
   let ours = false;                    // true while a patch is our own accepted suggestion, so its marks are kept
+  const failures: Partial<Record<"spell" | "grammar", string>> = {};
   let autoTimer: number | undefined;
   const pendingBlocks = new Set<string>();
 
@@ -61,6 +62,9 @@ export function createProofPanel(ctx: DocCtx): Panel {
 
   const paintIssues = (): void => {
     clear(issuesBox);
+    for (const what of ["spell", "grammar"] as const) if (app.prefs[what] && failures[what]) {
+      issuesBox.appendChild(notice(failures[what], "warn", `${what === "spell" ? "Spelling" : "Grammar"} could not start.`));
+    }
     if (checkedVersion < 0) { issuesBox.appendChild(h("p", { class: "fine", text: "Proofreading checks nearby text automatically when available. You can also check the selection or entire document using the buttons above." })); return; }
     if (checkedVersion !== ed.model.version && !ours) issuesBox.appendChild(notice("The text has changed since this check. Each suggestion is still verified against the current text before it is applied, but check again for a fresh list.", "info"));
     if (!issues.length) { issuesBox.appendChild(notice("No problems found in what was checked.", "ok")); return; }
@@ -87,12 +91,14 @@ export function createProofPanel(ctx: DocCtx): Panel {
 
   const check = async (what: "spell" | "grammar", btn?: HTMLButtonElement, changed?: string[]): Promise<void> => {
     if (!app.prefs[what === "spell" ? "spell" : "grammar"]) return;
+    if (!btn && failures[what]) return; // A missing installed dependency cannot recover without a server restart.
     if (btn) btn.disabled = true;
     try {
       await ed.whenIdle();
       const blocks = changed ?? targets();
       const out = await api.post<{ available: boolean; reason?: string; issues: Issue[]; version: number; truncated?: boolean }>(`/docs/${encodeURIComponent(ctx.sid)}/${what === "spell" ? "spell" : "grammar"}`, blocks ? { blocks } : {});
-      if (!out.available) { if (btn) toast(out.reason ?? "This check is not available.", { kind: "info", timeoutMs: 9000 }); return; }
+      if (!out.available) { failures[what] = out.reason ?? "This check is not available."; paintIssues(); return; }
+      delete failures[what];
       // Never attach old offsets to text changed during an asynchronous check.
       if (out.version !== ed.model.version) return;
       const kind = what === "spell" ? "spelling" : "grammar";
@@ -102,12 +108,8 @@ export function createProofPanel(ctx: DocCtx): Panel {
       if (btn) announce(`${out.issues.length} ${what === "spell" ? "spelling" : "grammar"} suggestion${out.issues.length === 1 ? "" : "s"}.`);
       if (btn && out.truncated) toast("Only the first suggestions are shown. Fix these, then check again.", { kind: "info" });
     } catch (e) {
-      if (btn) {
-        const why = unavailable(e);
-        clear(issuesBox);
-        issuesBox.appendChild(notice(why ?? errorText(e), why ? "warn" : "danger", what === "spell" ? "Spelling is not available here." : "Grammar is not available here."));
-        checkedVersion = -1;
-      }
+      failures[what] = unavailable(e) ?? errorText(e);
+      paintIssues();
     } finally { if (btn) btn.disabled = false; }
   };
 
@@ -125,10 +127,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
       // Run these checks independently: an unavailable grammar model must not
       // disable deterministic spelling, and neither path may block editing.
       if (app.prefs.spell) void check("spell", undefined, changed);
-      // The canonical grammar route currently uses the Language Agent's
-      // explicit assistance/privacy gate. Do not make forbidden requests on
-      // every keystroke or silently weaken that gate.
-      if (app.prefs.grammar && app.prefs.ai_enabled) void check("grammar", undefined, changed);
+      if (app.prefs.grammar) void check("grammar", undefined, changed);
     }, 500);
   };
 
@@ -150,7 +149,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
     const prefs = app.prefs;
     const status = app.boot.capabilities.ai;
     if (!prefs.ai_enabled) {
-      aiBox.appendChild(notice("The AI Assistant is off. Typing and local spelling continue to work. Grammar checking currently requires the local Language Agent and its privacy gate; enable assistance in Settings to use it.", "info", "AI is off."));
+      aiBox.appendChild(notice("AI rewriting is off. Local spelling and grammar checking continue automatically when enabled. Turn on AI Assistance in Settings only if you want model-generated edits.", "info", "AI is off."));
       aiBox.appendChild(h("div", { class: "actions" }, button("Open Settings", () => { app.go({ name: "settings" }); }, "", "settings")));
       return;
     }
@@ -266,6 +265,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
     }),
     app.events.on((e) => {
       if (e.type === "prefs") {
+        delete failures.spell; delete failures.grammar;
         paintAi();
         issues = issues.filter((i) => i.kind === "spelling" ? app.prefs.spell : app.prefs.grammar);
         marks(); paintIssues();
