@@ -5,6 +5,7 @@ import threading
 import time
 import types
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from applications.tools.errors import BadRequest, Conflict, DependencyMissing, Forbidden
@@ -70,6 +71,33 @@ class FakeGateway:
         if self.language_down:
             raise Unavailable(self.language_down)
         return fn(self.agent)
+
+
+class LocalProofreadingContracts(unittest.TestCase):
+    """Exercise the default grammar path without a real Documaster/agent installation."""
+
+    def test_local_grammar_runs_with_ai_disabled_without_agent_gateway(self):
+        agent = FakeAgent()
+        app = types.SimpleNamespace(
+            preferences=lambda: {"ai_enabled": False},
+            docmaster=types.SimpleNamespace(slai_root=None),
+        )
+        session = types.SimpleNamespace(
+            lock=threading.RLock(), version=3,
+            doc={"blocks": [{"id": "b1", "type": "paragraph", "text": "The cats was happy."}]},
+        )
+        def modules(_dm, name):
+            if name.endswith("nlp_engine"):
+                return types.SimpleNamespace(NLPEngine=lambda: agent.nlp_engine)
+            if name.endswith("grammar_processor"):
+                return types.SimpleNamespace(GrammarProcessor=lambda: agent.grammar_processor)
+            raise AssertionError(f"Unexpected import: {name}")
+
+        with patch("applications.slai_writer.assist._import_slai", side_effect=modules):
+            result = Assist(app).grammar(session)
+        self.assertEqual(result["version"], 3)
+        self.assertEqual(result["issues"][0]["rule"], "svagree")
+        self.assertEqual(result["source"], "SLAI grammar processor")
 
 
 class AssistTests(Workbench):
@@ -142,8 +170,11 @@ class AssistTests(Workbench):
         a = Assist(self.app, gateway=FakeGateway(agent))
         with self.assertRaises(Forbidden):
             a.propose(self.make(), {"kind": "document"}, "shorten", None)
-        with self.assertRaises(Forbidden):
-            a.grammar(self.make())
+        # Grammar checking is a local, default-on editor operation; it must not
+        # be tied to the opt-in AI rewriting setting.
+        result = a.grammar(self.make("The cats was happy."))
+        self.assertTrue(result["available"])
+        self.assertEqual(result["source"], "SLAI grammar processor")
         self.assertEqual(agent.prompts, [])
 
     def test_only_local_provider_exists(self):
