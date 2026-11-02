@@ -122,6 +122,9 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
     dockPanels.set(name, panel);
     return panel;
   };
+  // Proofreading decorations must run even while the corrections panel is
+  // collapsed (the authoritative design keeps all side panels hidden).
+  panelFor("proofing");
 
   const yellowTabs = h("div", { class: "tabs", attrs: { role: "tablist", "aria-label": "Notes, comments and sources" } });
   const yellowBody = h("div", { class: "dock-body" });

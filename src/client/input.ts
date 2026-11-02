@@ -6,6 +6,7 @@ import * as A from "./actions.js";
 import { blockIdOf, editableOf } from "./domtext.js";
 import type { Editor } from "./editor.js";
 import { highlightsSupported } from "./decor.js";
+import { parseMarkdownTable } from "./textops.js";
 
 interface DropPoint { node: Node; offset: number }
 
@@ -65,6 +66,11 @@ export function installInput(ed: Editor): () => void {
       if (saved) ed.refocus(saved);
       else if (!(await A.landCaret(ed))) {
         toast("Click in the document before pasting.", { kind: "info" });
+        return;
+      }
+      const table = saved?.collapsed && saved.start.field === "text" ? parseMarkdownTable(text) : null;
+      if (table) {
+        await A.insertTable(ed, table.rows.length, table.columns, saved, table);
         return;
       }
       await A.insertText(ed, text);
@@ -224,6 +230,16 @@ export function installInput(ed: Editor): () => void {
   /* ------------------------------------------------------------------------------------------ pointer */
   on("click", (e) => {
     const target = e.target as Element;
+    const add = target.closest<HTMLElement>("[data-table-add]");
+    if (add) {
+      e.preventDefault();
+      const id = add.closest<HTMLElement>(".blk")?.dataset["id"];
+      const table = id ? ed.model.block(id)?.table : undefined;
+      if (!id || !table || ed.readOnly || lockedBlock(ed, id)) return;
+      const row = add.dataset["tableAdd"] === "row";
+      void A.tableEdit(ed, id, row ? "insert_row" : "insert_col", row ? table.rows.length : table.columns);
+      return;
+    }
     const link = target.closest<HTMLElement>(".i-link");
     if (link) { e.preventDefault(); if (e.ctrlKey || e.metaKey) ed.events.emit({ type: "link", href: link.dataset["href"] ?? "" }); return; }
     const ref = target.closest<HTMLElement>(".i-cite, .i-fn");

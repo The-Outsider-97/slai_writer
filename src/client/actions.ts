@@ -5,7 +5,7 @@ import type { Editor, Pt, Sel } from "./editor.js";
 import { api, errorText } from "./net.js";
 import { MM_PX } from "./textops.js";
 import { layerList, type LayerRow } from "./model.js";
-import type { Block, DocState, Op, Patch, Span } from "./types.js";
+import type { Block, DocState, Op, Patch, Span, TableData } from "./types.js";
 import { TEXT_TYPES } from "./types.js";
 import { FRONT_MATTER_STYLES } from "./named_styles.js";
 import { ensureBundledFont } from "./font_catalog.js";
@@ -525,7 +525,7 @@ export async function moveBlocksTo(ed: Editor, ids: string[], after: string | nu
 /** The block after which new content goes: the one holding the caret (or the selected object), else the last block. */
 export function anchorBlock(ed: Editor): string | null {
   if (ed.selectedBlock) return ed.selectedBlock;
-  const sel = ed.readSelection();
+  const sel = ed.recallSelection();
   return sel ? sel.end.block : (ed.model.order[ed.model.order.length - 1] ?? null);
 }
 
@@ -549,9 +549,38 @@ export async function landCaret(ed: Editor): Promise<false | "existing" | "creat
   return false;
 }
 
-export async function insertTable(ed: Editor, rows: number, columns: number): Promise<void> {
-  const id = await insertBlock(ed, { type: "table", text: "", rows, columns });
-  if (id) { ed.scrollToBlock(id); focusCell(ed, id, 0, 0); }
+/** Insert at the saved document caret, even if an insertion dialog has focus.
+ * A mid-paragraph insertion splits through the canonical text model so inline
+ * formatting and the suffix survive. The whole action is one undo step. */
+export async function insertTable(ed: Editor, rows: number, columns: number, selection: Sel | null = ed.recallSelection(), data?: TableData): Promise<boolean> {
+  if (ed.readOnly) return false;
+  const inserted = await guarded(ed, async () => {
+    await ed.flush();
+    const pt = selection?.start;
+    const target = pt ? ed.model.block(pt.block) : undefined;
+    if (pt && !target) throw new Error("The insertion position is no longer available. Place the caret again.");
+    const id = ed.newId();
+    const spec: Record<string, unknown> = { id, type: "table", text: "", rows, columns };
+    if (data) spec["table"] = data;
+    if (target?.section) spec["section"] = target.section;
+    let after: string | null = target?.id ?? (ed.model.order[ed.model.order.length - 1] ?? null);
+    const ops: Op[] = [];
+    if (target && pt?.field === "text" && isTextBlock(target)) {
+      if (pt.offset === 0) {
+        const index = ed.model.indexOf(target.id);
+        after = index > 0 ? ed.model.order[index - 1] as string : null;
+      } else if (pt.offset < target.text.length) {
+        const codepoints = Array.from(target.text.slice(0, pt.offset)).length;
+        ops.push({ op: "split", block: target.id, at: codepoints, new_id: ed.newId() });
+      }
+    }
+    ops.push({ op: "block_insert", after, block: spec });
+    await ed.op({ op: "batch", ops, label: "insert table" });
+    ed.scrollToBlock(id);
+    focusCell(ed, id, 0, 0);
+    return true;
+  });
+  return inserted === true;
 }
 
 export async function insertEquationBlock(ed: Editor, source: string, syntax = "latex"): Promise<void> {

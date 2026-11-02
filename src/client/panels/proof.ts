@@ -1,7 +1,7 @@
 /** The red panel: spelling and grammar marks, and the AI Assistant.
  *
- *  Everything here starts with a button press. Nothing is read or sent until then; every result is a suggestion with its source named, and
- *  nothing changes the text until the person accepts it (one undoable edit). When a checker or model is not installed the panel says so. */
+ *  Enabled checks run on changed text. Grammar still needs the existing
+ *  Language Agent privacy gate; no suggestion changes text until accepted. */
 import { ApiError, announce, clear, h, labelled, toast } from "../kit.js";
 import type { DocCtx, Panel } from "../docctx.js";
 import { api, errorText } from "../net.js";
@@ -28,6 +28,8 @@ export function createProofPanel(ctx: DocCtx): Panel {
   let issues: Issue[] = [];
   let checkedVersion = -1;
   let ours = false;                    // true while a patch is our own accepted suggestion, so its marks are kept
+  let autoTimer: number | undefined;
+  const pendingBlocks = new Set<string>();
 
   const marks = (): void => {
     ed.decor.set("typo", issues.filter((i) => i.kind === "spelling").map((i) => ({ block: i.block, start: i.start, end: i.end })));
@@ -59,7 +61,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
 
   const paintIssues = (): void => {
     clear(issuesBox);
-    if (checkedVersion < 0) { issuesBox.appendChild(h("p", { class: "fine", text: "Nothing has been checked. Press a button above; only the selected paragraphs are checked, or the whole document when nothing is selected." })); return; }
+    if (checkedVersion < 0) { issuesBox.appendChild(h("p", { class: "fine", text: "Proofreading checks nearby text automatically when available. You can also check the selection or entire document using the buttons above." })); return; }
     if (checkedVersion !== ed.model.version && !ours) issuesBox.appendChild(notice("The text has changed since this check. Each suggestion is still verified against the current text before it is applied, but check again for a fresh list.", "info"));
     if (!issues.length) { issuesBox.appendChild(notice("No problems found in what was checked.", "ok")); return; }
     const ul = h("ul", { class: "panel-list" });
@@ -83,27 +85,52 @@ export function createProofPanel(ctx: DocCtx): Panel {
     issuesBox.appendChild(ul);
   };
 
-  const check = async (what: "spell" | "grammar", btn: HTMLButtonElement): Promise<void> => {
-    btn.disabled = true;
+  const check = async (what: "spell" | "grammar", btn?: HTMLButtonElement, changed?: string[]): Promise<void> => {
+    if (!app.prefs[what === "spell" ? "spell" : "grammar"]) return;
+    if (btn) btn.disabled = true;
     try {
       await ed.whenIdle();
-      const blocks = targets();
+      const blocks = changed ?? targets();
       const out = await api.post<{ available: boolean; reason?: string; issues: Issue[]; version: number; truncated?: boolean }>(`/docs/${encodeURIComponent(ctx.sid)}/${what === "spell" ? "spell" : "grammar"}`, blocks ? { blocks } : {});
-      if (!out.available) { toast(out.reason ?? "This check is not available.", { kind: "info", timeoutMs: 9000 }); return; }
-      issues = [...issues.filter((i) => i.kind !== (what === "spell" ? "spelling" : "grammar")), ...out.issues];
+      if (!out.available) { if (btn) toast(out.reason ?? "This check is not available.", { kind: "info", timeoutMs: 9000 }); return; }
+      // Never attach old offsets to text changed during an asynchronous check.
+      if (out.version !== ed.model.version) return;
+      const kind = what === "spell" ? "spelling" : "grammar";
+      issues = [...issues.filter((i) => i.kind !== kind || (changed !== undefined && !changed.includes(i.block))), ...out.issues];
       checkedVersion = out.version;
       marks(); paintIssues();
-      announce(`${out.issues.length} ${what === "spell" ? "spelling" : "grammar"} suggestion${out.issues.length === 1 ? "" : "s"}.`);
-      if (out.truncated) toast("Only the first suggestions are shown. Fix these, then check again.", { kind: "info" });
+      if (btn) announce(`${out.issues.length} ${what === "spell" ? "spelling" : "grammar"} suggestion${out.issues.length === 1 ? "" : "s"}.`);
+      if (btn && out.truncated) toast("Only the first suggestions are shown. Fix these, then check again.", { kind: "info" });
     } catch (e) {
-      const why = unavailable(e);
-      clear(issuesBox);
-      issuesBox.appendChild(notice(why ?? errorText(e), why ? "warn" : "danger", what === "spell" ? "Spelling is not available here." : "Grammar is not available here."));
-      checkedVersion = -1;
-    } finally { btn.disabled = false; }
+      if (btn) {
+        const why = unavailable(e);
+        clear(issuesBox);
+        issuesBox.appendChild(notice(why ?? errorText(e), why ? "warn" : "danger", what === "spell" ? "Spelling is not available here." : "Grammar is not available here."));
+        checkedVersion = -1;
+      }
+    } finally { if (btn) btn.disabled = false; }
   };
 
   const clearMarks = (): void => { issues = []; checkedVersion = -1; marks(); paintIssues(); };
+
+  const scheduleAutomatic = (blocks: string[]): void => {
+    for (const id of blocks) {
+      const b = ed.model.block(id);
+      if (b && ["paragraph", "heading", "quote", "list_item"].includes(b.type)) pendingBlocks.add(id);
+    }
+    window.clearTimeout(autoTimer);
+    if (!pendingBlocks.size || (!app.prefs.spell && !app.prefs.grammar)) return;
+    autoTimer = window.setTimeout(() => {
+      const changed = [...pendingBlocks]; pendingBlocks.clear();
+      // Run these checks independently: an unavailable grammar model must not
+      // disable deterministic spelling, and neither path may block editing.
+      if (app.prefs.spell) void check("spell", undefined, changed);
+      // The canonical grammar route currently uses the Language Agent's
+      // explicit assistance/privacy gate. Do not make forbidden requests on
+      // every keystroke or silently weaken that gate.
+      if (app.prefs.grammar && app.prefs.ai_enabled) void check("grammar", undefined, changed);
+    }, 500);
+  };
 
   /* -------------------------------------------------------------------------------------------- AI assistant */
   let job: Job | null = null;
@@ -123,7 +150,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
     const prefs = app.prefs;
     const status = app.boot.capabilities.ai;
     if (!prefs.ai_enabled) {
-      aiBox.appendChild(notice("The AI Assistant is off. Writing, spelling and everything else work without it. If you want suggestions, switch it on in Settings; nothing is read until you ask.", "info", "AI is off."));
+      aiBox.appendChild(notice("The AI Assistant is off. Typing and local spelling continue to work. Grammar checking currently requires the local Language Agent and its privacy gate; enable assistance in Settings to use it.", "info", "AI is off."));
       aiBox.appendChild(h("div", { class: "actions" }, button("Open Settings", () => { app.go({ name: "settings" }); }, "", "settings")));
       return;
     }
@@ -230,10 +257,23 @@ export function createProofPanel(ctx: DocCtx): Panel {
 
   const off = [
     ed.events.on((e) => {
-      if (e.type === "patch" && e.local && !ours && issues.length) { /* marks drift with edits: drop them instead of showing them on the wrong words */ clearMarks(); }
-      if (e.type === "reloaded" && issues.length) clearMarks();
+      if (e.type === "patch") {
+        const changed = Object.keys(e.patch.blocks);
+        if (issues.length && !ours) { issues = issues.filter((i) => !changed.includes(i.block)); marks(); paintIssues(); }
+        scheduleAutomatic(changed);
+      }
+      if (e.type === "reloaded") { clearMarks(); scheduleAutomatic(ed.model.order.slice(0, 100)); }
     }),
-    app.events.on((e) => { if (e.type === "prefs") paintAi(); }),
+    app.events.on((e) => {
+      if (e.type === "prefs") {
+        paintAi();
+        issues = issues.filter((i) => i.kind === "spelling" ? app.prefs.spell : app.prefs.grammar);
+        marks(); paintIssues();
+        scheduleAutomatic(ed.model.order.slice(0, 100));
+      }
+    }),
   ];
-  return { el: root, refresh: () => { paintAi(); }, destroy: () => { stop(); off.forEach((f) => f()); ed.decor.clear("typo"); ed.decor.clear("grammar"); } };
+  // Check a bounded initial window; subsequent document edits are incremental.
+  scheduleAutomatic(ed.model.order.slice(0, 100));
+  return { el: root, refresh: () => { paintAi(); }, destroy: () => { window.clearTimeout(autoTimer); stop(); off.forEach((f) => f()); ed.decor.clear("typo"); ed.decor.clear("grammar"); } };
 }

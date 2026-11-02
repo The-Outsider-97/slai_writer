@@ -260,7 +260,16 @@ export function renderBlock(block: Block, ctx: RenderContext): HTMLElement {
   if (block.type === "list_item") wrap.appendChild(h("span", { class: "marker", text: ctx.markers.get(block.id) ?? "•", attrs: { "aria-hidden": "true", contenteditable: "false" } }));
   if (!ctx.readOnly) wrap.appendChild(h("button", { class: "grip", type: "button", attrs: { "aria-label": "Move block (or Alt+Shift+arrow keys)", title: "Drag to move", draggable: "true", tabindex: "-1" }, data: { grip: "" } }, glyph("drag")));
   switch (block.type) {
-    case "table": wrap.appendChild(tableElement(block, ctx)); break;
+    case "table": {
+      wrap.appendChild(tableElement(block, ctx));
+      if (!ctx.readOnly) {
+        wrap.appendChild(h("button", { class: "table-grow table-grow-row", type: "button", text: "+", attrs: {
+          "data-table-add": "row", "aria-label": "Add table row", title: "Add row below", contenteditable: "false" } }));
+        wrap.appendChild(h("button", { class: "table-grow table-grow-col", type: "button", text: "+", attrs: {
+          "data-table-add": "col", "aria-label": "Add table column", title: "Add column right", contenteditable: "false" } }));
+      }
+      break;
+    }
     case "figure": wrap.appendChild(figureElement(block, ctx)); break;
     case "equation": wrap.appendChild(equationElement(block)); break;
     case "embed": wrap.appendChild(embedElement(block, ctx)); break;

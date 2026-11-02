@@ -1,6 +1,42 @@
 /** Pure text arithmetic shared by the editor and its tests: diffs, inline segments, caret offsets and small text helpers.
  *  Offsets are UTF-16 code units, exactly like the server's block text. An inline object (equation or picture) is one U+FFFC character. */
-import { OBJECT_CHAR, type Block, type Span } from "./types.js";
+import { OBJECT_CHAR, type Block, type Span, type TableData } from "./types.js";
+
+/** A strict, standalone GFM pipe-table recognizer for clipboard text. Invalid or
+ * incomplete Markdown remains ordinary text. Canonical table semantics are
+ * provided by SLDC; this function only recognizes the source syntax. */
+export function parseMarkdownTable(source: string): TableData | null {
+  const lines = source.trim().split(/\r\n?|\n/);
+  if (lines.length < 2 || lines.length > 200 || lines.some((line) => /^\s*```/.test(line))) return null;
+  const cells = (line: string): string[] => {
+    let value = line.trim();
+    if (value.startsWith("|")) value = value.slice(1);
+    if (/(?<!\\)\|$/.test(value)) value = value.slice(0, -1);
+    const parts: string[] = [];
+    let current = "";
+    for (let i = 0; i < value.length; i += 1) {
+      if (value[i] === "\\" && i + 1 < value.length && ["|", "\\"].includes(value[i + 1] as string)) current += value[++i];
+      else if (value[i] === "|") { parts.push(current.trim()); current = ""; }
+      else current += value[i];
+    }
+    parts.push(current.trim());
+    return parts;
+  };
+  // Requiring separators avoids treating normal prose with pipes as a table.
+  if (!lines[0]?.includes("|") || !lines[1]?.includes("-")) return null;
+  const header = cells(lines[0]);
+  const separator = cells(lines[1]);
+  if (header.length < 2 || header.length > 40 || separator.length !== header.length) return null;
+  if (!separator.every((cell) => /^:?-{3,}:?$/.test(cell))) return null;
+  const rows = [header];
+  for (const line of lines.slice(2)) {
+    if (!line.trim()) return null;
+    const row = cells(line);
+    if (row.length > header.length) return null;
+    rows.push([...row, ...Array(header.length - row.length).fill("")]);
+  }
+  return { columns: header.length, header_rows: 1, rows: rows.map((row) => row.map((text) => ({ text }))) };
+}
 
 export interface TextEdit { start: number; end: number; insert: string }
 
