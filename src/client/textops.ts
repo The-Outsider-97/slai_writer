@@ -38,6 +38,37 @@ export function parseMarkdownTable(source: string): TableData | null {
   return { columns: header.length, header_rows: 1, rows: rows.map((row) => row.map((text) => ({ text }))) };
 }
 
+/** Find a fully written table in consecutive plain paragraphs. The editor
+ * uses this after a small typing pause, then commits it through SLDC edits. */
+export function markdownParagraphTable(blocks: ReadonlyArray<Pick<Block, "id" | "type" | "text">>, changed: ReadonlySet<string>):
+  { ids: string[]; lines: string[]; table: TableData } | null {
+  for (const changedId of changed) {
+    const at = blocks.findIndex((b) => b.id === changedId);
+    if (at < 0) continue;
+    for (let start = Math.max(0, at - 30); start <= at; start += 1) {
+      const first = blocks[start], second = blocks[start + 1];
+      if (first?.type !== "paragraph") continue;
+      if (first.text.includes("\n")) {
+        const table = parseMarkdownTable(first.text);
+        if (first.id === changedId && table && table.rows.length >= 2) return { ids: [first.id], lines: [first.text], table };
+        continue;
+      }
+      if (second?.type !== "paragraph" || !first.text.trim().startsWith("|") || !second.text.trim().startsWith("|")) continue;
+      const ids: string[] = [], lines: string[] = [];
+      for (let i = start; i < Math.min(blocks.length, start + 200); i += 1) {
+        const block = blocks[i];
+        if (block?.type !== "paragraph" || !block.text.trim().startsWith("|") || !block.text.trim().endsWith("|")) break;
+        ids.push(block.id); lines.push(block.text);
+      }
+      // Wait for a data row. A header and separator alone are often still being typed.
+      if (ids.length < 3 || !ids.includes(changedId)) continue;
+      const table = parseMarkdownTable(lines.join("\n"));
+      if (table) return { ids, lines, table };
+    }
+  }
+  return null;
+}
+
 export interface TextEdit { start: number; end: number; insert: string }
 
 /** The smallest single replacement that turns `before` into `after`; null when they are equal. `caretAfter` resolves repeated characters
