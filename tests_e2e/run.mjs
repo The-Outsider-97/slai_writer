@@ -216,6 +216,41 @@ await scenario("slash function search inserts a table; typing in cells and Tab w
   await until(async () => { const t = (await state()).blocks.find((b) => b.type === "table"); return t && t.table.rows[0][0].text === "c1" && t.table.rows[0][1].text === "c2"; }, "cell text on the server");
 });
 
+await scenario("Insert Table at a text caret splits the paragraph instead of appending", async () => {
+  await guest(); await newDoc();
+  await page.keyboard.type("BeforeAfter");
+  await until(async () => (await state()).blocks[0]?.text === "BeforeAfter", "initial paragraph");
+  // Place the actual browser caret after "Before", then open the ordinary
+  // context menu; the menu/dialog must not make Writer forget that selection.
+  await page.evaluate(() => {
+    const element = document.querySelector(".blk .txt");
+    const node = element?.firstChild;
+    if (!node) throw new Error("Cannot locate the paragraph text node");
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(node, 6); range.collapse(true);
+    selection.removeAllRanges(); selection.addRange(range);
+    element.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 700, clientY: 400 }));
+  });
+  await page.getByRole("menuitem", { name: /Table/i }).last().click();
+  await page.getByRole("dialog").getByRole("button", { name: /Insert table/i }).click();
+  await until(async () => {
+    const blocks = (await state()).blocks;
+    return blocks.length >= 3 && blocks[0].text === "Before" && blocks[1].type === "table" && blocks[2].text === "After";
+  }, "table between the two halves of the paragraph");
+});
+
+await scenario("typing a complete Markdown pipe table produces one editable SLDC table", async () => {
+  await guest(); await newDoc();
+  await page.keyboard.type("| 1 | 2 | 3 |"); await page.keyboard.press("Enter");
+  await page.keyboard.type("| --- | --- | --- |"); await page.keyboard.press("Enter");
+  await page.keyboard.type("| a | b | c |");
+  await until(async () => {
+    const blocks = (await state()).blocks;
+    return blocks.length && blocks[0].type === "table" && blocks[0].table?.columns === 3 && blocks[0].table?.rows?.[1]?.[0]?.text === "a";
+  }, "native table converted from typed Markdown", 15000);
+});
+
 await scenario("a comment is anchored, listed in the Comments tab and stored in the document", async () => {
   await guest(); await newDoc();
   await page.keyboard.type("Check this wording"); await page.waitForTimeout(500);
@@ -421,7 +456,7 @@ await scenario("panels belong to their page, are not part of the printable page 
   ok(rule, "no print rule isolates the printed pages from the editing interface");
 });
 
-await scenario("AI, spelling and grammar are honest when unavailable and never run on their own", async () => {
+await scenario("proofreading never modifies text automatically, even if an optional checker is unavailable", async () => {
   await guest(); await newDoc();
   await page.keyboard.type("Ths is a tpyo."); await page.waitForTimeout(800);
   await tab("red").click();
@@ -429,7 +464,7 @@ await scenario("AI, spelling and grammar are honest when unavailable and never r
   await page.waitForTimeout(1500);
   eq((await state()).version, before.version, "nothing may change the document without a request");
   await page.getByRole("button", { name: "Check grammar" }).click();
-  await until(async () => /not|off|enable|unavailable|settings/i.test(await page.locator("#panel-red").innerText()), "an explanation");
+  await until(async () => /problem|check|grammar|missing|unavailable|settings|suggestion/i.test(await page.locator("#panel-red").innerText()), "proofreading result or dependency diagnostic");
 });
 
 await scenario("Hide dims the interface, Escape reveals it again (and it is not a panel toggle)", async () => {
