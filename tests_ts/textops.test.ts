@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { cleanInsert, countWords, diffText, mapOffset, roman, segments, splitLines, wordAt, PAGE_MM, clampNumber, parseMarkdownTable } from "../src/client/textops.js";
+import { cleanInsert, countWords, diffText, mapOffset, roman, segments, splitLines, wordAt, PAGE_MM, clampNumber, parseMarkdownTable, markdownParagraphTable } from "../src/client/textops.js";
 
 describe("Markdown table recognition", () => {
   it("recognizes a complete pipe table and unescapes cell delimiters", () => {
@@ -11,6 +11,25 @@ describe("Markdown table recognition", () => {
   });
   it("does not consume prose, incomplete tables, or fenced code", () => {
     for (const source of ["A | B", "A | B\n--- | nope", "```markdown\n| A | B |\n| --- | --- |\n```"]) assert.equal(parseMarkdownTable(source), null);
+  });
+  it("recognizes a typed table between paragraphs only after the first data row", () => {
+    const lines = [
+      { id: "intro", type: "paragraph" as const, text: "Intro" },
+      { id: "h", type: "paragraph" as const, text: "| 1 | 2 | 3 |" },
+      { id: "s", type: "paragraph" as const, text: "| --- | --- | --- |" },
+      { id: "d", type: "paragraph" as const, text: "| a | b | c |" },
+      { id: "after", type: "paragraph" as const, text: "Discussion" },
+    ];
+    assert.equal(markdownParagraphTable(lines.slice(0, 3), new Set(["s"])), null);
+    const result = markdownParagraphTable(lines, new Set(["d"]));
+    assert.deepEqual(result?.ids, ["h", "s", "d"]);
+    assert.deepEqual(result?.table.rows[1].map((cell) => cell.text), ["a", "b", "c"]);
+    assert.equal(markdownParagraphTable(lines, new Set(["after"])), null);
+  });
+  it("does not convert a fenced code block containing pipes", () => {
+    assert.equal(markdownParagraphTable([
+      { id: "code", type: "code", text: "| A | B |\n| --- | --- |\n| a | b |" },
+    ], new Set(["code"])), null);
   });
 });
 
