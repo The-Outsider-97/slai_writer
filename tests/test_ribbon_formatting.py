@@ -150,6 +150,32 @@ class RibbonFormatting(Workbench):
         session.undo(None)
         self.assertEqual(session.doc["blocks"][-1]["table"]["columns"], 2)
 
+    def test_typing_markdown_table_conversion_is_atomic_and_at_source(self):
+        session, first_id = self.make("Introduction")
+        rows = ["| Item | Count |", "| --- | --- |", "| Books | 4 |"]
+        after = first_id
+        original_ids = []
+        for i, row in enumerate(rows):
+            block_id = f"markdown-line-{i}"
+            original_ids.append(block_id)
+            session.apply({"op": "block_insert", "after": after,
+                           "block": {"id": block_id, "type": "paragraph", "text": row}}, None)
+            after = block_id
+        session.apply({"op": "block_insert", "after": after,
+                       "block": {"id": "after-markdown", "type": "paragraph", "text": "Discussion"}}, None)
+        source_ids = [b["id"] for b in session.doc["blocks"]]
+        session.apply({"op": "batch", "label": "convert Markdown table", "ops": [
+            {"op": "block_insert", "after": first_id, "block": {"id": "md-table", "type": "table", "text": "", "table": {
+                "columns": 2, "header_rows": 1, "rows": [
+                    [{"text": "Item"}, {"text": "Count"}], [{"text": "Books"}, {"text": "4"}],
+                ]}}},
+            {"op": "block_delete", "blocks": original_ids},
+        ]}, None)
+        self.assertEqual([b["id"] for b in session.doc["blocks"]],
+                         [first_id, "md-table", "after-markdown"])
+        session.undo(None)
+        self.assertEqual([b["id"] for b in session.doc["blocks"]], source_ids)
+
 
 if __name__ == "__main__":
     unittest.main()
