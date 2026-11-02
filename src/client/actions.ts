@@ -552,9 +552,9 @@ export async function landCaret(ed: Editor): Promise<false | "existing" | "creat
 /** Insert at the saved document caret, even if an insertion dialog has focus.
  * A mid-paragraph insertion splits through the canonical text model so inline
  * formatting and the suffix survive. The whole action is one undo step. */
-export async function insertTable(ed: Editor, rows: number, columns: number, selection: Sel | null = ed.recallSelection(), data?: TableData): Promise<void> {
-  if (ed.readOnly) return;
-  await guarded(ed, async () => {
+export async function insertTable(ed: Editor, rows: number, columns: number, selection: Sel | null = ed.recallSelection(), data?: TableData): Promise<boolean> {
+  if (ed.readOnly) return false;
+  const inserted = await guarded(ed, async () => {
     await ed.flush();
     const pt = selection?.start;
     const target = pt ? ed.model.block(pt.block) : undefined;
@@ -578,7 +578,9 @@ export async function insertTable(ed: Editor, rows: number, columns: number, sel
     await ed.op({ op: "batch", ops, label: "insert table" });
     ed.scrollToBlock(id);
     focusCell(ed, id, 0, 0);
+    return true;
   });
+  return inserted === true;
 }
 
 export async function insertEquationBlock(ed: Editor, source: string, syntax = "latex"): Promise<void> {
