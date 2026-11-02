@@ -1,13 +1,12 @@
-"""Spelling, grammar and AI assistance - all of it explicit, scoped, reviewable and reversible.
+"""Local proofreading and opt-in AI editing assistance.
 
 What this module is, and is not:
 
 * It contains **no language model and no spell-checking or grammar rules**. Spelling is SLAI's ``SpellChecker`` and grammar is SLAI's
   ``GrammarProcessor`` reached through the language agent; rewriting is the language agent's local model. When one of them cannot be
   loaded, the request says so and why. Writing never depends on any of it.
-* Nothing is sent anywhere without a request from the person. Agents run on this computer (no cloud provider is built in), the
-  Privacy agent decides whether the text may be handed over, and document text is treated as *data*: instructions inside it are never
-  followed.
+* Spelling and grammar use SLAI's local linguistic processors automatically when enabled. AI rewriting remains opt-in and goes
+  through the Privacy and Safety agents. Neither local proofreading path calls an external model or provider.
 * A result is a **proposal** bound to the document version and the exact original text. Nothing changes until the person accepts a
   hunk; accepting is one undoable edit. Suggestions that add numbers, links or quotations that were not in the original are flagged and
   need an extra confirmation, and a suggestion that would remove a citation or inline object is not applicable at all.
@@ -63,6 +62,9 @@ class Assist:
         self._spell_factory = spell_factory
         self._spell: Any = None
         self._spell_error: str | None = None
+        self._grammar: Any = None
+        self._grammar_error: str | None = None
+        self._grammar_lock = threading.Lock()
         self._lock = threading.Lock()
         self.proposals: dict[str, dict[str, Any]] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
@@ -78,9 +80,9 @@ class Assist:
                                                               "note": "No cloud provider is built in or configured."}],
             "enabled": bool(prefs.get("ai_enabled")), "canUseAgents": dm_ok,
             "spell": {"available": None, "note": "SLAI's spell checker loads the first time spelling is checked."},
-            "grammar": {"available": None, "note": "Grammar uses SLAI's language agent on this computer, with your permission."},
+            "grammar": {"available": None, "note": "Grammar uses SLAI's local NLP and GrammarProcessor, independently of AI rewriting."},
             "tasks": [{"id": k, "label": k.capitalize()} for k in TASKS],
-            "privacy": "Text is only read when you ask. Private notes and comments are never included.",
+            "privacy": "Local proofreading checks changed document text; AI rewriting requires an explicit request. Private notes and comments are never included.",
         }
 
     # -------------------------------------------------------------------------------------------------- spelling
@@ -173,17 +175,40 @@ class Assist:
         if calls.safety_blocks(safety):
             raise Forbidden("The safety review did not allow this text to be processed.", details={"safety": safety.public()})
 
+    def _local_grammar(self) -> Any:
+        """Build the canonical SLAI rule-based language pipeline without booting LANTRA or the AI gateway."""
+        with self._lock:
+            if self._grammar is not None:
+                return self._grammar
+            if self._grammar_error:
+                raise DependencyMissing(self._grammar_error, hint="Install Writer's requirements in its Python environment and restart Writer.")
+            try:
+                nlp = _import_slai(self.app.docmaster, "src.agents.language.nlp_engine").NLPEngine()
+                grammar = _import_slai(self.app.docmaster, "src.agents.language.grammar_processor").GrammarProcessor()
+                self._grammar = types.SimpleNamespace(nlp_engine=nlp, grammar_processor=grammar)
+            except Exception as exc:
+                self._grammar_error = f"SLAI local grammar processors could not be loaded ({type(exc).__name__}: {str(exc)[:250]})."
+                raise DependencyMissing(self._grammar_error, hint="Install Writer's requirements in its Python environment and restart Writer.") from exc
+            return self._grammar
+
     def grammar(self, session: DocumentSession, blocks: list[str] | None = None, limit: int = 200) -> dict[str, Any]:
-        self._require_enabled()
         with session.lock:
             version = session.version
             snapshot = [(b["id"], b["text"]) for b in session.doc["blocks"]
                         if b["type"] in ("paragraph", "heading", "list_item", "quote") and b["text"].strip() and (not blocks or b["id"] in blocks)][:MAX_BLOCKS]
-        text = "\n".join(t for _, t in snapshot)
-        if len(text) > self._budget():
-            raise BadRequest("That is more text than your budget allows in one check. Select a smaller part.", details={"limit": self._budget()})
-        self._gate(session, text)
-        gateway = self._gw()
+        # Automatic proofreading must remain bounded on long documents. A
+        # large paragraph is checked only through the budget instead of making
+        # every later edit fail with a permanent "input too long" warning.
+        remaining = DEFAULT_BUDGET
+        bounded: list[tuple[str, str]] = []
+        for block_id, content in snapshot:
+            if remaining <= 0:
+                break
+            snippet = content[:remaining]
+            bounded.append((block_id, snippet))
+            remaining -= len(snippet) + 1
+        truncated = len(bounded) < len(snapshot) or any(len(raw) != len(original) for (_, raw), (_, original) in zip(bounded, snapshot))
+        snapshot = bounded
         issues: list[dict[str, Any]] = []
 
         def analyse(agent: Any) -> list[dict[str, Any]]:
@@ -202,12 +227,20 @@ class Assist:
             return found
 
         try:
-            issues = gateway.call("language", analyse, 90)
+            # Injected gateways are still supported for contract tests and hosts
+            # which manage an existing local Language Agent. The normal Writer
+            # path creates only the two canonical deterministic processors.
+            if self._gateway is not None:
+                issues = self._gateway.call("language", analyse, 30)
+            else:
+                with self._grammar_lock:
+                    issues = analyse(self._local_grammar())
         except Exception as exc:  # noqa: BLE001
             reason = getattr(exc, "details", {}).get("reason") if hasattr(exc, "details") else None
             raise DependencyMissing(f"Grammar checking is not available: {reason or getattr(exc, 'message', None) or type(exc).__name__}.",
                                     hint="Writing is not affected. Grammar needs SLAI's language agent and its NLP resources.") from exc
-        return {"available": True, "issues": issues[:limit], "version": version, "source": "SLAI grammar processor"}
+        return {"available": True, "issues": issues[:limit], "version": version, "source": "SLAI grammar processor",
+                "truncated": truncated or len(issues) > limit}
 
     # ------------------------------------------------------------------------------------------------ proposals
     def _budget(self) -> int:
