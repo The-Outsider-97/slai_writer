@@ -583,6 +583,34 @@ export async function insertTable(ed: Editor, rows: number, columns: number, sel
   return inserted === true;
 }
 
+/** Replace complete Markdown-only paragraph blocks with one native SLDC table.
+ * The source snapshots guard against converting text changed by later typing.
+ * This is one transaction, so Undo restores every original Markdown line. */
+export async function convertMarkdownBlocks(ed: Editor, ids: string[], source: string[], data: TableData): Promise<boolean> {
+  if (ed.readOnly || !ids.length || ids.length !== source.length) return false;
+  const inserted = await guarded(ed, async () => {
+    await ed.flush();
+    const index = ed.model.indexOf(ids[0] as string);
+    if (index < 0) return false;
+    const originals = ids.map((id, i) => {
+      const block = ed.model.block(id);
+      return block?.type === "paragraph" && block.text === source[i] && ed.model.order[index + i] === id ? block : null;
+    });
+    if (originals.some((b) => !b) || originals.some((b) => b?.section !== originals[0]?.section)) return false;
+    const id = ed.newId();
+    const table = { id, type: "table", text: "", table: data, ...(originals[0]?.section ? { section: originals[0].section } : {}) };
+    const after = index > 0 ? ed.model.order[index - 1] as string : null;
+    await ed.op({ op: "batch", label: "convert Markdown table", ops: [
+      { op: "block_insert", after, block: table },
+      { op: "block_delete", blocks: ids },
+    ] });
+    ed.scrollToBlock(id);
+    focusCell(ed, id, 0, 0);
+    return true;
+  });
+  return inserted === true;
+}
+
 export async function insertEquationBlock(ed: Editor, source: string, syntax = "latex"): Promise<void> {
   const id = await insertBlock(ed, { type: "equation", text: "", equation: { syntax, source, domain: syntax === "mhchem" ? "chemistry" : syntax === "sequence" ? "biology" : "mathematics" } });
   if (id) selectBlock(ed, id);
