@@ -301,6 +301,11 @@ def bibliography(app, req: Request):
                                      heading=text(body, "heading", required=False, max_len=80, default="References") or "References")
 
 
+@router.route("DELETE", "/api/docs/{sid}/bibliography")
+def remove_bibliography(app, req: Request):
+    return app.academic.remove_bibliography(session_of(app, req))
+
+
 @router.route("POST", "/api/docs/{sid}/contents")
 def contents(app, req: Request):
     body = req.json()

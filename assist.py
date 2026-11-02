@@ -96,6 +96,18 @@ class Assist:
                 else:
                     module = _import_slai(self.app.docmaster, "src.agents.language.modules.spell_checker")
                     self._spell = module.SpellChecker()
+                # A missing SLAI dictionary previously went unnoticed: the
+                # checker reported success with its ~30-word emergency seed,
+                # and Writer then underlined almost every word on the page.
+                # A caller-supplied test checker may not expose stats().
+                stats = getattr(self._spell, "stats", None)
+                if callable(stats):
+                    word_count = getattr(stats(), "word_count", 0)
+                    if word_count < 10_000:
+                        raise RuntimeError(
+                            f"The spelling vocabulary contains only {word_count} words; "
+                            "the full SLAI English dictionary was not loaded."
+                        )
             except Exception as exc:  # noqa: BLE001 - a missing wordlist or package must degrade, not crash
                 self._spell_error = f"SLAI's spell checker could not be loaded ({type(exc).__name__}: {str(exc)[:200]})."
                 raise DependencyMissing(self._spell_error, hint="Spelling is optional; you can keep writing without it.") from exc
@@ -188,6 +200,7 @@ class Assist:
 
         def analyse(agent: Any) -> list[dict[str, Any]]:
             found: list[dict[str, Any]] = []
+            seen: set[tuple[str, int, int, str]] = set()
             for block_id, raw in snapshot:
                 clean = raw.replace(OBJ, " ")
                 result = agent.nlp_engine.analyze_text(clean)
@@ -195,10 +208,32 @@ class Assist:
                 deps = list(getattr(result, "dependencies", ()) or [])
                 analysis = agent.grammar_processor.analyze_tokens(tokens, dependencies=deps, full_text_snippet=clean)
                 for issue in getattr(analysis, "issues", ()) or ():
-                    start, last = issue.source_text_char_span
-                    found.append({"kind": "grammar", "block": block_id, "start": int(start), "end": int(last) + 1, "message": issue.description,
+                    # The grammar processor may emit exploratory or stylistic
+                    # findings. Only render a concrete, localized correction
+                    # backed by sufficiently strong evidence as a grammar mark.
+                    confidence = getattr(issue, "confidence", None)
+                    replacement = getattr(issue, "replacement", None)
+                    if not isinstance(confidence, (int, float)) or confidence < 0.8 or not isinstance(replacement, str) or not replacement.strip():
+                        continue
+                    span = getattr(issue, "source_text_char_span", None)
+                    if not isinstance(span, (tuple, list)) or len(span) != 2:
+                        continue
+                    try:
+                        start, end = int(span[0]), int(span[1]) + 1
+                    except (ValueError, TypeError):
+                        continue
+                    if start < 0 or end > len(clean) or end <= start or clean[start:end] == replacement:
+                        continue
+                    if end - start > max(80, int(len(clean) * 0.8)):
+                        continue
+                    rule = str(getattr(issue, "rule_id", None) or getattr(issue, "code", ""))
+                    marker = (block_id, start, end, rule)
+                    if marker in seen:
+                        continue
+                    seen.add(marker)
+                    found.append({"kind": "grammar", "block": block_id, "start": start, "end": end, "message": issue.description,
                                   "suggestion": issue.suggestion, "replacement": issue.replacement, "severity": issue.severity,
-                                  "confidence": issue.confidence, "rule": issue.rule_id or issue.code, "text": clean[int(start):int(last) + 1]})
+                                  "confidence": confidence, "rule": rule, "text": clean[start:end]})
             return found
 
         try:

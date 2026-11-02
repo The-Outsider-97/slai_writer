@@ -37,6 +37,7 @@ STATUS_LABELS = {"user": "Provided by you", "imported": "Imported with the docum
 DOI = re.compile(r"^10\.\d{4,9}/\S{1,180}$")
 FOOTNOTE_ANCHOR = "​"
 TOC_EXTENSION = "slai.sldc.toc"
+REFERENCES_EXTENSION = "slai.sldc.references"
 CROSSREF = "https://api.crossref.org/works/"
 _FIELDS = ("key", "title", "container", "publisher", "volume", "issue", "pages", "note", "authors", "year", "doi", "url", "accessed")
 
@@ -177,7 +178,25 @@ class Academic:
         entry = clean_entry(data)
         if source_id:
             entry["id"] = source_id
+        previous = self._ref(session, source_id) if source_id else None
         ops: list[dict[str, Any]] = [{"op": "reference_put", "reference": entry}]
+        # Keep existing in-text citations linked AND current when a source is
+        # edited. Never overwrite a person's manually customized citation.
+        # Descending offsets avoid shifting another citation in the same block.
+        if previous and in_text(previous) != in_text(entry):
+            old_mark, new_mark = in_text(previous), in_text(entry)
+            for block in session.doc["blocks"]:
+                spans = sorted((s for s in block.get("spans", []) if s.get("type") == "ref" and s.get("ref") == source_id),
+                               key=lambda s: s["start"], reverse=True)
+                for span in spans:
+                    start, end = span["start"], span["end"]
+                    if block["text"][start:end] != old_mark:
+                        continue
+                    ops.extend([
+                        {"op": "span", "block": block["id"], "start": start, "end": end, "kind": "ref", "clear": True},
+                        {"op": "text", "block": block["id"], "start": start, "end": end, "insert": new_mark},
+                        {"op": "span", "block": block["id"], "start": start, "end": start + len(new_mark), "kind": "ref", "ref": source_id},
+                    ])
         patch = session.apply({"op": "batch", "ops": ops, "label": "source"}, None)
         sid = patch["result"]["results"][0]["reference"]
         statuses = dict(_statuses(session.doc))
@@ -186,6 +205,10 @@ class Academic:
         elif source_id:                                              # editing a checked / verified source drops that claim: it was checked as it was
             statuses[sid] = {"status": "user", "date": utc_now(), "note": "Edited after it was checked."}
         session.apply({"op": "ext_set", "values": {"source_status": statuses}}, None)
+        managed = next((b for b in session.doc["blocks"] if b.get("extensions", {}).get(REFERENCES_EXTENSION, {}).get("role") == "title"), None)
+        if managed:
+            meta = managed["extensions"][REFERENCES_EXTENSION]
+            self.bibliography(session, only_cited=meta.get("only_cited", True), heading=managed["text"])
         return {"id": sid, "status": statuses[sid]["status"], "inText": in_text(entry), "state": session.state()}
 
     def delete_source(self, session: DocumentSession, source_id: str) -> dict[str, Any]:
@@ -279,7 +302,11 @@ class Academic:
         return {**patch, "footnote": fid}
 
     def bibliography(self, session: DocumentSession, *, only_cited: bool = True, after: str | None = None, heading: str = "References") -> dict[str, Any]:
-        """Insert (or return, with ``after=None`` and no change) a reference list built from the entries' own fields."""
+        """Insert or regenerate one managed reference list in a single undoable transaction.
+
+        The heading has a semantic page break, so it survives edits and
+        repagination without introducing spacer paragraphs or empty pages.
+        """
         listing = self.sources(session)
         entries = [s for s in listing["sources"] if s["kind"] == "citation" and (s["uses"] or not only_cited)]
         if not entries:
@@ -290,13 +317,45 @@ class Academic:
         if weak:
             warnings.append(f"{len(weak)} source(s) are AI-suggested and not verified. Check them against the real works before you publish.")
         warnings += [f"“{s['data']['title'][:50]}”: {p}" for s in entries for p in s["problems"][:1]]
-        patch = session.apply({"op": "batch", "ops": [{"op": "block_insert", "after": after, "block": {"type": "heading", "text": heading, "attributes": {"level": 1}}}], "label": "bibliography"}, None)
-        head = patch["result"]["results"][0]["block"]
+        existing = [(index, block) for index, block in enumerate(session.doc["blocks"])
+                    if isinstance(block.get("extensions", {}).get(REFERENCES_EXTENSION), dict)]
+        previous_heading = next((b for _, b in existing if b["extensions"][REFERENCES_EXTENSION].get("role") == "title"), None)
+        managed_id = (previous_heading or {}).get("extensions", {}).get(REFERENCES_EXTENSION, {}).get("id") or secrets.token_hex(12)
+        head = previous_heading["id"] if previous_heading else f"b{secrets.token_hex(8)}"
+        if existing:
+            # Preserve the section's original anchor and heading identity.
+            anchor_index = min(i for i, _ in existing)
+            before = [b for b in session.doc["blocks"][:anchor_index]
+                      if not b.get("extensions", {}).get(REFERENCES_EXTENSION)]
+            after = before[-1]["id"] if before else None
+        ops: list[dict[str, Any]] = []
+        if existing:
+            ops.append({"op": "block_delete", "blocks": [b["id"] for _, b in existing]})
+        ops.append({"op": "block_insert", "after": after, "block": {
+            "id": head, "type": "heading", "text": heading,
+            "attributes": {"level": 1, "align": "center", "page_break_before": True, "line_height": 2},
+            "spans": [{"type": "format", "start": 0, "end": len(heading), "bold": True}],
+            "extensions": {REFERENCES_EXTENSION: {"id": managed_id, "role": "title", "only_cited": only_cited}},
+        }})
         prev = head
         for s in entries:
-            p = session.apply({"op": "block_insert", "after": prev, "block": {"type": "list_item", "text": s["line"]}}, None)
-            prev = p["result"]["block"]
+            entry_id = f"b{secrets.token_hex(8)}"
+            ops.append({"op": "block_insert", "after": prev, "block": {
+                "id": entry_id, "type": "paragraph", "text": s["line"],
+                "attributes": {"line_height": 2, "indent_mm": 12.7, "first_line_indent_mm": -12.7},
+                "extensions": {REFERENCES_EXTENSION: {"id": managed_id, "role": "entry", "source": s["id"]}},
+            }})
+            prev = entry_id
+        session.apply({"op": "batch", "ops": ops, "label": "update references" if existing else "insert references"}, None)
         return {"heading": head, "entries": len(entries), "warnings": warnings, "state": session.state()}
+
+    def remove_bibliography(self, session: DocumentSession) -> dict[str, Any]:
+        """Remove generated blocks without deleting sources or in-text marks."""
+        ids = [b["id"] for b in session.doc["blocks"] if b.get("extensions", {}).get(REFERENCES_EXTENSION)]
+        if not ids:
+            raise BadRequest("There is no generated References section to remove.")
+        session.apply({"op": "block_delete", "blocks": ids, "label": "remove references"}, None)
+        return {"removed": len(ids), "state": session.state()}
 
     def contents(self, session: DocumentSession, after: str | None, title: str = "Contents", depth: int = 3,
                  preset: str = "standard", *, show_page_numbers: bool = True, leader_dots: bool = True,

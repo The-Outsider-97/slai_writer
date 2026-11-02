@@ -106,6 +106,18 @@
 .replace-row { display: flex; gap: .4rem; align-items: center; padding: .3rem 14px; border-bottom: 1px solid var(--e-line); background: #fefefe; color-scheme: light; }
 .replace-row input { width: 14rem; }
 .bar { background: #fefefe; color-scheme: light; color: #333; }
+.writer-ribbon { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0; }
+.ribbon-tabs { display: flex; align-items: center; gap: 3px; padding: 1px 9px 0; border-bottom: 1px solid #e9e9e9; }
+.ribbon-tab { font: inherit; font-size: 11px; padding: 3px 13px; min-height: 24px; border: 0; border-radius: 4px 4px 0 0;
+  background: transparent; color: #555; cursor: pointer; }
+.ribbon-tab[aria-selected=true] { color: #252525; border-bottom: 2px solid #9a821c; background: #f7f7f7; }
+.ribbon-tab:focus-visible { outline: 2px solid #296bc4; outline-offset: -2px; }
+.writer-ribbon .format-ribbon[hidden] { display: none; }
+.references-ribbon .ribbon-action { display: flex; align-items: center; gap: 5px; background: transparent; border: 1px solid #ddd;
+  border-radius: 5px; color: #333; font-size: 11px; min-height: 30px; padding: 4px 7px; cursor: pointer; }
+.references-ribbon .ribbon-action:hover { background: #f0f0f0; }
+.references-ribbon .ribbon-action:focus-visible { outline: 2px solid #296bc4; }
+.references-ribbon .ribbon-style-label { font-size: 11px; padding: 7px 3px; color: #555; }
 .format-ribbon { flex: 0 0 auto; display: flex; flex-wrap: nowrap; gap: 0; align-items: stretch; overflow-x: auto; overflow-y: hidden;
   min-height: 62px; padding: 4px 8px 2px; scrollbar-width: thin; border-bottom: 1px solid #d0d0d0; background: #fefefe; }
 .format-ribbon .ribbon-group { display: flex; flex: 0 0 auto; flex-direction: column; min-width: 0; justify-content: space-between;

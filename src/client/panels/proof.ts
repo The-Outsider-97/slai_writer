@@ -73,6 +73,16 @@ export function createProofPanel(ctx: DocCtx): Panel {
       })(); });
       const ignore = h("button", { class: "btn small", type: "button", text: "Ignore" });
       ignore.addEventListener("click", () => { issues = issues.filter((i) => i !== issue); marks(); paintIssues(); });
+      const ignoreAll = issue.kind === "spelling" ? h("button", { class: "btn small", type: "button", text: "Ignore all" }) : null;
+      ignoreAll?.addEventListener("click", () => { void (async () => {
+        try {
+          const ext = (ed.model.meta.extensions?.["slai.writer"] ?? {}) as { spell_ignore?: string[] };
+          const ignored = [...new Set([...(ext.spell_ignore ?? []), issue.text.toLowerCase()])].sort();
+          await ed.op({ op: "ext_set", values: { spell_ignore: ignored }, label: "ignore spelling in this document" });
+          issues = issues.filter((i) => !(i.kind === "spelling" && i.text.toLowerCase() === issue.text.toLowerCase()));
+          marks(); paintIssues();
+        } catch (error) { toast(errorText(error), { kind: "error" }); }
+      })(); });
       const go = h("button", { class: "linkbtn", type: "button", text: `“${issue.text}”` });
       go.addEventListener("click", () => ed.scrollToBlock(issue.block, issue.start));
       ul.appendChild(h("li", {},
@@ -80,7 +90,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
         issue.kind === "grammar" ? h("p", { text: issue.message }) : null,
         issue.kind === "grammar" && issue.suggestion ? h("p", { class: "fine", text: `Suggestion: ${issue.suggestion}` }) : null,
         h("p", { class: "fine", text: issue.kind === "spelling" ? "Source: SLAI spell checker. Suggestions are ranked guesses, not facts." : "Source: SLAI grammar processor on this computer." }),
-        h("div", { class: "actions" }, replacements.slice(0, 5).map((r) => { const b = h("button", { class: "btn small", type: "button", text: `Accept: ${r}`, disabled: ed.readOnly }); b.addEventListener("click", () => { void accept(issue, r); }); return b; }), dict, ignore)));
+        h("div", { class: "actions" }, replacements.slice(0, 5).map((r) => { const b = h("button", { class: "btn small", type: "button", text: `Accept: ${r}`, disabled: ed.readOnly }); b.addEventListener("click", () => { void accept(issue, r); }); return b; }), dict, ignore, ignoreAll)));
     }
     issuesBox.appendChild(ul);
   };

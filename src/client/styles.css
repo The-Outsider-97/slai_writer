@@ -249,8 +249,9 @@ sup.fn { color: #1d4ed8; cursor: pointer; font-size: .7em; }
 /* highlights (CSS Custom Highlight API) */
 ::highlight(w-search) { background-color: var(--hl-search); }
 ::highlight(w-search-current) { background-color: var(--hl-search-current); }
-::highlight(w-typo) { background-color: var(--hl-typo); text-decoration: underline wavy #d33; }
-::highlight(w-grammar) { background-color: var(--hl-grammar); text-decoration: underline wavy #e07000; }
+/* Proofreading points out exact characters, without painting whole passages. */
+::highlight(w-typo) { background-color: transparent; text-decoration: underline wavy #d33; }
+::highlight(w-grammar) { background-color: transparent; text-decoration: underline wavy #e07000; }
 ::highlight(w-note) { background-color: var(--hl-note); }
 ::highlight(w-comment) { background-color: var(--hl-comment); }
 .sheets[data-cur-text] .txt { cursor: var(--cur-text, text); }

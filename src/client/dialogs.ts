@@ -5,7 +5,8 @@ import * as A from "./actions.js";
 import type { DocCtx } from "./docctx.js";
 import { errorText, rawPost } from "./net.js";
 import { PAGE_MM } from "./textops.js";
-import type { Block, Patch, Section } from "./types.js";
+import type { BandTextFormat, Block, HeaderFooter, Patch, Section } from "./types.js";
+import { FONT_FAMILIES } from "./font_rules.js";
 import { checkbox, errorLine, notice, selectField } from "./widgets.js";
 
 /* ------------------------------------------------------------------------------------------------------ helpers */
@@ -37,6 +38,49 @@ export async function headerFooterDialog(ctx: DocCtx): Promise<void> {
   const field = (value: string | undefined, label: string): HTMLInputElement => { const i = h("input", { type: "text", value: value ?? "", maxLength: 200, attrs: { "aria-label": label } }); return i; };
   const hl = field(target.header?.left, "Header, left"), hc = field(target.header?.center, "Header, centre"), hr = field(target.header?.right, "Header, right");
   const fl = field(target.footer?.left, "Footer, left"), fc = field(target.footer?.center, "Footer, centre"), fr = field(target.footer?.right, "Footer, right");
+  // Each header/footer position owns its own typography. The six saved
+  // positions are edited through one compact set of the standard font fields.
+  const positions = ["left", "center", "right"] as const;
+  type Position = typeof positions[number];
+  type Band = "header" | "footer";
+  const formats: Record<Band, Partial<Record<Position, BandTextFormat>>> = {
+    header: structuredClone(target.header?.formats ?? {}), footer: structuredClone(target.footer?.formats ?? {}),
+  };
+  const choice = selectField("Format text in", [["header:left", "Header — left"], ["header:center", "Header — centre"], ["header:right", "Header — right"],
+    ["footer:left", "Footer — left"], ["footer:center", "Footer — centre"], ["footer:right", "Footer — right"]], "header:left");
+  const fontFamily = h("input", { type: "text", maxLength: 100, attrs: { list: "writer-font-families", "aria-label": "Header or footer font family", placeholder: "Default font" } });
+  const fonts = h("datalist", { attrs: { id: "writer-header-footer-fonts" } }, FONT_FAMILIES.map((name) => h("option", { value: name })));
+  fontFamily.setAttribute("list", "writer-header-footer-fonts");
+  const fontSize = h("input", { type: "number", min: 4, max: 400, step: 0.5, attrs: { "aria-label": "Header or footer font size", placeholder: "Default" } });
+  const fontColor = h("input", { type: "color", value: "#000000", attrs: { "aria-label": "Header or footer font color" } });
+  const useColor = checkbox("Custom font color", false);
+  const isBold = checkbox("Bold", false), isItalic = checkbox("Italic", false), isUnderlined = checkbox("Underline", false);
+  let selected: [Band, Position] = ["header", "left"];
+  const storeFormat = (): void => {
+    const [band, position] = selected;
+    const out: BandTextFormat = {};
+    const family = fontFamily.value.trim();
+    if (family) out.font_family = family;
+    if (fontSize.value) out.font_size_pt = Number(fontSize.value);
+    if (useColor.input.checked) out.color = fontColor.value;
+    if (isBold.input.checked) out.bold = true;
+    if (isItalic.input.checked) out.italic = true;
+    if (isUnderlined.input.checked) out.underline = true;
+    if (Object.keys(out).length) formats[band][position] = out;
+    else delete formats[band][position];
+  };
+  const loadFormat = (): void => {
+    const stored = formats[selected[0]][selected[1]] ?? {};
+    fontFamily.value = stored.font_family ?? "";
+    fontSize.value = stored.font_size_pt?.toString() ?? "";
+    useColor.input.checked = !!stored.color;
+    fontColor.value = /^#[0-9a-fA-F]{6}$/.test(stored.color ?? "") ? stored.color! : "#000000";
+    fontColor.disabled = !useColor.input.checked;
+    isBold.input.checked = !!stored.bold; isItalic.input.checked = !!stored.italic; isUnderlined.input.checked = !!stored.underline;
+  };
+  choice.select.addEventListener("change", () => { storeFormat(); selected = choice.select.value.split(":") as [Band, Position]; loadFormat(); });
+  useColor.input.addEventListener("change", () => { fontColor.disabled = !useColor.input.checked; });
+  loadFormat();
   const start = numberInput(target.numbering?.start ?? 1, 1, 99999);
   const restart = checkbox("Restart numbering in this section", target.numbering?.start !== undefined);
   const visible = checkbox("Show printed page numbers", target.role !== "cover" && target.numbering?.show !== false);
@@ -51,19 +95,27 @@ export async function headerFooterDialog(ctx: DocCtx): Promise<void> {
     sections.length > 1 ? h("p", { class: "muted", text: `Editing ${sectionLabel(sections, sectionId)}.` }) : null,
     notice("Use {page} for the page number, {pages} for the page count and {title} for the document title. These are filled in when the document is printed or exported; the on-screen page count is approximate.", "info"),
     row("Header", hl, hc, hr), row("Footer", fl, fc, fr),
+    h("fieldset", { class: "hf-row" }, h("legend", { text: "Header and footer typography" }),
+      h("p", { class: "fine", text: "Each left, centre and right field can have its own font, size, colour and emphasis. Leave font fields blank to keep the default." }),
+      choice.root, fonts, h("div", { class: "grid-3" }, labelled("Font family", fontFamily), labelled("Size (pt)", fontSize), labelled("Color", fontColor)),
+      h("div", { class: "actions" }, useColor.root, isBold.root, isItalic.root, isUnderlined.root)),
     h("div", { class: "grid-2" }, labelled("First page number", start), format.root), restart.root, visible.root, all?.root ?? null);
   const handle = openDialog<true>({
     title: "Header and footer", size: "wide", body,
     actions: [{ label: "Apply", kind: "primary", run: async () => {
-      const pack = (l: HTMLInputElement, c: HTMLInputElement, r: HTMLInputElement): Record<string, string> | null => {
-        const out: Record<string, string> = {};
+      storeFormat();
+      if (fontFamily.value && /[\x00-\x1f\x7f{};<>\\"'`]/.test(fontFamily.value)) { toast("Enter a valid font family.", { kind: "error" }); return undefined; }
+      if (fontSize.value && (!Number.isFinite(Number(fontSize.value)) || Number(fontSize.value) < 4 || Number(fontSize.value) > 400)) { toast("Font size must be 4–400 pt.", { kind: "error" }); return undefined; }
+      const pack = (edge: Band, l: HTMLInputElement, c: HTMLInputElement, r: HTMLInputElement): HeaderFooter | null => {
+        const out: HeaderFooter = {};
         if (l.value) out["left"] = l.value; if (c.value) out["center"] = c.value; if (r.value) out["right"] = r.value;
-        return Object.keys(out).length ? out : null;
+        if (Object.keys(formats[edge]).length) out.formats = formats[edge];
+        return l.value || c.value || r.value ? out : null;
       };
       const ids = all?.input.checked ? sections.map((s) => s.id) : [sectionId];
       const numbering = { ...(restart.input.checked ? { start: Math.max(1, Math.round(Number(start.value) || 1)) } : {}),
         format: format.select.value, show: visible.input.checked };
-      const ops = ids.map((id) => ({ op: "page_setup", section: id, header: pack(hl, hc, hr), footer: pack(fl, fc, fr), numbering }));
+      const ops = ids.map((id) => ({ op: "page_setup", section: id, header: pack("header", hl, hc, hr), footer: pack("footer", fl, fc, fr), numbering }));
       const ok = await guarded(ctx, () => ed.op(ops.length === 1 ? (ops[0] as { op: string }) : { op: "batch", ops, label: "header and footer" }));
       return ok ? true : undefined;
     } }],

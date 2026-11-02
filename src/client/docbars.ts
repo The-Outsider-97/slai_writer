@@ -16,6 +16,7 @@ import { bundledFonts, ensureBundledFont } from "./font_catalog.js";
 import { resolveStyle } from "./render.js";
 import { segments } from "./textops.js";
 import { manageStyles } from "./style_manager.js";
+import { bibliographyDialog, removeBibliography, sourceDialog } from "./panels/sources.js";
 import type { Block } from "./types.js";
 import { ago, notice, pickFile } from "./widgets.js";
 
@@ -365,7 +366,34 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
       field("Line spacing", line), h("span", { class: "ribbon-number", attrs: { title: "Space before paragraph (pt)" } }, h("span", { text: "↑" }), before),
       h("span", { class: "ribbon-number", attrs: { title: "Space after paragraph (pt)" } }, h("span", { text: "↓" }), after)),
     h("span", { class: "ribbon-group-label", text: "Paragraph / Alignment" }));
-  const el = h("div", { class: "bar format-ribbon", attrs: { role: "toolbar", "aria-label": "Document formatting ribbon" } }, fontGroup, paragraphGroup);
+  // Keep the familiar compact ribbon, with a dedicated References tab whose
+  // actions use the existing citation/source services (no parallel engine).
+  const ribbonButton = (label: string, action: () => void, icon: string): HTMLButtonElement => {
+    const b = h("button", { class: "ribbon-action", type: "button", attrs: { title: label } }, glyph(icon), h("span", { text: label }));
+    keepSelection(b); b.addEventListener("click", action); return b;
+  };
+  const referenceGroup = (label: string, ...buttons: HTMLElement[]): HTMLElement => h("div", { class: "ribbon-group" },
+    h("span", { class: "ribbon-controls" }, ...buttons), h("span", { class: "ribbon-group-label", text: label }));
+  const refs = h("div", { class: "format-ribbon references-ribbon", attrs: { role: "toolbar", "aria-label": "References ribbon" } },
+    referenceGroup("Citations", ribbonButton("Insert citation", fire("citation"), "book")),
+    referenceGroup("Sources", ribbonButton("Add source", () => run(() => sourceDialog(ctx)), "plus"),
+      ribbonButton("Manage sources", fire("sources"), "book")),
+    referenceGroup("Bibliography", ribbonButton("Insert / Update References", () => run(() => bibliographyDialog(ctx)), "book"),
+      ribbonButton("Remove References", () => run(() => removeBibliography(ctx)), "close")),
+    referenceGroup("Citation style", h("span", { class: "ribbon-style-label", text: "APA-style author–date" })));
+  const home = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Home formatting ribbon" } }, fontGroup, paragraphGroup);
+  const homeTab = h("button", { type: "button", class: "ribbon-tab", text: "Home", attrs: { role: "tab", "aria-selected": "true" } });
+  const refsTab = h("button", { type: "button", class: "ribbon-tab", text: "References", attrs: { role: "tab", "aria-selected": "false" } });
+  const showTab = (which: "home" | "references"): void => {
+    home.hidden = which !== "home"; refs.hidden = which !== "references";
+    homeTab.setAttribute("aria-selected", String(which === "home"));
+    refsTab.setAttribute("aria-selected", String(which === "references"));
+  };
+  homeTab.addEventListener("click", () => showTab("home"));
+  refsTab.addEventListener("click", () => showTab("references"));
+  const el = h("div", { class: "bar writer-ribbon" },
+    h("div", { class: "ribbon-tabs", attrs: { role: "tablist", "aria-label": "Ribbon tabs" } }, homeTab, refsTab), home, refs);
+  showTab("home");
   const GROUPS_KEY = "writer.ribbonGroups.v1";
   const groupRows = [{ id: "font", label: "Font", element: fontGroup }, { id: "paragraph", label: "Paragraph / Alignment", element: paragraphGroup }];
   const readHidden = (): Set<string> => {

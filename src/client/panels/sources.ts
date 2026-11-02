@@ -23,6 +23,38 @@ async function mutate<T extends Reply>(ctx: DocCtx, work: () => Promise<T>): Pro
 
 export async function loadSources(ctx: DocCtx): Promise<SourcesData> { return api.get<SourcesData>(url(ctx, "sources")); }
 
+/** Shared by the References ribbon and the Sources sidebar. */
+export async function bibliographyDialog(ctx: DocCtx): Promise<void> {
+  const current = ctx.ed.model.list().some((b) => !!b.extensions?.["slai.sldc.references"]);
+  const only = checkbox("Include only sources cited in this document", true);
+  const handle = openDialog<true>({
+    title: current ? "Update References" : "Insert References", size: "narrow",
+    body: h("div", { class: "stack" }, only.root,
+      notice("References starts on a new page. Repeating this action updates the same section, preserving the heading and avoiding duplicates.", "info")),
+    actions: [{ label: current ? "Update References" : "Insert References", kind: "primary", run: async () => {
+      try {
+        const after = ctx.ed.model.order[ctx.ed.model.order.length - 1] ?? null;
+        const result = await mutate(ctx, () => api.post<{ state: DocState; entries: number; warnings?: string[] }>(url(ctx, "bibliography"),
+          { onlyCited: only.input.checked, after, heading: "References" }));
+        toast(`References ${current ? "updated" : "inserted"}: ${result.entries} entries.`, { kind: "ok" });
+        if (result.warnings?.length) toast(result.warnings[0]!, { kind: "info" });
+        return true;
+      } catch (error) { toast(errorText(error), { kind: "error" }); return undefined; }
+    } }],
+  });
+  await handle.result;
+}
+
+export async function removeBibliography(ctx: DocCtx): Promise<void> {
+  const ok = await confirmDialog({ title: "Remove generated References?", message: "Saved sources and in-text citations will remain in the document.",
+    confirmLabel: "Remove References", danger: true });
+  if (!ok) return;
+  try {
+    await mutate(ctx, () => api.del<{ state: DocState }>(url(ctx, "bibliography")));
+    toast("Generated References removed. Your sources and citations are preserved.", { kind: "ok" });
+  } catch (error) { toast(errorText(error), { kind: "error" }); }
+}
+
 /* -------------------------------------------------------------------------------------------------- add / edit */
 export async function sourceDialog(ctx: DocCtx, existing?: SourceRow): Promise<string | null> {
   const d = (existing?.data ?? {}) as Record<string, unknown>;

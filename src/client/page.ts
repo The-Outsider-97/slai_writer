@@ -327,8 +327,19 @@ export class PageView {
       const m = sheet.geometry.margins;
       const band = (edge: "header" | "footer", spec: HeaderFooter | undefined): HTMLElement | null => {
         if (!spec || (!spec.left && !spec.center && !spec.right)) return null;
+        const cell = (part: "left" | "center" | "right", cls: string): HTMLElement => {
+          const node = h("span", { class: cls, text: fillTemplate(spec[part] ?? "", values) });
+          const format = spec.formats?.[part];
+          if (format?.font_family) node.style.fontFamily = format.font_family;
+          if (format?.font_size_pt) node.style.fontSize = `${format.font_size_pt}pt`;
+          if (format?.color) node.style.color = format.color;
+          if (format?.bold !== undefined) node.style.fontWeight = format.bold ? "bold" : "normal";
+          if (format?.italic !== undefined) node.style.fontStyle = format.italic ? "italic" : "normal";
+          if (format?.underline !== undefined) node.style.textDecoration = format.underline ? "underline" : "none";
+          return node;
+        };
         const row = h("div", { class: `hf ${edge}`, attrs: { contenteditable: "false", "data-edge": edge } },
-          h("span", { class: "l", text: fillTemplate(spec.left ?? "", values) }), h("span", { class: "c", text: fillTemplate(spec.center ?? "", values) }), h("span", { class: "r", text: fillTemplate(spec.right ?? "", values) }));
+          cell("left", "l"), cell("center", "c"), cell("right", "r"));
         row.style.setProperty(edge === "header" ? "top" : "bottom", `${(edge === "header" ? sheet.geometry.headerMm : sheet.geometry.footerMm) * MM_PX}px`);
         row.style.setProperty("left", `${m.left * MM_PX}px`);
         row.style.setProperty("right", `${m.right * MM_PX}px`);
