@@ -65,8 +65,8 @@ export async function settingsScreen(app: App): Promise<Screen> {
   };
 
   /* proofing and AI */
-  const spell = checkbox("Check spelling when I ask (and mark what it finds)", p.spell, (v) => { void save({ spell: v }); });
-  const grammar = checkbox("Check grammar when I ask", p.grammar, (v) => { void save({ grammar: v }); });
+  const spell = checkbox("Check spelling while typing", p.spell, (v) => { void save({ spell: v }); });
+  const grammar = checkbox("Check grammar while typing", p.grammar, (v) => { void save({ grammar: v }); });
   const online = checkbox("Verify DOIs online when I press Verify DOI", p.lookup_online, (v) => { void save({ lookup_online: v }); });
   const aiOn = checkbox("Allow the AI Assistant", p.ai_enabled, (v) => { void save({ ai_enabled: v }).then(() => repaintAi()); });
   const aiCloud = checkbox("Allow cloud processing (the selected text leaves this computer)", p.ai_cloud, (v) => { void save({ ai_cloud: v }); });
@@ -81,7 +81,7 @@ export async function settingsScreen(app: App): Promise<Screen> {
     aiState.appendChild(h("p", { class: "fine", text: ai.privacy }));
   };
   const proof = section("Proofing and AI",
-    notice("Writing, editing, undo and autosave work fully without any of this. Nothing is checked or sent anywhere unless you start it, and every suggestion is shown for review before it changes the text.", "info"),
+    notice("Spelling and grammar preferences are on by default; switch either off here. Spelling checks locally while typing. Grammar currently requires enabling the local SLAI Language Agent through Assistance below. Corrections are never automatic.", "info"),
     spell.root, grammar.root, online.root, h("hr"),
     aiOn.root, aiCloud.root, labelled("Cloud credit budget per request", budget, { hint: "Cloud processing needs your approval each time and stays within this budget. 0 means none." }), aiNotes.root, aiState);
 
