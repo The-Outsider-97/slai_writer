@@ -106,6 +106,50 @@ class RibbonFormatting(Workbench):
         self.assertEqual(right["text"], "Original text")
         self.assertTrue(right.get("attributes", {}).get("page_break_before"))
 
+    def test_cursor_table_insertion_split_preserves_order_spans_and_undo(self):
+        session, first_id = self.make("BeforeAfter")
+        session.apply({"op": "format", "block": first_id, "start": 6, "end": 11,
+                       "set": {"italic": True}}, None)
+        session.apply({"op": "batch", "label": "insert table", "ops": [
+            {"op": "split", "block": first_id, "at": 6, "new_id": "after-table"},
+            {"op": "block_insert", "after": first_id,
+             "block": {"id": "cursor-table", "type": "table", "rows": 2, "columns": 2}},
+        ]}, None)
+        blocks = session.doc["blocks"]
+        self.assertEqual([(b["type"], b["text"]) for b in blocks],
+                         [("paragraph", "Before"), ("table", ""), ("paragraph", "After")])
+        self.assertTrue(any(s.get("italic") for s in blocks[2].get("spans", [])))
+        saved = sldc().loads_package(session.to_bytes()).document["blocks"]
+        self.assertEqual([b["id"] for b in saved], [first_id, "cursor-table", "after-table"])
+        session.undo(None)
+        self.assertEqual(len(session.doc["blocks"]), 1)
+        self.assertEqual(session.doc["blocks"][0]["text"], "BeforeAfter")
+
+    def test_markdown_table_content_uses_native_table_cells(self):
+        session, first_id = self.make("Intro")
+        table = {"columns": 2, "header_rows": 1, "rows": [
+            [{"text": "Name"}, {"text": "Value"}],
+            [{"text": "A|B"}, {"text": "123"}],
+        ]}
+        session.apply({"op": "block_insert", "after": first_id,
+                       "block": {"type": "table", "text": "", "table": table}}, None)
+        saved = sldc().loads_package(session.to_bytes()).document["blocks"][-1]
+        self.assertEqual(saved["table"]["rows"][1][0]["text"], "A|B")
+        self.assertEqual(saved["table"]["header_rows"], 1)
+
+    def test_table_expansion_handles_append_a_row_and_column(self):
+        session, first_id = self.make("Intro")
+        session.apply({"op": "block_insert", "after": first_id,
+                       "block": {"id": "expand-table", "type": "table", "rows": 2, "columns": 2}}, None)
+        session.apply({"op": "table_edit", "block": "expand-table", "action": "insert_row", "index": 2}, None)
+        session.apply({"op": "table_edit", "block": "expand-table", "action": "insert_col", "index": 2}, None)
+        table = session.doc["blocks"][-1]["table"]
+        self.assertEqual(table["columns"], 3)
+        self.assertEqual(len(table["rows"]), 3)
+        self.assertTrue(all(len(row) == 3 for row in table["rows"]))
+        session.undo(None)
+        self.assertEqual(session.doc["blocks"][-1]["table"]["columns"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
