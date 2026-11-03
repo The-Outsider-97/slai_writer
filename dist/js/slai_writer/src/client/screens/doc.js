@@ -10,7 +10,7 @@ import { externalDialog, saveAsDialog, saveDocument } from "../docsave.js";
 import { Editor } from "../editor.js";
 import { Find } from "../find.js";
 import { installInput } from "../input.js";
-import { announce, clear, h, toast } from "../kit.js";
+import { announce, clear, h, openMenu, toast } from "../kit.js";
 import { api, errorText } from "../net.js";
 import { createEmbedDrawer } from "../panels/embed.js";
 import { createCommentsPanel, createNotesPanel, loadNotes, noteFromMatch, paintCommentMarks, paintNoteMarks } from "../panels/notes.js";
@@ -98,6 +98,28 @@ export async function docScreen(app, route) {
     const top = buildTopBar(ctx, find, () => nav);
     nav = createNavMenu(ctx, () => top.menuButton, (open) => top.setMenuOpen(open));
     const format = buildFormatBar(ctx);
+    const headerMenu = (e) => {
+        const target = e.target;
+        if (target instanceof Element && target.closest("button, input, select, a, [role=button]"))
+            return;
+        e.preventDefault();
+        openMenu(top.el, [
+            { label: format.el.hidden ? "Show ribbon" : "Hide ribbon", run: () => ui.toggleFormatBar() },
+            { label: "Show ribbon and all sections", run: () => {
+                    if (format.el.hidden)
+                        ui.toggleFormatBar();
+                    try {
+                        window.localStorage.removeItem("writer.ribbonGroups.v1");
+                    }
+                    catch { /* preference */ }
+                    format.el.querySelectorAll(".ribbon-group").forEach((group) => { group.hidden = false; });
+                } },
+        ], { label: "Application header" });
+    };
+    top.el.addEventListener("contextmenu", headerMenu);
+    top.el.tabIndex = 0;
+    top.el.addEventListener("keydown", (e) => { if (e.target === top.el && (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")))
+        headerMenu(e); });
     format.el.hidden = !barPref();
     const status = buildStatusBar(ctx, (r) => setZoom(r));
     const currentSheet = () => Math.max(0, ed.currentPage() - 1);
@@ -118,6 +140,9 @@ export async function docScreen(app, route) {
         dockPanels.set(name, panel);
         return panel;
     };
+    // Proofreading decorations must run even while the corrections panel is
+    // collapsed (the authoritative design keeps all side panels hidden).
+    panelFor("proofing");
     const yellowTabs = h("div", { class: "tabs", attrs: { role: "tablist", "aria-label": "Notes, comments and sources" } });
     const yellowBody = h("div", { class: "dock-body" });
     const yellowContent = h("div", { class: "pcontent" }, yellowTabs, yellowBody);
@@ -340,12 +365,17 @@ export async function docScreen(app, route) {
                     toast(errorText(err), { kind: "error" });
                 } })();
                 break;
-            case "page-double":
-                if (ed.readOnly)
-                    toast("This document is read-only, so guides cannot be added.", { kind: "info" });
-                else
-                    void ed.addGuides(e.xMm, e.yMm);
+            case "page-double": {
+                if (ed.readOnly) {
+                    toast("This document is read-only.", { kind: "info" });
+                    break;
+                }
+                void ed.placeTextAt(e.sheetIndex, e.xMm, e.yMm).then((ok) => {
+                    if (!ok)
+                        toast("Choose blank writable space below the existing text, inside the page margins.", { kind: "info" });
+                }).catch((error) => toast(errorText(error), { kind: "error" }));
                 break;
+            }
             case "ruler-double":
                 if (!ed.readOnly)
                     void pageSetupDialog(ctx);

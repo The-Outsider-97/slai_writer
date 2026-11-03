@@ -60,11 +60,20 @@ export async function sourceDialog(ctx: DocCtx, existing?: SourceRow): Promise<s
   const d = (existing?.data ?? {}) as Record<string, unknown>;
   const text = (key: string, label: string, hint?: string, max = 300): HTMLElement => labelled(label, h("input", { type: "text", name: key, value: String(d[key] ?? ""), maxLength: max, attrs: { autocomplete: "off" } }), hint ? { hint } : {});
   const authors = h("textarea", { rows: 3, name: "authors", maxLength: 2000, value: Array.isArray(d["authors"]) ? (d["authors"] as string[]).join("\n") : "" });
+  const editors = h("textarea", { rows: 2, name: "editors", maxLength: 2000, value: Array.isArray(d["editors"]) ? (d["editors"] as string[]).join("\n") : "" });
+  const sourceType = selectField("Source type", [["article-journal", "Journal article"], ["book", "Book"], ["chapter", "Book chapter"],
+    ["webpage", "Website"], ["report", "Report"], ["thesis", "Thesis / dissertation"], ["paper-conference", "Conference paper"],
+    ["article", "Preprint / article"], ["dataset", "Dataset"], ["software", "Software"], ["motion_picture", "Video"],
+    ["document", "Document"]], String(d["source_type"] ?? "article-journal"));
   const status = selectField("Where does this source come from?", [["user", "I am entering it myself"], ["imported", "It came with an imported document"], ["ai", "An AI assistant suggested it (not verified)"]], "user");
   const error = h("p", { class: "form-error", attrs: { role: "alert" }, hidden: true });
   const body = h("form", { class: "stack", attrs: { novalidate: true } },
     notice("Enter only what you can see on the real work. Writer will not fill in or correct missing details: anything left empty stays empty, and shows as “n.d.” or is listed as a problem.", "info"),
-    text("title", "Title (required)", undefined, 1000), labelled("Authors (one per line)", authors),
+    sourceType.root, text("title", "Title (required)", undefined, 1000), labelled("Authors (one per line)", authors),
+    h("details", {}, h("summary", { text: "Additional source-specific metadata" }),
+      labelled("Editors (one per line)", editors), text("organization", "Organization as author", undefined, 300),
+      h("div", { class: "grid-3" }, text("published", "Publication date", "YYYY-MM-DD", 10),
+        text("edition", "Edition", undefined, 40), text("isbn", "ISBN", undefined, 40))),
     h("div", { class: "grid-3" }, text("year", "Year", "Four digits", 4), text("volume", "Volume", undefined, 40), text("issue", "Issue", undefined, 40)),
     text("container", "Journal, book or website", undefined, 500), h("div", { class: "grid-2" }, text("publisher", "Publisher", undefined, 300), text("pages", "Pages", "For example 12–34", 40)),
     h("div", { class: "grid-2" }, text("doi", "DOI", "For example 10.1000/xyz123", 200), text("url", "Link", undefined, 2000)),
@@ -73,6 +82,7 @@ export async function sourceDialog(ctx: DocCtx, existing?: SourceRow): Promise<s
   const read = (): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
     for (const el of Array.from(body.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input[name], textarea[name]"))) out[el.name] = el.value;
+    out["source_type"] = sourceType.select.value;
     return out;
   };
   const handle = openDialog<string>({
@@ -103,17 +113,29 @@ export async function citeDialog(ctx: DocCtx): Promise<void> {
     cites = data.sources.filter((s) => s.kind === "citation");
   }
   const choose = selectField("Source", cites.map((s) => [s.id, `${s.inText} ${String((s.data as { title?: string }).title ?? "")}`.slice(0, 120)] as [string, string]), cites[0]?.id ?? "");
+  const multiple = cites.map((s) => ({ id: s.id, ...checkbox(String((s.data as { title?: string }).title ?? s.id).slice(0, 85), false) }));
+  const mode = selectField("Citation form", [["parenthetical", "Parenthetical (Remy, 2026)"], ["narrative", "Narrative Remy (2026)"]], "parenthetical");
+  const locator = h("input", { type: "text", maxLength: 100, attrs: { placeholder: "Optional: 42, 42–43, section 2…", "aria-label": "Citation locator" } });
+  const label = selectField("Locator type", [["page", "Page"], ["paragraph", "Paragraph"], ["chapter", "Chapter"], ["section", "Section"], ["figure", "Figure"], ["table", "Table"]], "page");
   const detail = h("div", { class: "muted", attrs: { "aria-live": "polite" } });
   const paint = (): void => { const s = cites.find((c) => c.id === choose.select.value); if (s) fill(detail, s.statusLabel + (s.problems.length ? ` · ${s.problems[0]}` : "")); };
   choose.select.addEventListener("change", () => { clear(detail); paint(); });
   paint();
   const handle = openDialog<true>({
-    title: "Insert a citation", size: "narrow", body: h("div", { class: "stack" }, choose.root, detail, h("p", { class: "fine", text: "The in-text mark is built only from the source's own fields." })),
+    title: "Insert a citation", size: "wide", body: h("div", { class: "stack" }, choose.root, detail,
+      h("details", {}, h("summary", { text: "Combine with other sources" }),
+        h("p", { class: "fine", text: "Check any additional sources to include in this citation group." }),
+        ...multiple.map((entry) => entry.root)),
+      mode.root, h("div", { class: "grid-2" }, labelled("Locator (optional)", locator), label.root),
+      h("p", { class: "fine", text: "APA 7 formatting is generated locally using the saved bibliographic metadata." })),
     actions: [{ label: "Add a new source…", run: async () => { await sourceDialog(ctx); return null; } },
       { label: "Insert citation", kind: "primary", run: async () => {
         try {
           ctx.ed.refocus(sel);
-          await mutate(ctx, () => api.post<Patch>(url(ctx, "cite"), { block: sel.start.block, at: sel.start.offset, source: choose.select.value, base: ctx.ed.model.version }));
+          const selected = [choose.select.value, ...multiple.filter((x) => x.input.checked && x.id !== choose.select.value).map((x) => x.id)];
+          await mutate(ctx, () => api.post<Patch>(url(ctx, "cite"), { block: sel.start.block, at: sel.start.offset,
+            source: choose.select.value, sources: selected, mode: mode.select.value,
+            locator: locator.value.trim(), label: label.select.value, base: ctx.ed.model.version }));
           announce("Citation inserted.");
           return true;
         } catch (e) { toast(errorText(e), { kind: "error" }); return undefined; }

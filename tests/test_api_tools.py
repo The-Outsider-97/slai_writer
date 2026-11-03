@@ -319,6 +319,66 @@ class ExportImport(ApiCase):
         self.assertIn("From a file path.", [b["text"] for b in again["blocks"]])
         self.assertEqual(self.web.api("POST", "/api/import/path", {"path": str(self.docs / "missing.md")})[0], 404)
 
+    def test_docx_import_retains_editable_typography_table_and_page_bands(self):
+        """The actual Writer upload route must keep SLDC structure, not flatten Word."""
+        from docx import Document
+        from docx.shared import Cm, Pt
+        from io import BytesIO
+
+        source = Document()
+        source.sections[0].left_margin = Cm(3.1)
+        source.sections[0].header.paragraphs[0].text = "Academic report"
+        source.sections[0].footer.paragraphs[0].text = "Confidential"
+        paragraph = source.add_paragraph()
+        run = paragraph.add_run("A formatted paragraph")
+        run.font.name = "Georgia"
+        run.font.size = Pt(14)
+        run.bold = True
+        table = source.add_table(rows=2, cols=2)
+        table.cell(0, 0).text = "Field"
+        table.cell(0, 1).text = "Value"
+        table.cell(1, 0).text = "Version"
+        table.cell(1, 1).text = "1.0"
+        buffer = BytesIO()
+        source.save(buffer)
+        state = self.web.ok("POST", "/api/import?name=sample.docx", raw=buffer.getvalue(),
+                            headers={"Content-Type": "application/octet-stream"})
+        paragraph = next(b for b in state["blocks"] if b["type"] == "paragraph" and "formatted" in b["text"])
+        self.assertTrue(any(span.get("font_size_pt") == 14 and span.get("font_family") == "Georgia" and span.get("bold")
+                            for span in paragraph.get("spans", [])))
+        table = next(b for b in state["blocks"] if b["type"] == "table")
+        self.assertEqual(table["table"]["rows"][1][1]["text"], "1.0")
+        sections = state["document"]["sections"]
+        self.assertAlmostEqual(sections[0]["page"]["margins_mm"]["left"], 31, delta=0.2)
+        self.assertEqual(sections[0]["header"]["left"], "Academic report")
+        self.assertEqual(sections[0]["footer"]["left"], "Confidential")
+
+    def test_pdf_import_reconstructs_fonts_and_repeated_page_bands(self):
+        """Writer must pass PDF layout data into SLDC through the upload API."""
+        from io import BytesIO
+        from reportlab.pdfgen import canvas
+
+        buffer = BytesIO()
+        c = canvas.Canvas(buffer)
+        for page in (1, 2):
+            c.setFont("Helvetica", 9)
+            c.drawString(74, 795, "Academic report")
+            c.drawRightString(520, 39, str(page))
+            c.setFont("Helvetica-Bold", 18)
+            c.drawString(74, 711, "Information Page")
+            c.setFont("Helvetica", 11)
+            c.drawString(74, 681, "Formatted body text should remain in an editable paragraph.")
+            c.showPage()
+        c.save()
+        state = self.web.ok("POST", "/api/import?name=report.pdf", raw=buffer.getvalue(),
+                            headers={"Content-Type": "application/octet-stream"})
+        sections = state["document"]["sections"]
+        self.assertEqual(sections[0]["header"]["left"], "Academic report")
+        self.assertEqual(sections[0]["footer"]["right"], "{page}")
+        headings = [block for block in state["blocks"] if block["type"] == "heading"]
+        self.assertTrue(any(span.get("font_size_pt") == 18 for block in headings for span in block.get("spans", [])))
+        self.assertTrue(any(block.get("attributes", {}).get("page_break_before") for block in state["blocks"]))
+
 
 class Workspace(ApiCase):
     def test_collaboration_is_honestly_unavailable_and_copies_can_be_merged(self):

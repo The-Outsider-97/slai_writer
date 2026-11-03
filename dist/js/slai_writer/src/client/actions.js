@@ -5,6 +5,8 @@ import { api, errorText } from "./net.js";
 import { MM_PX } from "./textops.js";
 import { layerList } from "./model.js";
 import { TEXT_TYPES } from "./types.js";
+import { FRONT_MATTER_STYLES } from "./named_styles.js";
+import { ensureBundledFont } from "./font_catalog.js";
 const FLAGS = ["bold", "italic", "underline", "strike", "code", "superscript", "subscript"];
 function isTextBlock(b) { return !!b && TEXT_TYPES.includes(b.type); }
 /** Text blocks touched by a selection, each with the covered range. */
@@ -388,25 +390,61 @@ export async function toggleFormat(ed, flag) {
     const ranges = textRanges(ed, sel).filter((r) => r.to > r.from);
     if (!ranges.length)
         return;
-    const all = ranges.every((r) => covered(r.block, r.from, r.to, flag));
-    const ops = ranges.map((r) => (all ? { op: "format", block: r.block.id, start: r.from, end: r.to, unset: [flag] } : { op: "format", block: r.block.id, start: r.from, end: r.to, set: { [flag]: true } }));
+    const all = ranges.every((r) => covered(r.block, characterOffset(r.block.text, r.from), characterOffset(r.block.text, r.to), flag));
+    const ops = ranges.map((r) => (all
+        ? { op: "format", block: r.block.id, start: characterOffset(r.block.text, r.from), end: characterOffset(r.block.text, r.to), unset: [flag] }
+        : { op: "format", block: r.block.id, start: characterOffset(r.block.text, r.from), end: characterOffset(r.block.text, r.to), set: { [flag]: true } }));
     await guarded(ed, async () => { await ed.op(ops.length === 1 ? ops[0] : { op: "batch", ops, label: "formatting" }); ed.restoreSelection(sel); });
 }
-export async function setInlineProperty(ed, key, value) {
+/** Resolve each scope against stable block IDs; visible page numbers are never stored as text identities. */
+export function scopedTextRanges(ed, sel, scope) {
+    if (scope === "selection")
+        return textRanges(ed, sel);
+    const caret = ed.model.block(sel.start.block);
+    if (!caret || !isTextBlock(caret))
+        return [];
+    if (["character", "word", "sentence"].includes(scope)) {
+        const text = caret.text;
+        const granularity = scope === "character" ? "grapheme" : scope;
+        const segments = [...new Intl.Segmenter(undefined, { granularity: granularity }).segment(text)];
+        const at = sel.start.offset;
+        const part = segments.find((s) => s.index <= at && s.index + s.segment.length > at && (scope !== "word" || s.isWordLike))
+            ?? segments.find((s) => s.index === at && (scope !== "word" || s.isWordLike));
+        return part ? [{ block: caret, from: part.index, to: part.index + part.segment.length }] : [];
+    }
+    if (scope === "paragraph")
+        return textRanges(ed, sel).map(({ block }) => ({ block, from: 0, to: block.text.length }));
+    if (scope === "document")
+        return ed.model.list().filter(isTextBlock).map((block) => ({ block, from: 0, to: block.text.length }));
+    if (scope === "section") {
+        const section = caret.section ?? ed.model.meta.sections?.[0]?.id;
+        return ed.model.list().filter(isTextBlock).filter((block) => (block.section ?? ed.model.meta.sections?.[0]?.id) === section)
+            .map((block) => ({ block, from: 0, to: block.text.length }));
+    }
+    const page = ed.page.sheets.find((sheet) => sheet.blocks.some((node) => node.dataset["id"] === caret.id));
+    const ids = new Set(page?.blocks.map((node) => node.dataset["id"]));
+    return ed.model.list().filter(isTextBlock).filter((block) => ids.has(block.id))
+        .map((block) => ({ block, from: 0, to: block.text.length }));
+}
+/** Convert DOM UTF-16 offsets to the Unicode code-point offsets required by SLDC. */
+const characterOffset = (text, offset) => [...text.slice(0, offset)].length;
+export async function setInlineProperty(ed, key, value, scope = "selection") {
     const sel = ed.readSelection();
     if (!sel || ed.readOnly)
         return;
-    if (sel.collapsed) {
+    if (sel.collapsed && scope === "selection") {
         ed.pendingInline.set(key, value);
         announce(`${key.replaceAll("_", " ")} ${value === null ? "reset to default" : "set"} for the next text you type`);
         return;
     }
-    const ops = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => (value ? { op: "format", block: r.block.id, start: r.from, end: r.to, set: { [key]: value } } : { op: "format", block: r.block.id, start: r.from, end: r.to, unset: [key] }));
+    const ops = scopedTextRanges(ed, sel, scope).filter((r) => r.to > r.from).map((r) => (value !== null
+        ? { op: "format", block: r.block.id, start: characterOffset(r.block.text, r.from), end: characterOffset(r.block.text, r.to), set: { [key]: value } }
+        : { op: "format", block: r.block.id, start: characterOffset(r.block.text, r.from), end: characterOffset(r.block.text, r.to), unset: [key] }));
     if (ops.length)
         await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "inline formatting" }); ed.restoreSelection(sel); });
 }
-export async function setColour(ed, key, value) {
-    await setInlineProperty(ed, key, value);
+export async function setColour(ed, key, value, scope = "selection") {
+    await setInlineProperty(ed, key, value, scope);
 }
 /** Change the real text, not a CSS presentation effect; the backend remaps format/link spans. */
 export async function transformCase(ed, mode) {
@@ -433,7 +471,7 @@ export async function clearFormatting(ed) {
     const sel = ed.readSelection();
     if (!sel || sel.collapsed || ed.readOnly)
         return;
-    const ops = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => ({ op: "format", block: r.block.id, start: r.from, end: r.to, unset: [...FLAGS, "color", "background", "font_family", "font_size_pt"] }));
+    const ops = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => ({ op: "format", block: r.block.id, start: r.from, end: r.to, unset: [...FLAGS, "color", "background", "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"] }));
     if (ops.length)
         await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "clear formatting" }); ed.restoreSelection(sel); });
 }
@@ -461,9 +499,11 @@ export async function setBlockType(ed, type, attrs = {}) {
     const same = ids.every((id) => { const b = ed.model.block(id); return b?.type === type && Object.entries(attrs).every(([k, v]) => b.attributes?.[k] === v); });
     const target = same && type !== "paragraph" ? "paragraph" : type;
     const attributes = target === "paragraph" ? clear : { ...clear, ...attrs };
+    const semanticName = target === "heading" ? `Heading ${String(attrs["level"] ?? 1)}` : target === "paragraph" ? "Body Text" : target === "quote" ? "Quote" : null;
+    const definedStyle = semanticName && ed.model.meta.styles?.paragraph?.[semanticName] ? semanticName : null;
     const sel = ed.readSelection();
     await guarded(ed, async () => {
-        const ops = ids.map((id) => ({ op: "block_set", block: id, type: target, attributes }));
+        const ops = ids.map((id) => ({ op: "block_set", block: id, type: target, attributes, style: definedStyle }));
         await ed.op(ops.length === 1 ? ops[0] : { op: "batch", ops, label: "paragraph type" });
         ed.restoreSelection(sel);
     });
@@ -485,6 +525,73 @@ export async function setParagraphStyle(ed, name) {
         return;
     const sel = ed.readSelection();
     await guarded(ed, async () => { await ed.op({ op: "batch", ops: ids.map((id) => ({ op: "block_set", block: id, style: name })), label: "paragraph style" }); ed.restoreSelection(sel); });
+}
+/** Apply a front-matter style without changing a paragraph into a semantic heading. */
+export async function applyNamedStyle(ed, name) {
+    const ids = selectedTextIds(ed);
+    if (!ids.length || ed.readOnly)
+        return;
+    const defaults = FRONT_MATTER_STYLES[name];
+    if (!defaults)
+        return;
+    const selection = ed.readSelection();
+    const defined = ed.model.meta.styles?.paragraph?.[name] !== undefined;
+    const ops = [];
+    if (!defined)
+        ops.push({ op: "style_define", kind: "paragraph", name, props: defaults });
+    for (const id of ids)
+        ops.push({ op: "block_set", block: id, type: "paragraph",
+            style: name, attributes: { ordered: null, depth: null, level: null, language: null } });
+    await guarded(ed, async () => {
+        await ed.op({ op: "batch", ops, label: `apply ${name} style` });
+        ed.restoreSelection(selection);
+        const family = (defined ? ed.model.meta.styles?.paragraph?.[name]?.["font_family"] : defaults["font_family"]);
+        if (typeof family === "string")
+            void ensureBundledFont(family).then(() => ed.layout()).catch(() => { });
+    });
+}
+/** Insert a semantic cover section; its editable content lives in the ordinary editor. */
+export async function insertCoverPage(ed) {
+    if (ed.readOnly)
+        return;
+    await guarded(ed, async () => {
+        await ed.op({ op: "cover_insert" });
+        const first = ed.model.list()[0];
+        if (first)
+            ed.focusBlock(first.id, 0);
+    });
+}
+/** Keep first-page content, isolating it as a semantic cover section when needed. */
+export async function convertFirstPageToCover(ed) {
+    if (ed.readOnly)
+        return;
+    const [first, second] = ed.page.sheets;
+    if (!first)
+        return;
+    if (ed.model.meta.sections?.some((s) => s.role === "cover")) {
+        toast("This document already has a cover page.", { kind: "info" });
+        return;
+    }
+    const firstSection = first.section ?? ed.model.meta.sections?.[0]?.id ?? "s1";
+    const split = second && second.section === first.section;
+    if (split && (ed.model.meta.sections?.length ?? 0) > 1) {
+        toast("Split the first page into its own section before converting it to a cover.", { kind: "info" });
+        return;
+    }
+    const splitAt = split ? second?.blocks[0]?.dataset["id"] : undefined;
+    if (split && !splitAt)
+        return;
+    const ops = [];
+    if (splitAt)
+        ops.push({ op: "section_break", block: splitAt });
+    ops.push({ op: "page_setup", section: firstSection, role: "cover", numbering: { show: false } });
+    await guarded(ed, () => ed.op({ op: "batch", ops, label: "convert first page to cover" }).then(() => { }));
+}
+/** Remove cover designation only, retaining all the document's text and images. */
+export async function removeCoverDesignation(ed) {
+    if (ed.readOnly)
+        return;
+    await guarded(ed, async () => { await ed.op({ op: "cover_unmark" }); });
 }
 export async function indent(ed, delta) {
     const ids = selectedTextIds(ed);
@@ -534,7 +641,7 @@ export async function moveBlocksTo(ed, ids, after) {
 export function anchorBlock(ed) {
     if (ed.selectedBlock)
         return ed.selectedBlock;
-    const sel = ed.readSelection();
+    const sel = ed.recallSelection();
     return sel ? sel.end.block : (ed.model.order[ed.model.order.length - 1] ?? null);
 }
 export async function insertBlock(ed, spec, after) {
@@ -563,12 +670,43 @@ export async function landCaret(ed) {
     }
     return false;
 }
-export async function insertTable(ed, rows, columns) {
-    const id = await insertBlock(ed, { type: "table", text: "", rows, columns });
-    if (id) {
+/** Insert at the saved document caret, even if an insertion dialog has focus.
+ * A mid-paragraph insertion splits through the canonical text model so inline
+ * formatting and the suffix survive. The whole action is one undo step. */
+export async function insertTable(ed, rows, columns, selection = ed.recallSelection(), data) {
+    if (ed.readOnly)
+        return false;
+    const inserted = await guarded(ed, async () => {
+        await ed.flush();
+        const pt = selection?.start;
+        const target = pt ? ed.model.block(pt.block) : undefined;
+        if (pt && !target)
+            throw new Error("The insertion position is no longer available. Place the caret again.");
+        const id = ed.newId();
+        const spec = { id, type: "table", text: "", rows, columns };
+        if (data)
+            spec["table"] = data;
+        if (target?.section)
+            spec["section"] = target.section;
+        let after = target?.id ?? (ed.model.order[ed.model.order.length - 1] ?? null);
+        const ops = [];
+        if (target && pt?.field === "text" && isTextBlock(target)) {
+            if (pt.offset === 0) {
+                const index = ed.model.indexOf(target.id);
+                after = index > 0 ? ed.model.order[index - 1] : null;
+            }
+            else if (pt.offset < target.text.length) {
+                const codepoints = Array.from(target.text.slice(0, pt.offset)).length;
+                ops.push({ op: "split", block: target.id, at: codepoints, new_id: ed.newId() });
+            }
+        }
+        ops.push({ op: "block_insert", after, block: spec });
+        await ed.op({ op: "batch", ops, label: "insert table" });
         ed.scrollToBlock(id);
         focusCell(ed, id, 0, 0);
-    }
+        return true;
+    });
+    return inserted === true;
 }
 export async function insertEquationBlock(ed, source, syntax = "latex") {
     const id = await insertBlock(ed, { type: "equation", text: "", equation: { syntax, source, domain: syntax === "mhchem" ? "chemistry" : syntax === "sequence" ? "biology" : "mathematics" } });

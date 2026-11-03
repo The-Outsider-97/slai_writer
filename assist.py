@@ -63,7 +63,10 @@ class Assist:
         self._spell_factory = spell_factory
         self._spell: Any = None
         self._spell_error: str | None = None
+        self._grammar: Any = None
+        self._grammar_error: str | None = None
         self._lock = threading.Lock()
+        self._grammar_run_lock = threading.RLock()
         self.proposals: dict[str, dict[str, Any]] = {}
         self.jobs: dict[str, dict[str, Any]] = {}
 
@@ -78,7 +81,7 @@ class Assist:
                                                               "note": "No cloud provider is built in or configured."}],
             "enabled": bool(prefs.get("ai_enabled")), "canUseAgents": dm_ok,
             "spell": {"available": None, "note": "SLAI's spell checker loads the first time spelling is checked."},
-            "grammar": {"available": None, "note": "Grammar uses SLAI's language agent on this computer, with your permission."},
+            "grammar": {"available": None, "note": "Local SLAI grammar checking is independent of optional AI rewriting. Loaded on first check."},
             "tasks": [{"id": k, "label": k.capitalize()} for k in TASKS],
             "privacy": "Text is only read when you ask. Private notes and comments are never included.",
         }
@@ -185,17 +188,42 @@ class Assist:
         if calls.safety_blocks(safety):
             raise Forbidden("The safety review did not allow this text to be processed.", details={"safety": safety.public()})
 
+    def _grammar_engines(self) -> Any:
+        """Lazy, local-only NLP and grammar tools; never require AI permissions.
+
+        We do not load a LANTRA checkpoint or create a LanguageAgent for an
+        ordinary grammar check. The model and its external privacy gateway are
+        reserved for optional generative rewriting, not local proofreading.
+        """
+        with self._lock:
+            if self._grammar is not None:
+                return self._grammar
+            if self._grammar_error:
+                raise DependencyMissing(self._grammar_error)
+            try:
+                nlp = _import_slai(self.app.docmaster, "src.agents.language.nlp_engine").NLPEngine()
+                grammar = _import_slai(self.app.docmaster, "src.agents.language.grammar_processor").GrammarProcessor(
+                    rule_engine=nlp.rule_engine
+                )
+                self._grammar = types.SimpleNamespace(nlp_engine=nlp, grammar_processor=grammar)
+            except Exception as exc:  # noqa: BLE001 - preserve a true unavailable status
+                self._grammar_error = f"Local SLAI grammar resources are unavailable ({type(exc).__name__}: {str(exc)[:200]})."
+                raise DependencyMissing(self._grammar_error, hint="Install SLAI's language dependencies; writing remains available.") from exc
+            return self._grammar
+
     def grammar(self, session: DocumentSession, blocks: list[str] | None = None, limit: int = 200) -> dict[str, Any]:
-        self._require_enabled()
+        # Grammar is an ordinary local editor tool, not an AI proposal. The
+        # opt-in AI/privacy gate continues to apply to generative tasks only.
+        language = (session.doc.get("language") or "en").split("-")[0].lower()
+        if language != "en":
+            return {"available": False, "reason": f"Local grammar rules support English; this document is {language.upper()}.",
+                    "issues": [], "version": session.version}
         with session.lock:
             version = session.version
             snapshot = [(b["id"], b["text"]) for b in session.doc["blocks"]
                         if b["type"] in ("paragraph", "heading", "list_item", "quote") and b["text"].strip() and (not blocks or b["id"] in blocks)][:MAX_BLOCKS]
-        text = "\n".join(t for _, t in snapshot)
-        if len(text) > self._budget():
-            raise BadRequest("That is more text than your budget allows in one check. Select a smaller part.", details={"limit": self._budget()})
-        self._gate(session, text)
-        gateway = self._gw()
+        if sum(len(t) for _, t in snapshot) > 100_000:
+            raise BadRequest("Select a smaller portion for local grammar checking.", details={"limit": 100_000})
         issues: list[dict[str, Any]] = []
 
         def analyse(agent: Any) -> list[dict[str, Any]]:
@@ -237,7 +265,14 @@ class Assist:
             return found
 
         try:
-            issues = gateway.call("language", analyse, 90)
+            # Explicit test/integration gateways retain the historical
+            # callback contract. Normal Writer sessions use standalone local
+            # engines, without AgentGateway or permission-setting coupling.
+            # The two analysis stages intentionally share their read-mostly
+            # morphology index.  Serialize their mutable diagnostics/history
+            # bookkeeping across concurrent document requests.
+            with self._grammar_run_lock:
+                issues = self._gateway.call("language", analyse, 90) if self._gateway is not None else analyse(self._grammar_engines())
         except Exception as exc:  # noqa: BLE001
             reason = getattr(exc, "details", {}).get("reason") if hasattr(exc, "details") else None
             raise DependencyMissing(f"Grammar checking is not available: {reason or getattr(exc, 'message', None) or type(exc).__name__}.",

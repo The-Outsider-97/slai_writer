@@ -172,6 +172,8 @@ function tableElement(block: Block, ctx: RenderContext): HTMLElement {
     row.forEach((cell, c) => {
       const isHeader = r < headerRows;
       const td = h(isHeader ? "th" : "td", { class: "cell", attrs: { "data-edit": "cell", "data-row": r, "data-col": c, contenteditable: ctx.readOnly ? "false" : EDIT_MODE, colspan: cell.colspan && cell.colspan > 1 ? cell.colspan : null, rowspan: cell.rowspan && cell.rowspan > 1 ? cell.rowspan : null, scope: isHeader ? "col" : null, "aria-label": `Row ${r + 1}, column ${c + 1}`, tabindex: "0" }, text: cell.text });
+      if (cell.align) td.style.textAlign = cell.align;
+      if (cell.spans?.length) fillText(td, ctx, { ...block, text: cell.text, spans: cell.spans });
       tr.appendChild(td);
     });
     table.appendChild(tr);

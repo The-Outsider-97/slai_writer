@@ -106,11 +106,25 @@
 .replace-row { display: flex; gap: .4rem; align-items: center; padding: .3rem 14px; border-bottom: 1px solid var(--e-line); background: #fefefe; color-scheme: light; }
 .replace-row input { width: 14rem; }
 .bar { background: #fefefe; color-scheme: light; color: #333; }
+.writer-ribbon { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0; }
+.ribbon-tabs { display: flex; align-items: center; gap: 3px; padding: 1px 9px 0; border-bottom: 1px solid #e9e9e9; }
+.ribbon-tab { font: inherit; font-size: 11px; padding: 3px 13px; min-height: 24px; border: 0; border-radius: 4px 4px 0 0;
+  background: transparent; color: #555; cursor: pointer; }
+.ribbon-tab[aria-selected=true] { color: #252525; border-bottom: 2px solid #9a821c; background: #f7f7f7; }
+.ribbon-tab:focus-visible { outline: 2px solid #296bc4; outline-offset: -2px; }
+.writer-ribbon .format-ribbon[hidden] { display: none; }
+.references-ribbon .ribbon-action { display: flex; align-items: center; gap: 5px; background: transparent; border: 1px solid #ddd;
+  border-radius: 5px; color: #333; font-size: 11px; min-height: 30px; padding: 4px 7px; cursor: pointer; }
+.references-ribbon .ribbon-action:hover { background: #f0f0f0; }
+.references-ribbon .ribbon-action:focus-visible { outline: 2px solid #296bc4; }
+.references-ribbon .ribbon-style-label { font-size: 11px; padding: 7px 3px; color: #555; }
 .format-ribbon { flex: 0 0 auto; display: flex; flex-wrap: nowrap; gap: 0; align-items: stretch; overflow-x: auto; overflow-y: hidden;
   min-height: 62px; padding: 4px 8px 2px; scrollbar-width: thin; border-bottom: 1px solid #d0d0d0; background: #fefefe; }
 .format-ribbon .ribbon-group { display: flex; flex: 0 0 auto; flex-direction: column; min-width: 0; justify-content: space-between;
   gap: 2px; padding: 0 9px; border-right: 1px solid #dedede; }
 .format-ribbon .ribbon-group:last-child { border-right: 0; }
+.format-ribbon .ribbon-group[hidden] { display: none; }
+.style-live-preview { border: 1px solid var(--line, #c9c9c9); padding: 12px; min-height: 56px; border-radius: 8px; }
 .format-ribbon .ribbon-controls { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
 .format-ribbon .ribbon-group-label { align-self: center; color: #737373; font-size: 10px; line-height: 13px; }
 .format-ribbon .iconbtn { flex: 0 0 auto; width: 30px; height: 30px; padding: 3px; border-radius: 6px; }
@@ -120,6 +134,8 @@
 .format-ribbon .iconbtn:disabled, .format-ribbon :is(input, select):disabled { opacity: .4; cursor: not-allowed; }
 .format-ribbon :is(input, select) { min-height: 30px; height: 30px; border: 1px solid #d4d4d4; background: white; color: #333; border-radius: 6px; font-size: 12px; padding: 2px 5px; box-shadow: none; }
 .format-ribbon .ribbon-family { width: 122px; }
+.format-ribbon .ribbon-font-picker { width: 19px; padding: 0; margin-left: -3px; }
+.format-ribbon .ribbon-scope { width: 102px; }
 .format-ribbon .ribbon-size { width: 51px; }
 .format-ribbon select[aria-label='Paragraph style'] { width: 103px; }
 .format-ribbon .ribbon-line { width: 68px; }
@@ -128,6 +144,8 @@
 .format-ribbon .ribbon-colour .iconbtn { width: 16px; font-size: 15px; }
 .format-ribbon .ribbon-number { display: inline-flex; align-items: center; gap: 2px; color: #656565; font-size: 11px; }
 .format-ribbon .ribbon-spacing { width: 46px; }
+.format-ribbon .ribbon-tracking { width: 48px; }
+.format-ribbon .ribbon-inline-spacing .iconbtn { width: 14px; height: 22px; font-size: 15px; padding: 0; }
 .format-ribbon .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
   clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @media (max-width: 640px) {
@@ -359,3 +377,28 @@
 .imgbar .ib[aria-pressed="true"] { background: light-dark(#dbe8ff, #334a78); }
 .imgbar .ib:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
 .imgbar .ib-gap { width: 1px; align-self: stretch; margin: 3px 4px; background: light-dark(#ddd, #444); }
+.blk[data-toc-entry][data-toc-page] { position: relative; }
+.blk[data-toc-entry][data-toc-page] > .txt { padding-right: 3.5em; }
+.blk[data-toc-entry][data-toc-page]::before {
+  content: "";
+  position: absolute;
+  left: 55%;
+  right: 3.6em;
+  bottom: 0.5em;
+  border-bottom: 1px dotted currentColor;
+  opacity: 0.48;
+  pointer-events: none;
+}
+.blk[data-toc-entry][data-no-leaders]::before {
+  border: 0;
+}
+.blk[data-toc-entry][data-toc-page]::after {
+  content: attr(data-toc-page);
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 3em;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  pointer-events: none;
+}

@@ -30,6 +30,7 @@ from ..tools.errors import BadRequest, DependencyMissing, NotFound
 from ..tools.validation import utc_now
 from .session import DocumentSession, sldc
 from .textmodel import OBJ
+from .citation_engine import CitationEngine, SOURCE_TYPES
 
 STATUSES = ("user", "imported", "checked", "registry", "ai")
 STATUS_LABELS = {"user": "Provided by you", "imported": "Imported with the document", "checked": "Checked by you", "registry": "Verified in the DOI registry",
@@ -39,7 +40,8 @@ FOOTNOTE_ANCHOR = "​"
 TOC_EXTENSION = "slai.sldc.toc"
 REFERENCES_EXTENSION = "slai.sldc.references"
 CROSSREF = "https://api.crossref.org/works/"
-_FIELDS = ("key", "title", "container", "publisher", "volume", "issue", "pages", "note", "authors", "year", "doi", "url", "accessed")
+_FIELDS = ("key", "title", "container", "publisher", "volume", "issue", "pages", "note", "authors", "editors",
+           "organization", "source_type", "isbn", "edition", "published", "year", "doi", "url", "accessed")
 
 
 def _statuses(doc: dict[str, Any]) -> dict[str, Any]:
@@ -126,11 +128,39 @@ def clean_entry(data: dict[str, Any]) -> dict[str, Any]:
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", accessed):
             raise BadRequest("The access date must look like 2024-05-31.")
         entry["accessed"] = accessed
-    for key, limit in (("container", 500), ("publisher", 300), ("volume", 40), ("issue", 40), ("pages", 40), ("note", 2000), ("key", 128)):
+    editors = data.get("editors") or []
+    if isinstance(editors, str):
+        editors = [a.strip() for a in re.split(r"[;\n]", editors) if a.strip()]
+    if not isinstance(editors, list) or len(editors) > 100 or not all(isinstance(a, str) and 0 < len(a.strip()) <= 200 for a in editors):
+        raise BadRequest("Editors must be names, one per line (up to 100).")
+    if editors:
+        entry["editors"] = [e.strip() for e in editors]
+    kind = (data.get("source_type") or "").strip()
+    if kind:
+        if kind not in SOURCE_TYPES:
+            raise BadRequest("Choose a supported citation source type.")
+        entry["source_type"] = kind
+    published = (data.get("published") or "").strip()
+    if published:
+        if not re.fullmatch(r"\d{4}(?:-\d{2}){0,2}", published):
+            raise BadRequest("Publication date must be YYYY, YYYY-MM or YYYY-MM-DD.")
+        entry["published"] = published
+    for key, limit in (("container", 500), ("publisher", 300), ("volume", 40), ("issue", 40), ("pages", 40),
+                       ("note", 2000), ("key", 128), ("organization", 300), ("isbn", 40), ("edition", 40)):
         value = (data.get(key) or "").strip()
         if value:
             entry[key] = value[:limit]
     return entry
+
+
+def _linked_mark(refs_by_id: dict[str, dict[str, Any]], span: dict[str, Any]) -> str:
+    ids = span.get("refs", [span["ref"]])
+    try:
+        engine = CitationEngine(refs_by_id.values())
+        index = engine.register(ids, locator=span.get("locator"), label=span.get("label", "page"))
+        return engine.cite(index, narrative=span.get("mode") == "narrative")
+    except DependencyMissing:
+        return in_text(refs_by_id[span["ref"]])
 
 
 class Academic:
@@ -142,18 +172,30 @@ class Academic:
     def sources(self, session: DocumentSession) -> dict[str, Any]:
         doc = session.doc
         status = _statuses(doc)
+        citation_refs = [r for r in doc.get("references", []) or [] if r.get("kind") == "citation"]
+        previews: dict[str, tuple[str, str]] = {}
+        if citation_refs:
+            try:
+                engine = CitationEngine(citation_refs)
+                marks = {r["id"]: engine.register([r["id"]]) for r in citation_refs}
+                lines = {sid: line for sid, line, _ in engine.bibliography()}
+                previews = {sid: (engine.cite(index), lines.get(sid, "")) for sid, index in marks.items()}
+            except DependencyMissing:
+                pass  # Keep the explicitly labelled legacy previews offline.
         counts: dict[str, int] = {}
         for block in doc["blocks"]:
             for span in block.get("spans", []):
                 if span.get("type") == "ref":
-                    counts[span["ref"]] = counts.get(span["ref"], 0) + 1
+                    for sid in span.get("refs", [span["ref"]]):
+                        counts[sid] = counts.get(sid, 0) + 1
         out = []
         for ref in doc.get("references", []) or []:
             entry = {"id": ref["id"], "kind": ref["kind"], "uses": counts.get(ref["id"], 0)}
             if ref["kind"] == "citation":
                 st = status.get(ref["id"], {"status": "user"})
+                preview_cite, preview_line = previews.get(ref["id"], (in_text(ref), reference_line(ref)))
                 entry.update({"data": {k: ref[k] for k in _FIELDS if k in ref}, "status": st["status"], "statusLabel": STATUS_LABELS[st["status"]],
-                              "statusDate": st.get("date"), "inText": in_text(ref), "line": reference_line(ref),
+                              "statusDate": st.get("date"), "inText": preview_cite, "line": preview_line,
                               "problems": self._problems(ref)})
             else:
                 entry.update({"text": ref.get("text", "")})
@@ -176,26 +218,31 @@ class Academic:
         if status not in ("user", "imported", "ai"):
             raise BadRequest("A source starts as provided by you, imported, or AI-suggested. Checked and verified are earned (see Check / Verify).")
         entry = clean_entry(data)
-        if source_id:
-            entry["id"] = source_id
+        entry["id"] = source_id or ("src_" + secrets.token_hex(8))
         previous = self._ref(session, source_id) if source_id else None
         ops: list[dict[str, Any]] = [{"op": "reference_put", "reference": entry}]
         # Keep existing in-text citations linked AND current when a source is
         # edited. Never overwrite a person's manually customized citation.
         # Descending offsets avoid shifting another citation in the same block.
-        if previous and in_text(previous) != in_text(entry):
-            old_mark, new_mark = in_text(previous), in_text(entry)
+        catalog = {r["id"]: r for r in session.doc.get("references", []) if r["kind"] == "citation"}
+        catalog[entry["id"]] = entry
+        if catalog:
             for block in session.doc["blocks"]:
-                spans = sorted((s for s in block.get("spans", []) if s.get("type") == "ref" and s.get("ref") == source_id),
+                spans = sorted((s for s in block.get("spans", []) if s.get("type") == "ref" and
+                                all(sid in catalog for sid in s.get("refs", [s.get("ref")]))),
                                key=lambda s: s["start"], reverse=True)
                 for span in spans:
                     start, end = span["start"], span["end"]
-                    if block["text"][start:end] != old_mark:
+                    old_mark = block["text"][start:end]
+                    new_mark = _linked_mark(catalog, span)
+                    if old_mark == new_mark:
                         continue
                     ops.extend([
                         {"op": "span", "block": block["id"], "start": start, "end": end, "kind": "ref", "clear": True},
                         {"op": "text", "block": block["id"], "start": start, "end": end, "insert": new_mark},
-                        {"op": "span", "block": block["id"], "start": start, "end": start + len(new_mark), "kind": "ref", "ref": source_id},
+                        {"op": "span", "block": block["id"], "start": start, "end": start + len(new_mark),
+                         "kind": "ref", **{k: v for k, v in span.items()
+                                          if k in ("ref", "refs", "mode", "locator", "label")}},
                     ])
         patch = session.apply({"op": "batch", "ops": ops, "label": "source"}, None)
         sid = patch["result"]["results"][0]["reference"]
@@ -280,14 +327,37 @@ class Academic:
         return report
 
     # ------------------------------------------------------------------------------------------------- inserting
-    def cite(self, session: DocumentSession, block_id: str, at: int, source_id: str, *, base: int | None = None) -> dict[str, Any]:
-        """Insert the in-text mark for a source at ``at`` and link it to the source."""
-        ref = self._ref(session, source_id)
-        if ref["kind"] != "citation":
-            raise BadRequest("Choose a source, not a footnote.")
-        mark = in_text(ref)
-        ops = [{"op": "text", "block": block_id, "start": at, "end": at, "insert": mark},
-               {"op": "span", "block": block_id, "start": at, "end": at + len(mark), "kind": "ref", "ref": source_id}]
+    def cite(self, session: DocumentSession, block_id: str, at: int, source_id: str, *, base: int | None = None,
+             sources: list[str] | None = None, mode: str = "parenthetical", locator: str | None = None,
+             label: str = "page") -> dict[str, Any]:
+        """Insert a semantically linked CSL citation, with optional group and locator."""
+        ids = sources or [source_id]
+        if not 1 <= len(ids) <= 20 or len(set(ids)) != len(ids):
+            raise BadRequest("Choose between 1 and 20 distinct citation sources.")
+        if mode not in ("parenthetical", "narrative"):
+            raise BadRequest("Choose a narrative or parenthetical citation.")
+        if locator is not None and (not locator.strip() or len(locator) > 100):
+            raise BadRequest("Enter a locator up to 100 characters.")
+        refs = [self._ref(session, sid) for sid in ids]
+        if any(r["kind"] != "citation" for r in refs):
+            raise BadRequest("Choose sources, not footnotes.")
+        try:
+            engine = CitationEngine([ref for ref in session.doc.get("references", []) if ref.get("kind") == "citation"])
+            index = engine.register(ids, locator=locator, label=label)
+            mark = engine.cite(index, narrative=(mode == "narrative"))
+        except DependencyMissing:
+            if len(ids) > 1 or locator or mode != "parenthetical":
+                raise
+            mark = in_text(refs[0])
+        citation_span: dict[str, Any] = {"op": "span", "block": block_id, "start": at,
+            "end": at + len(mark), "kind": "ref", "ref": ids[0]}
+        if len(ids) > 1:
+            citation_span["refs"] = ids
+        if locator:
+            citation_span.update({"locator": locator, "label": label})
+        if mode != "parenthetical":
+            citation_span["mode"] = mode
+        ops = [{"op": "text", "block": block_id, "start": at, "end": at, "insert": mark}, citation_span]
         return session.apply({"op": "batch", "ops": ops, "label": "citation"}, base)
 
     def footnote(self, session: DocumentSession, block_id: str, at: int, text: str, *, base: int | None = None) -> dict[str, Any]:
@@ -317,6 +387,15 @@ class Academic:
         if weak:
             warnings.append(f"{len(weak)} source(s) are AI-suggested and not verified. Check them against the real works before you publish.")
         warnings += [f"“{s['data']['title'][:50]}”: {p}" for s in entries for p in s["problems"][:1]]
+        render: list[tuple[str, str, list[dict[str, Any]]]]
+        try:
+            formatter = CitationEngine([self._ref(session, s["id"]) for s in entries])
+            for s in entries:
+                formatter.register([s["id"]])
+            render = formatter.bibliography()
+        except DependencyMissing:
+            warnings.append("citeproc-py is not installed: references use the legacy author–year layout, not verified APA 7.")
+            render = [(s["id"], s["line"], []) for s in entries]
         existing = [(index, block) for index, block in enumerate(session.doc["blocks"])
                     if isinstance(block.get("extensions", {}).get(REFERENCES_EXTENSION), dict)]
         previous_heading = next((b for _, b in existing if b["extensions"][REFERENCES_EXTENSION].get("role") == "title"), None)
@@ -338,13 +417,16 @@ class Academic:
             "extensions": {REFERENCES_EXTENSION: {"id": managed_id, "role": "title", "only_cited": only_cited}},
         }})
         prev = head
-        for s in entries:
+        for source_id, line, spans in render:
             entry_id = f"b{secrets.token_hex(8)}"
-            ops.append({"op": "block_insert", "after": prev, "block": {
-                "id": entry_id, "type": "paragraph", "text": s["line"],
+            generated = {
+                "id": entry_id, "type": "paragraph", "text": line,
                 "attributes": {"line_height": 2, "indent_mm": 12.7, "first_line_indent_mm": -12.7},
-                "extensions": {REFERENCES_EXTENSION: {"id": managed_id, "role": "entry", "source": s["id"]}},
-            }})
+                "extensions": {REFERENCES_EXTENSION: {"id": managed_id, "role": "entry", "source": source_id}},
+            }
+            if spans:
+                generated["spans"] = spans
+            ops.append({"op": "block_insert", "after": prev, "block": generated})
             prev = entry_id
         session.apply({"op": "batch", "ops": ops, "label": "update references" if existing else "insert references"}, None)
         return {"heading": head, "entries": len(entries), "warnings": warnings, "state": session.state()}

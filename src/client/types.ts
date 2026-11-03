@@ -20,7 +20,7 @@ export interface Span {
   href?: string; style?: string; ref?: string; target?: string;
   equation?: EquationData; figure?: FigureData;
 }
-export interface Cell { text: string; colspan?: number; rowspan?: number }
+export interface Cell { text: string; colspan?: number; rowspan?: number; align?: "left" | "center" | "right" | "justify"; spans?: Span[] }
 export interface TableData { columns: number; header_rows?: number; rows: Cell[][] }
 export interface Block {
   id: string; type: BlockType; text: string; spans?: Span[]; style?: string; section?: string;
@@ -31,7 +31,8 @@ export interface Block {
 export interface Margins { top: number; right: number; bottom: number; left: number }
 export interface PageSetup { size?: string; orientation?: string; width_mm?: number; height_mm?: number; margins_mm?: Partial<Margins>; header_mm?: number; footer_mm?: number }
 export interface BandTextFormat { font_family?: string; font_size_pt?: number; color?: string; bold?: boolean; italic?: boolean; underline?: boolean }
-export interface HeaderFooter { left?: string; center?: string; right?: string; formats?: Partial<Record<"left" | "center" | "right", BandTextFormat>> }
+export interface BandRun { text: string; format?: BandTextFormat }
+export interface HeaderFooter { left?: string; center?: string; right?: string; formats?: Partial<Record<"left" | "center" | "right", BandTextFormat>>; runs?: Partial<Record<"left" | "center" | "right", BandRun[]>> }
 export interface Section { id: string; role?: "cover" | "body" | "front_matter"; page?: PageSetup; columns?: number; column_gap_mm?: number; numbering?: { start?: number; format?: string; show?: boolean }; header?: HeaderFooter; footer?: HeaderFooter }
 export interface Reference {
   id: string; kind: "citation" | "footnote"; title?: string; authors?: string[]; year?: number; doi?: string; url?: string; accessed?: string;

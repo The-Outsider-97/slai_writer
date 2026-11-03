@@ -26,6 +26,11 @@ export function applyStyle(el, props, paragraph) {
         set("font-family", `"${props["font_family"]}", serif`);
     if (typeof props["font_size_pt"] === "number")
         set("font-size", `${props["font_size_pt"]}pt`);
+    for (const [key, css, low, high] of [["letter_spacing_pt", "letter-spacing", -5, 50], ["word_spacing_pt", "word-spacing", -20, 100]]) {
+        const value = props[key];
+        if (typeof value === "number" && Number.isFinite(value) && value >= low && value <= high)
+            set(css, `${value}pt`);
+    }
     if (props["bold"])
         set("font-weight", "700");
     if (props["italic"])
@@ -75,7 +80,7 @@ function pieceFor(seg, ctx, block) {
         wrap(h("sup"));
     if (f.subscript)
         wrap(h("sub"));
-    if (seg.color || seg.background || seg.style || seg.font_family || seg.font_size_pt) {
+    if (seg.color || seg.background || seg.style || seg.font_family || seg.font_size_pt || seg.letter_spacing_pt !== undefined || seg.word_spacing_pt !== undefined) {
         const el = wrap(h("span", { class: "i-fmt" }));
         if (seg.style)
             applyStyle(el, resolveStyle(ctx.meta, "character", seg.style), false);
@@ -87,6 +92,11 @@ function pieceFor(seg, ctx, block) {
             el.style.setProperty("font-family", `"${seg.font_family}", serif`);
         if (typeof seg.font_size_pt === "number" && Number.isFinite(seg.font_size_pt) && seg.font_size_pt >= 4 && seg.font_size_pt <= 400)
             el.style.setProperty("font-size", `${seg.font_size_pt}pt`);
+        for (const [key, css, low, high] of [["letter_spacing_pt", "letter-spacing", -5, 50], ["word_spacing_pt", "word-spacing", -20, 100]]) {
+            const value = seg[key];
+            if (typeof value === "number" && Number.isFinite(value) && value >= low && value <= high)
+                el.style.setProperty(css, `${value}pt`);
+        }
     }
     if (seg.href) {
         const safe = SAFE_LINK.test(seg.href);
@@ -149,6 +159,10 @@ function textElement(block, ctx) {
     return el;
 }
 function defaultStyle(block) {
+    if (block.type === "heading")
+        return `Heading ${Math.min(6, Math.max(1, block.attributes?.level ?? 1))}`;
+    if (block.type === "quote")
+        return "Quote";
     return block.type === "paragraph" || block.type === "list_item" ? "Body Text" : undefined;
 }
 function tableElement(block, ctx) {
@@ -162,6 +176,10 @@ function tableElement(block, ctx) {
         row.forEach((cell, c) => {
             const isHeader = r < headerRows;
             const td = h(isHeader ? "th" : "td", { class: "cell", attrs: { "data-edit": "cell", "data-row": r, "data-col": c, contenteditable: ctx.readOnly ? "false" : EDIT_MODE, colspan: cell.colspan && cell.colspan > 1 ? cell.colspan : null, rowspan: cell.rowspan && cell.rowspan > 1 ? cell.rowspan : null, scope: isHeader ? "col" : null, "aria-label": `Row ${r + 1}, column ${c + 1}`, tabindex: "0" }, text: cell.text });
+            if (cell.align)
+                td.style.textAlign = cell.align;
+            if (cell.spans?.length)
+                fillText(td, ctx, { ...block, text: cell.text, spans: cell.spans });
             tr.appendChild(td);
         });
         table.appendChild(tr);
@@ -236,14 +254,29 @@ export function footnoteNumbers(blocks, meta) {
 }
 export function renderBlock(block, ctx) {
     const wrap = h("div", { class: `blk b-${block.type}`, data: { id: block.id, type: block.type } });
+    const toc = block.extensions?.["slai.sldc.toc"];
+    if (toc?.role === "entry" && toc.heading) {
+        wrap.dataset["tocEntry"] = toc.heading;
+        wrap.dataset["tocId"] = toc.id ?? "";
+        wrap.dataset["tocLevel"] = String(toc.level ?? 1);
+    }
     if (block.type === "list_item")
         wrap.appendChild(h("span", { class: "marker", text: ctx.markers.get(block.id) ?? "•", attrs: { "aria-hidden": "true", contenteditable: "false" } }));
     if (!ctx.readOnly)
         wrap.appendChild(h("button", { class: "grip", type: "button", attrs: { "aria-label": "Move block (or Alt+Shift+arrow keys)", title: "Drag to move", draggable: "true", tabindex: "-1" }, data: { grip: "" } }, glyph("drag")));
     switch (block.type) {
-        case "table":
+        case "table": {
             wrap.appendChild(tableElement(block, ctx));
+            if (!ctx.readOnly) {
+                wrap.appendChild(h("button", { class: "table-grow table-grow-row", type: "button", text: "+", attrs: {
+                        "data-table-add": "row", "aria-label": "Add table row", title: "Add row below", contenteditable: "false"
+                    } }));
+                wrap.appendChild(h("button", { class: "table-grow table-grow-col", type: "button", text: "+", attrs: {
+                        "data-table-add": "col", "aria-label": "Add table column", title: "Add column right", contenteditable: "false"
+                    } }));
+            }
             break;
+        }
         case "figure":
             wrap.appendChild(figureElement(block, ctx));
             break;

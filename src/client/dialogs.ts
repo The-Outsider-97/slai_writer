@@ -5,7 +5,7 @@ import * as A from "./actions.js";
 import type { DocCtx } from "./docctx.js";
 import { errorText, rawPost } from "./net.js";
 import { PAGE_MM } from "./textops.js";
-import type { BandTextFormat, Block, HeaderFooter, Patch, Section } from "./types.js";
+import type { BandRun, BandTextFormat, Block, HeaderFooter, Patch, Section } from "./types.js";
 import { FONT_FAMILIES } from "./font_rules.js";
 import { checkbox, errorLine, notice, selectField } from "./widgets.js";
 
@@ -46,6 +46,15 @@ export async function headerFooterDialog(ctx: DocCtx): Promise<void> {
   const formats: Record<Band, Partial<Record<Position, BandTextFormat>>> = {
     header: structuredClone(target.header?.formats ?? {}), footer: structuredClone(target.footer?.formats ?? {}),
   };
+  const runs: Record<Band, Partial<Record<Position, BandRun[]>>> = {
+    header: structuredClone(target.header?.runs ?? {}), footer: structuredClone(target.footer?.runs ?? {}),
+  };
+  const fields: Record<Band, Record<Position, HTMLInputElement>> = {
+    header: { left: hl, center: hc, right: hr }, footer: { left: fl, center: fc, right: fr },
+  };
+  for (const edge of ["header", "footer"] as const) for (const pos of positions) {
+    fields[edge][pos].addEventListener("input", () => { delete runs[edge][pos]; });
+  }
   const choice = selectField("Format text in", [["header:left", "Header — left"], ["header:center", "Header — centre"], ["header:right", "Header — right"],
     ["footer:left", "Footer — left"], ["footer:center", "Footer — centre"], ["footer:right", "Footer — right"]], "header:left");
   const fontFamily = h("input", { type: "text", maxLength: 100, attrs: { list: "writer-font-families", "aria-label": "Header or footer font family", placeholder: "Default font" } });
@@ -69,6 +78,39 @@ export async function headerFooterDialog(ctx: DocCtx): Promise<void> {
     if (Object.keys(out).length) formats[band][position] = out;
     else delete formats[band][position];
   };
+  const selectedFormat = (): BandTextFormat => {
+    const style: BandTextFormat = {};
+    if (fontFamily.value.trim()) style.font_family = fontFamily.value.trim();
+    if (fontSize.value) style.font_size_pt = Number(fontSize.value);
+    if (useColor.input.checked) style.color = fontColor.value;
+    if (isBold.input.checked) style.bold = true;
+    if (isItalic.input.checked) style.italic = true;
+    if (isUnderlined.input.checked) style.underline = true;
+    return style;
+  };
+  const applySelected = h("button", { type: "button", class: "btn", text: "Apply font to selected characters" });
+  applySelected.addEventListener("click", () => {
+    const [edge, pos] = selected;
+    const input = fields[edge][pos];
+    const start = input.selectionStart ?? 0, end = input.selectionEnd ?? 0;
+    if (start >= end) { toast("First select characters inside the chosen header/footer text field.", { kind: "info" }); input.focus(); return; }
+    const content = input.value;
+    const existing: BandRun[] = runs[edge][pos]?.map((r) => ({ text: r.text, format: r.format })) ?? [{ text: content }];
+    const base: BandRun[] = existing.map((r) => r.text).join("") === content ? existing : [{ text: content }];
+    const changed: BandRun[] = [];
+    let cursor = 0;
+    for (const item of base) {
+      const stop = cursor + item.text.length;
+      const a = Math.max(start, cursor), b = Math.min(end, stop);
+      if (a > cursor) changed.push({ text: item.text.slice(0, a - cursor), ...(item.format ? { format: item.format } : {}) });
+      if (b > a) changed.push({ text: item.text.slice(a - cursor, b - cursor), format: { ...item.format, ...selectedFormat() } });
+      if (stop > Math.max(b, cursor)) changed.push({ text: item.text.slice(Math.max(b, cursor) - cursor), ...(item.format ? { format: item.format } : {}) });
+      cursor = stop;
+    }
+    if (changed.length > 200) { toast("Too many separately formatted ranges in this field.", { kind: "error" }); return; }
+    runs[edge][pos] = changed.filter((r) => r.text);
+    toast("Character formatting will be saved when you click Apply.", { kind: "ok" });
+  });
   const loadFormat = (): void => {
     const stored = formats[selected[0]][selected[1]] ?? {};
     fontFamily.value = stored.font_family ?? "";
@@ -98,7 +140,9 @@ export async function headerFooterDialog(ctx: DocCtx): Promise<void> {
     h("fieldset", { class: "hf-row" }, h("legend", { text: "Header and footer typography" }),
       h("p", { class: "fine", text: "Each left, centre and right field can have its own font, size, colour and emphasis. Leave font fields blank to keep the default." }),
       choice.root, fonts, h("div", { class: "grid-3" }, labelled("Font family", fontFamily), labelled("Size (pt)", fontSize), labelled("Color", fontColor)),
-      h("div", { class: "actions" }, useColor.root, isBold.root, isItalic.root, isUnderlined.root)),
+      h("div", { class: "actions" }, useColor.root, isBold.root, isItalic.root, isUnderlined.root),
+      h("p", { class: "fine", text: "To mix fonts in one field, select characters in the matching Header/Footer input above, choose formatting, then press the button below." }),
+      applySelected),
     h("div", { class: "grid-2" }, labelled("First page number", start), format.root), restart.root, visible.root, all?.root ?? null);
   const handle = openDialog<true>({
     title: "Header and footer", size: "wide", body,
@@ -110,6 +154,10 @@ export async function headerFooterDialog(ctx: DocCtx): Promise<void> {
         const out: HeaderFooter = {};
         if (l.value) out["left"] = l.value; if (c.value) out["center"] = c.value; if (r.value) out["right"] = r.value;
         if (Object.keys(formats[edge]).length) out.formats = formats[edge];
+        const rich = Object.fromEntries(positions.filter((pos) => runs[edge][pos]?.length &&
+          runs[edge][pos]!.map((x) => x.text).join("") === fields[edge][pos].value)
+          .map((pos) => [pos, runs[edge][pos]]));
+        if (Object.keys(rich).length) out.runs = rich;
         return l.value || c.value || r.value ? out : null;
       };
       const ids = all?.input.checked ? sections.map((s) => s.id) : [sectionId];

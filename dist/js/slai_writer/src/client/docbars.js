@@ -8,9 +8,12 @@ import { closeDocument, needsPassword, withPassword } from "./fileops.js";
 import { api, errorText, rawPost } from "./net.js";
 import { statusDots, themeToggle } from "./shell.js";
 import { signatureGraphicsDialog } from "./sigdialog.js";
-import { FONT_FAMILIES } from "./font_rules.js";
+import { FONT_FAMILIES, parseRibbonNumber } from "./font_rules.js";
+import { bundledFonts, ensureBundledFont } from "./font_catalog.js";
 import { resolveStyle } from "./render.js";
 import { segments } from "./textops.js";
+import { manageStyles } from "./style_manager.js";
+import { bibliographyDialog, removeBibliography, sourceDialog } from "./panels/sources.js";
 import { ago, notice, pickFile } from "./widgets.js";
 /** Keep the text selection in the page when a bar button is pressed. */
 function keepSelection(button) { button.addEventListener("mousedown", (e) => e.preventDefault()); }
@@ -282,7 +285,9 @@ export function buildFormatBar(ctx) {
     const { ed } = ctx;
     const cmd = (id) => COMMANDS.find((c) => c.id === id);
     const run = (task) => {
-        ed.refocus();
+        // Editing a ribbon field takes browser focus away from the page. Restore
+        // the actual selected text/caret before reading ranges for an operation.
+        ed.refocus(ed.recallSelection());
         void Promise.resolve().then(task).catch((e) => toast(errorText(e), { kind: "error" }));
     };
     const fire = (id) => () => run(() => cmd(id).run(ctx));
@@ -303,48 +308,97 @@ export function buildFormatBar(ctx) {
         return b;
     };
     const field = (label, node) => h("label", { class: "ribbon-field" }, h("span", { class: "sr-only", text: label }), node);
+    const scope = h("select", { class: "ribbon-scope", attrs: { "aria-label": "Formatting scope", title: "Apply character formatting to" } }, [["selection", "Selection"], ["character", "Character"], ["word", "Word"], ["sentence", "Sentence"], ["paragraph", "Paragraph"], ["section", "Section"], ["page", "Current page"], ["document", "Entire document"]]
+        .map(([id, label]) => h("option", { value: id, text: label })));
+    // A bare caret should format existing text immediately. Selection remains
+    // available for precise character-level edits and next-typed-text styling.
+    scope.value = "paragraph";
+    const activeScope = () => scope.value;
     const family = h("input", { class: "ribbon-family", type: "text", maxLength: 100,
         attrs: { "aria-label": "Font family", list: "writer-font-families", autocomplete: "off", spellcheck: "false", placeholder: "Font family" } });
     const families = h("datalist", { attrs: { id: "writer-font-families" } }, FONT_FAMILIES.map((name) => h("option", { value: name })));
+    const availableFamilies = new Set(FONT_FAMILIES);
     const size = h("input", { class: "ribbon-size", type: "number", min: 4, max: 400, step: 0.5,
         attrs: { "aria-label": "Font size in points", title: "Font size (pt)" } });
-    family.addEventListener("change", () => {
-        const value = family.value.trim();
+    const applyFamily = (value) => {
         // Keep font names as plain names, never CSS expressions or URL-bearing strings.
         if (!value || /[\x00-\x1f\x7f{};<>\\"'`]/.test(value)) {
             toast("Enter a valid font family name.", { kind: "error" });
             update();
             return;
         }
-        run(() => A.setInlineProperty(ed, "font_family", value));
+        run(async () => {
+            await A.setInlineProperty(ed, "font_family", value, activeScope());
+            try {
+                await ensureBundledFont(value);
+                ed.layout();
+            }
+            catch {
+                toast(`Could not load the bundled font ${value}. A system fallback may be shown.`, { kind: "error" });
+            }
+        });
+    };
+    family.addEventListener("change", () => applyFamily(family.value.trim()));
+    const fontPicker = custom("Choose a bundled or system font", h("span", {}, chevron("down")), () => {
+        openMenu(fontPicker, [...availableFamilies].sort((a, b) => a.localeCompare(b)).map((name) => ({
+            label: name, run: () => { family.value = name; applyFamily(name); },
+        })), { label: "Document fonts" });
     });
+    fontPicker.classList.add("ribbon-font-picker");
     size.addEventListener("change", () => {
-        const value = Number(size.value);
-        if (!size.value || !Number.isFinite(value) || value < 4 || value > 400) {
+        const value = parseRibbonNumber(size.value, 4, 400);
+        if (value === undefined) {
             toast("Font size must be between 4 and 400 pt.", { kind: "error" });
             update();
             return;
         }
-        run(() => A.setInlineProperty(ed, "font_size_pt", value));
+        run(() => A.setInlineProperty(ed, "font_size_pt", value, activeScope()));
     });
-    const style = h("select", { attrs: { "aria-label": "Paragraph style" } }, [["paragraph", "Normal text"], ["h1", "Heading 1"], ["h2", "Heading 2"], ["h3", "Heading 3"], ["h4", "Heading 4"], ["h5", "Heading 5"], ["h6", "Heading 6"], ["quote", "Quote"], ["code-block", "Code block"], ["bullets", "Bulleted list"], ["numbered", "Numbered list"]].map(([v, t]) => h("option", { value: v, text: t })));
-    style.addEventListener("change", () => { const id = style.value; run(() => cmd(id).run(ctx)); });
+    const style = h("select", { attrs: { "aria-label": "Paragraph style" } }, [["paragraph", "Normal text"], ["style-title", "Title"], ["style-subtitle", "Subtitle"], ["style-slogan", "Slogan"], ["style-author", "Author"], ["style-document-date", "Document Date"], ["style-toc-title", "TOC Title"], ["h1", "Heading 1"], ["h2", "Heading 2"], ["h3", "Heading 3"], ["h4", "Heading 4"], ["h5", "Heading 5"], ["h6", "Heading 6"], ["quote", "Quote"], ["code-block", "Code block"], ["bullets", "Bulleted list"], ["numbered", "Numbered list"]].map(([v, t]) => h("option", { value: v, text: t })));
+    style.addEventListener("change", () => {
+        const id = style.value;
+        run(() => id.startsWith("user:") ? A.setParagraphStyle(ed, id.slice(5)) : cmd(id).run(ctx));
+    });
+    // Native <select> option popups do not expose portable per-option context
+    // events. The keyboard/context-menu equivalent targets the selected style
+    // and offers the full manager for other styles.
+    const editSelectedStyle = () => {
+        const selected = style.selectedOptions[0]?.textContent?.trim() ?? "Body Text";
+        const name = selected === "Normal text" ? "Body Text" : selected;
+        void manageStyles(ctx, name);
+    };
+    const styleContext = (e) => {
+        e.preventDefault();
+        openMenu(style, [
+            { label: `Edit ${style.selectedOptions[0]?.textContent ?? "selected style"}…`, disabled: ed.readOnly, run: editSelectedStyle },
+            { label: "Manage all named styles…", disabled: ed.readOnly, run: () => { void manageStyles(ctx); } },
+        ], { label: "Paragraph style options" });
+    };
+    style.addEventListener("contextmenu", styleContext);
+    style.addEventListener("keydown", (e) => {
+        if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))
+            styleContext(e);
+    });
+    const manageStyle = custom("Manage named styles", "Aa", () => { void manageStyles(ctx); });
     const colour = (key, label, value) => {
         const i = h("input", { type: "color", value, attrs: { "aria-label": label, title: label } });
-        i.addEventListener("change", () => run(() => A.setColour(ed, key, i.value)));
+        i.addEventListener("change", () => run(() => A.setColour(ed, key, i.value, activeScope())));
         return i;
     };
     const textColour = colour("color", "Font color", "#000000");
     const highlight = colour("background", "Highlight color", "#fff200");
-    const reset = (key, label) => custom(label, "×", () => run(() => A.setColour(ed, key, null)));
+    const reset = (key, label) => custom(label, "×", () => run(() => A.setColour(ed, key, null, activeScope())));
     const line = h("select", { class: "ribbon-line", attrs: { "aria-label": "Line spacing" } }, [["1", "Single"], ["1.15", "1.15"], ["1.5", "1.5"], ["2", "Double"], ["2.5", "2.5"], ["3", "Triple"]].map(([v, t]) => h("option", { value: v, text: t })));
-    line.addEventListener("change", () => run(() => A.setBlockAttribute(ed, { line_height: Number(line.value) }, "line spacing")));
+    line.addEventListener("change", () => {
+        const leading = Number(line.value);
+        run(() => A.setBlockAttribute(ed, { line_height: leading }, "line spacing"));
+    });
     const spacing = (key, label) => {
         const i = h("input", { class: "ribbon-spacing", type: "number", min: 0, max: 1000, step: 1,
             attrs: { "aria-label": label, title: `${label} (pt)` } });
         i.addEventListener("change", () => {
-            const n = Number(i.value);
-            if (!i.value || !Number.isFinite(n) || n < 0 || n > 1000) {
+            const n = parseRibbonNumber(i.value, 0, 1000);
+            if (n === undefined) {
                 toast(`${label} must be 0–1000 pt.`, { kind: "error" });
                 update();
                 return;
@@ -355,9 +409,84 @@ export function buildFormatBar(ctx) {
     };
     const before = spacing("space_before_pt", "Space before paragraph");
     const after = spacing("space_after_pt", "Space after paragraph");
-    const fontGroup = h("div", { class: "ribbon-group font", attrs: { role: "group", "aria-label": "Font" } }, h("span", { class: "ribbon-controls" }, field("Font family", family), families, field("Font size", size), tool("bold", "Bold", "bold", true), tool("italic", "Italic", "italic", true), tool("underline", "Underline", "underline", true), tool("strike", "Strikethrough", "strike", true), custom("Uppercase selected text", "A↑", () => run(() => A.transformCase(ed, "upper"))), custom("Lowercase selected text", "a↓", () => run(() => A.transformCase(ed, "lower"))), h("span", { class: "ribbon-colour" }, textColour, reset("color", "Reset font color")), h("span", { class: "ribbon-colour" }, highlight, reset("background", "Remove highlight"))), h("span", { class: "ribbon-group-label", text: "Font" }));
-    const paragraphGroup = h("div", { class: "ribbon-group paragraph", attrs: { role: "group", "aria-label": "Paragraph and alignment" } }, h("span", { class: "ribbon-controls" }, style, tool("align-left", "Align left", "align-left", true), tool("align-center", "Align center", "align-center", true), tool("align-right", "Align right", "align-right", true), tool("align-justify", "Justify", "align-justify", true), tool("bullets", "Bulleted list", "list", true), tool("numbered", "Numbered list", "list-ordered", true), tool("outdent", "Decrease indentation", "outdent"), tool("indent", "Increase indentation", "indent"), field("Line spacing", line), h("span", { class: "ribbon-number", attrs: { title: "Space before paragraph (pt)" } }, h("span", { text: "↑" }), before), h("span", { class: "ribbon-number", attrs: { title: "Space after paragraph (pt)" } }, h("span", { text: "↓" }), after)), h("span", { class: "ribbon-group-label", text: "Paragraph / Alignment" }));
-    const el = h("div", { class: "bar format-ribbon", attrs: { role: "toolbar", "aria-label": "Document formatting ribbon" } }, fontGroup, paragraphGroup);
+    const tracking = (key, label, min, max) => {
+        const i = h("input", { class: "ribbon-tracking", type: "number", min, max, step: 0.1,
+            attrs: { "aria-label": `${label} in points`, title: `${label} (pt)` } });
+        i.addEventListener("change", () => {
+            const value = parseRibbonNumber(i.value, min, max);
+            if (value === undefined) {
+                toast(`${label} must be between ${min} and ${max} pt.`, { kind: "error" });
+                update();
+                return;
+            }
+            run(() => A.setInlineProperty(ed, key, value, activeScope()));
+        });
+        const normal = custom(`Reset ${label.toLowerCase()} to inherited value`, "×", () => run(() => A.setInlineProperty(ed, key, null, activeScope())));
+        const wrapper = h("span", { class: "ribbon-number ribbon-inline-spacing", attrs: { title: `${label} (pt)` } }, h("span", { text: key === "letter_spacing_pt" ? "Aa" : "↔" }), i, normal);
+        trackingInputs.set(key, i);
+        return wrapper;
+    };
+    const trackingInputs = new Map();
+    const fontGroup = h("div", { class: "ribbon-group font", attrs: { role: "group", "aria-label": "Font" } }, h("span", { class: "ribbon-controls" }, field("Scope", scope), field("Font family", family), fontPicker, families, field("Font size", size), tool("bold", "Bold", "bold", true), tool("italic", "Italic", "italic", true), tool("underline", "Underline", "underline", true), tool("strike", "Strikethrough", "strike", true), custom("Uppercase selected text", "A↑", () => run(() => A.transformCase(ed, "upper"))), custom("Lowercase selected text", "a↓", () => run(() => A.transformCase(ed, "lower"))), h("span", { class: "ribbon-colour" }, textColour, reset("color", "Reset font color")), h("span", { class: "ribbon-colour" }, highlight, reset("background", "Remove highlight")), tracking("letter_spacing_pt", "Letter spacing", -5, 50), tracking("word_spacing_pt", "Word spacing", -20, 100)), h("span", { class: "ribbon-group-label", text: "Font" }));
+    const paragraphGroup = h("div", { class: "ribbon-group paragraph", attrs: { role: "group", "aria-label": "Paragraph and alignment" } }, h("span", { class: "ribbon-controls" }, style, manageStyle, tool("align-left", "Align left", "align-left", true), tool("align-center", "Align center", "align-center", true), tool("align-right", "Align right", "align-right", true), tool("align-justify", "Justify", "align-justify", true), tool("bullets", "Bulleted list", "list", true), tool("numbered", "Numbered list", "list-ordered", true), tool("outdent", "Decrease indentation", "outdent"), tool("indent", "Increase indentation", "indent"), field("Line spacing", line), h("span", { class: "ribbon-number", attrs: { title: "Space before paragraph (pt)" } }, h("span", { text: "↑" }), before), h("span", { class: "ribbon-number", attrs: { title: "Space after paragraph (pt)" } }, h("span", { text: "↓" }), after)), h("span", { class: "ribbon-group-label", text: "Paragraph / Alignment" }));
+    // Keep the familiar compact ribbon, with a dedicated References tab whose
+    // actions use the existing citation/source services (no parallel engine).
+    const ribbonButton = (label, action, icon) => {
+        const b = h("button", { class: "ribbon-action", type: "button", attrs: { title: label } }, glyph(icon), h("span", { text: label }));
+        keepSelection(b);
+        b.addEventListener("click", action);
+        return b;
+    };
+    const referenceGroup = (label, ...buttons) => h("div", { class: "ribbon-group" }, h("span", { class: "ribbon-controls" }, ...buttons), h("span", { class: "ribbon-group-label", text: label }));
+    const refs = h("div", { class: "format-ribbon references-ribbon", attrs: { role: "toolbar", "aria-label": "References ribbon" } }, referenceGroup("Citations", ribbonButton("Insert citation", fire("citation"), "book")), referenceGroup("Sources", ribbonButton("Add source", () => run(() => sourceDialog(ctx)), "plus"), ribbonButton("Manage sources", fire("sources"), "book")), referenceGroup("Bibliography", ribbonButton("Insert / Update References", () => run(() => bibliographyDialog(ctx)), "book"), ribbonButton("Remove References", () => run(() => removeBibliography(ctx)), "close")), referenceGroup("Citation style", h("span", { class: "ribbon-style-label", text: "APA-style author–date" })));
+    const home = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Home formatting ribbon" } }, fontGroup, paragraphGroup);
+    const homeTab = h("button", { type: "button", class: "ribbon-tab", text: "Home", attrs: { role: "tab", "aria-selected": "true" } });
+    const refsTab = h("button", { type: "button", class: "ribbon-tab", text: "References", attrs: { role: "tab", "aria-selected": "false" } });
+    const showTab = (which) => {
+        home.hidden = which !== "home";
+        refs.hidden = which !== "references";
+        homeTab.setAttribute("aria-selected", String(which === "home"));
+        refsTab.setAttribute("aria-selected", String(which === "references"));
+    };
+    homeTab.addEventListener("click", () => showTab("home"));
+    refsTab.addEventListener("click", () => showTab("references"));
+    const el = h("div", { class: "bar writer-ribbon" }, h("div", { class: "ribbon-tabs", attrs: { role: "tablist", "aria-label": "Ribbon tabs" } }, homeTab, refsTab), home, refs);
+    showTab("home");
+    const GROUPS_KEY = "writer.ribbonGroups.v1";
+    const groupRows = [{ id: "font", label: "Font", element: fontGroup }, { id: "paragraph", label: "Paragraph / Alignment", element: paragraphGroup }];
+    const readHidden = () => {
+        try {
+            const stored = JSON.parse(window.localStorage.getItem(GROUPS_KEY) ?? "[]");
+            return new Set(Array.isArray(stored) ? stored.filter((s) => typeof s === "string" && groupRows.some((g) => g.id === s)) : []);
+        }
+        catch {
+            return new Set();
+        }
+    };
+    const hiddenGroups = readHidden();
+    const applyGroups = () => { for (const row of groupRows)
+        row.element.hidden = hiddenGroups.has(row.id); };
+    const saveGroups = () => { try {
+        window.localStorage.setItem(GROUPS_KEY, JSON.stringify([...hiddenGroups]));
+    }
+    catch { /* UI preference */ } applyGroups(); };
+    const groupMenu = (ev) => {
+        ev.preventDefault();
+        openMenu(el, [
+            ...groupRows.map((row) => ({ label: `${hiddenGroups.has(row.id) ? "☐" : "☑"} ${row.label}`, run: () => { if (hiddenGroups.has(row.id))
+                    hiddenGroups.delete(row.id);
+                else
+                    hiddenGroups.add(row.id); saveGroups(); } })),
+            { label: "Show all sections", run: () => { hiddenGroups.clear(); saveGroups(); } },
+            { label: "Restore default ribbon layout", run: () => { hiddenGroups.clear(); saveGroups(); } },
+            { label: "Hide ribbon", run: () => ctx.ui.toggleFormatBar() },
+        ], { label: "Ribbon section visibility" });
+    };
+    el.addEventListener("contextmenu", groupMenu);
+    el.tabIndex = 0;
+    el.addEventListener("keydown", (e) => { if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))
+        groupMenu(e); });
+    applyGroups();
     const mixed = Symbol("mixed");
     const valueIn = (block, part, key) => {
         if (key === "bold" || key === "italic" || key === "underline" || key === "strike") {
@@ -426,15 +555,24 @@ export function buildFormatBar(ctx) {
             btn.setAttribute("aria-pressed", value === mixed ? "mixed" : String(value === true));
         }
         const font = inlineValue("font_family");
-        if (font !== mixed && typeof font === "string")
-            family.value = font;
-        else {
-            family.value = "";
-            family.placeholder = font === mixed ? "Mixed fonts" : "Font family";
+        if (document.activeElement !== family) {
+            if (font !== mixed && typeof font === "string")
+                family.value = font;
+            else {
+                family.value = "";
+                family.placeholder = font === mixed ? "Mixed fonts" : "Font family";
+            }
         }
         const pt = inlineValue("font_size_pt");
-        size.value = typeof pt === "number" ? String(pt) : "";
+        if (document.activeElement !== size)
+            size.value = typeof pt === "number" ? String(pt) : "";
         size.placeholder = pt === mixed ? "Mixed" : "pt";
+        for (const [key, input] of trackingInputs) {
+            const value = inlineValue(key);
+            if (document.activeElement !== input)
+                input.value = typeof value === "number" ? String(value) : "";
+            input.placeholder = value === mixed ? "Mixed" : "0";
+        }
         const text = inlineValue("color");
         if (typeof text === "string" && /^#[0-9a-fA-F]{6}$/.test(text))
             textColour.value = text;
@@ -442,21 +580,54 @@ export function buildFormatBar(ctx) {
         if (typeof bg === "string" && /^#[0-9a-fA-F]{6}$/.test(bg))
             highlight.value = bg;
         const leading = paragraphValue("line_height");
-        line.value = typeof leading === "number" ? String(leading) : "1";
-        if (![...line.options].some((o) => o.value === line.value))
-            line.selectedIndex = -1;
+        if (document.activeElement !== line) {
+            line.value = typeof leading === "number" ? String(leading) : "1";
+            if (![...line.options].some((o) => o.value === line.value))
+                line.selectedIndex = -1;
+        }
         const beforeValue = paragraphValue("space_before_pt");
         const afterValue = paragraphValue("space_after_pt");
-        before.value = typeof beforeValue === "number" ? String(beforeValue) : beforeValue === mixed ? "" : "0";
-        after.value = typeof afterValue === "number" ? String(afterValue) : afterValue === mixed ? "" : "0";
+        if (document.activeElement !== before)
+            before.value = typeof beforeValue === "number" ? String(beforeValue) : beforeValue === mixed ? "" : "0";
+        if (document.activeElement !== after)
+            after.value = typeof afterValue === "number" ? String(afterValue) : afterValue === mixed ? "" : "0";
         if (block) {
-            const v = block.type === "heading" ? `h${Math.min(6, block.attributes?.level ?? 1)}` : block.type === "list_item" ? (block.attributes?.ordered ? "numbered" : "bullets") : block.type === "quote" ? "quote" : block.type === "code" ? "code-block" : "paragraph";
+            for (const option of Array.from(style.options))
+                if (option.dataset["customStyle"])
+                    option.remove();
+            for (const name of Object.keys(ed.model.meta.styles?.paragraph ?? {}).sort()) {
+                if (["Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"].includes(name))
+                    continue;
+                const option = h("option", { value: `user:${name}`, text: name });
+                option.dataset["customStyle"] = "true";
+                style.appendChild(option);
+            }
+            const v = block.type === "heading" ? `h${Math.min(6, block.attributes?.level ?? 1)}` : block.type === "list_item" ? (block.attributes?.ordered ? "numbered" : "bullets") : block.type === "quote" ? "quote" : block.type === "code" ? "code-block" : block.style && ["Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"].includes(block.style) ? `style-${block.style.toLowerCase().replaceAll(" ", "-")}` : block.style ? `user:${block.style}` : "paragraph";
             if ([...style.options].some((o) => o.value === v))
                 style.value = v;
         }
         const dis = ed.readOnly;
         el.querySelectorAll("button, select, input").forEach((c) => { c.disabled = dis; });
     };
+    void bundledFonts().then(async (data) => {
+        data.families.forEach((name) => availableFamilies.add(name));
+        families.replaceChildren(...[...new Set([...FONT_FAMILIES, ...data.families])].sort((a, b) => a.localeCompare(b)).map((name) => h("option", { value: name })));
+        const used = new Set();
+        for (const row of ed.model.list()) {
+            if (typeof row.attributes?.["font_family"] === "string")
+                used.add(row.attributes["font_family"]);
+            for (const span of row.spans ?? [])
+                if (typeof span.font_family === "string")
+                    used.add(span.font_family);
+        }
+        for (const kind of [ed.model.meta.styles?.paragraph, ed.model.meta.styles?.character]) {
+            for (const group of Object.values(kind ?? {}))
+                if (typeof group["font_family"] === "string")
+                    used.add(group["font_family"]);
+        }
+        await Promise.allSettled([...used].map((name) => ensureBundledFont(name)));
+        ed.layout();
+    }).catch(() => { });
     update();
     return { el, update };
 }
@@ -464,7 +635,7 @@ export function buildFormatBar(ctx) {
  *  and the status dots in the middle; the zoom to page height or width and the percentage slider on the right. */
 export function buildStatusBar(ctx, onZoom) {
     const { app, ed } = ctx;
-    const pageLine = h("span", { class: "page-line", attrs: { title: "Pages are laid out block by block here, so this count is approximate. Print preview shows the exact count." } });
+    const pageLine = h("span", { class: "page-line", attrs: { title: "The editor page count is an approximate block layout. The PDF page count and TOC references are measured by Documaster." } });
     const words = h("span", {});
     const version = h("span", {});
     const last = h("span", {});
@@ -493,7 +664,12 @@ export function buildStatusBar(ctx, onZoom) {
         const state = ed.model.state;
         const total = Math.max(1, ed.page.total);
         const cur = Math.min(total, ed.currentPage());
-        pageLine.textContent = `Page ${String(cur).padStart(2, "0")} of ${String(total).padStart(2, "0")} (approx.)`;
+        const layout = ed.printLayout;
+        const active = ed.recallSelection()?.start.block;
+        const physical = active ? layout?.blockPages[active] : undefined;
+        const printed = physical ? layout?.printedLabels[physical - 1] : undefined;
+        pageLine.textContent = `Editor ${String(cur).padStart(2, "0")}/${String(total).padStart(2, "0")} (approx.)` +
+            (layout ? ` · PDF ${physical ? `${physical}/` : ""}${layout.pages} (exact)${printed ? ` · Printed: ${printed}` : ""}` : "");
         words.textContent = `${ed.model.stats.words.toLocaleString()} words - ${ed.model.stats.characters.toLocaleString()} characters`;
         version.textContent = `Version: ${state.revision.number}`;
         version.title = `Revision ${state.revision.number}. Revision id ${state.revision.id.slice(0, 12)}…`;

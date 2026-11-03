@@ -3,7 +3,7 @@
  *  Pagination is deliberately block-granular: a block moves to the next sheet when it does not fit, and a paragraph is never split in
  *  the middle. The exact page count of a printed or exported document comes from the PDF preview (Documaster's own layout), so the
  *  page count shown here is an approximation, and the status bar says so. */
-import { h, s, glyph } from "./kit.js";
+import { h, s, glyph, openMenu, promptDialog } from "./kit.js";
 import { MM_PX, roman } from "./textops.js";
 const NUMBER_FORMATS = {
     decimal: (n) => String(n), "lower-roman": (n) => roman(n), "upper-roman": (n) => roman(n).toUpperCase(),
@@ -15,6 +15,23 @@ function alpha(n) { let out = ""; let v = Math.max(1, n); while (v > 0) {
     v = Math.floor(v / 26);
 } return out; }
 export function formatPageNumber(n, format) { return (NUMBER_FORMATS[format ?? "decimal"] ?? NUMBER_FORMATS["decimal"])(n); }
+/** Printed numbers are distinct from physical pages and derived from section semantics. */
+export function printedPageNumbers(sheets) {
+    let current = 0;
+    let previousSection;
+    return sheets.map((sheet) => {
+        const config = sheet.numbering ?? {};
+        if (sheet.role === "cover" || config.show === false) {
+            previousSection = sheet.section;
+            return null;
+        }
+        if (sheet.section !== previousSection && config.start !== undefined)
+            current = config.start - 1;
+        previousSection = sheet.section;
+        current += 1;
+        return formatPageNumber(current, config.format);
+    });
+}
 export function fillTemplate(text, values) {
     return text.replace(/\{\{|\}\}|\{page\}|\{pages\}|\{title\}/g, (m) => m === "{{" ? "{" : m === "}}" ? "}" : m === "{page}" ? values.page : m === "{pages}" ? values.pages : values.title);
 }
@@ -282,27 +299,56 @@ export class PageView {
     /** Headers, footers, margin lines, guides and vertical rulers: all drawn per sheet once the page count is known. */
     decorate(input) {
         const pages = this.sheets.length;
-        const counters = new Map();
+        const labels = printedPageNumbers(this.sheets.map((sheet) => ({ section: sheet.section, ...this.headerFooter(sheet.section) })));
         this.sheets.forEach((sheet, i) => {
             const hf = this.headerFooter(sheet.section);
-            const numbering = hf.numbering ?? {};
-            const key = sheet.section ?? "";
-            const seen = counters.get(key) ?? 0;
-            counters.set(key, seen + 1);
-            const shown = (numbering.start ?? 1) + (numbering.start ? seen : i);
-            const values = { page: formatPageNumber(shown, numbering.format), pages: String(pages), title: input.title };
+            const printed = labels[i] ?? null;
+            sheet.el.dataset["printed"] = printed ?? "";
+            const values = { page: printed ?? "", pages: String(pages), title: input.title };
             const m = sheet.geometry.margins;
             const band = (edge, spec) => {
                 if (!spec || (!spec.left && !spec.center && !spec.right))
                     return null;
-                const row = h("div", { class: `hf ${edge}`, attrs: { contenteditable: "false", "data-edge": edge } }, h("span", { class: "l", text: fillTemplate(spec.left ?? "", values) }), h("span", { class: "c", text: fillTemplate(spec.center ?? "", values) }), h("span", { class: "r", text: fillTemplate(spec.right ?? "", values) }));
+                const cell = (part, cls) => {
+                    const node = h("span", { class: cls });
+                    const paint = (target, format) => {
+                        if (format?.font_family)
+                            target.style.fontFamily = format.font_family;
+                        if (format?.font_size_pt)
+                            target.style.fontSize = `${format.font_size_pt}pt`;
+                        if (format?.color)
+                            target.style.color = format.color;
+                        if (format?.bold !== undefined)
+                            target.style.fontWeight = format.bold ? "bold" : "normal";
+                        if (format?.italic !== undefined)
+                            target.style.fontStyle = format.italic ? "italic" : "normal";
+                        if (format?.underline !== undefined)
+                            target.style.textDecoration = format.underline ? "underline" : "none";
+                    };
+                    paint(node, spec.formats?.[part]);
+                    const fragments = spec.runs?.[part];
+                    if (fragments?.length && fragments.map((x) => x.text).join("") === (spec[part] ?? "")) {
+                        for (const fragment of fragments) {
+                            const span = h("span", { text: fillTemplate(fragment.text, values) });
+                            paint(span, fragment.format);
+                            node.appendChild(span);
+                        }
+                    }
+                    else
+                        node.textContent = fillTemplate(spec[part] ?? "", values);
+                    return node;
+                };
+                const row = h("div", { class: `hf ${edge}`, attrs: { contenteditable: "false", "data-edge": edge } }, cell("left", "l"), cell("center", "c"), cell("right", "r"));
                 row.style.setProperty(edge === "header" ? "top" : "bottom", `${(edge === "header" ? sheet.geometry.headerMm : sheet.geometry.footerMm) * MM_PX}px`);
                 row.style.setProperty("left", `${m.left * MM_PX}px`);
                 row.style.setProperty("right", `${m.right * MM_PX}px`);
                 return row;
             };
-            const extras = [band("header", hf.header), band("footer", hf.footer)];
-            extras.push(h("div", { class: "page-no", attrs: { contenteditable: "false", "aria-hidden": "true" }, text: `${i + 1}` }));
+            // Hiding the printed number must not remove unrelated header/footer text.
+            // The explicitly designated cover, however, starts with empty page bands.
+            const extras = hf.role === "cover" ? [] : [band("header", hf.header), band("footer", hf.footer)];
+            if (printed !== null)
+                extras.push(h("div", { class: "page-no", attrs: { contenteditable: "false", "aria-hidden": "true" }, text: printed }));
             if (input.showMargins)
                 extras.push(this.marginLines(sheet));
             if (input.showGuides)
@@ -469,6 +515,12 @@ export class PageView {
                 attrs: { tabindex: "0", role: "slider", "aria-orientation": spec.axis === "v" ? "horizontal" : "vertical", "aria-label": spec.name, "aria-valuemin": spec.min, "aria-valuemax": spec.max, "aria-valuenow": spec.mm, "aria-valuetext": this.describe(spec) },
             });
             l.style.setProperty(spec.axis === "v" ? "left" : "top", `${spec.mm * MM_PX}px`);
+            // Header/footer boundaries are contained within the writable horizontal
+            // span. Margin guides themselves still reach the page edges for dragging.
+            if (kind === "header" || kind === "footer") {
+                l.style.setProperty("left", `${sheet.geometry.margins.left * MM_PX}px`);
+                l.style.setProperty("right", `${sheet.geometry.margins.right * MM_PX}px`);
+            }
             l.addEventListener("pointerdown", (e) => this.startDrag(e, l, sheet, kind));
             l.addEventListener("pointerenter", () => { if (!this.dragging)
                 this.showReadout(sheet, spec.axis, this.spec(sheet, kind).mm, spec.name); });
@@ -492,7 +544,32 @@ export class PageView {
             g.addEventListener("focus", () => this.showReadout(sheet, axis, mm, "Guide"));
             g.addEventListener("blur", () => this.hideReadout());
             g.addEventListener("dblclick", (e) => { e.stopPropagation(); this.events.guideMove(axis, index, null); });
+            const context = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                openMenu(g, [
+                    { label: "Edit position…", disabled: this.locked, run: () => {
+                            void (async () => {
+                                const result = await promptDialog({ title: "Guide position", label: "Position (mm from page edge)", value: String(mm),
+                                    validate: (value) => {
+                                        const n = Number(value);
+                                        const max = axis === "v" ? sheet.geometry.widthMm : sheet.geometry.heightMm;
+                                        return value.trim() && Number.isFinite(n) && n >= 0 && n <= max ? null : `Choose a number from 0 to ${max} mm.`;
+                                    } });
+                                if (result !== null)
+                                    this.events.guideMove(axis, index, Number(result));
+                            })();
+                        } },
+                    { label: "Duplicate guide", disabled: this.locked, run: () => this.events.guideAdd(axis, mm) },
+                    { label: "Remove guide", disabled: this.locked, run: () => this.events.guideMove(axis, index, null) },
+                ], { label: "Page guide" });
+            };
+            g.addEventListener("contextmenu", context);
+            g.addEventListener("keydown", (e) => { if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))
+                context(e); });
             g.addEventListener("keydown", (e) => {
+                if (this.locked)
+                    return;
                 if (e.key === "Delete" || e.key === "Backspace") {
                     e.preventDefault();
                     this.events.guideMove(axis, index, null);
@@ -511,6 +588,8 @@ export class PageView {
         return wrap;
     }
     dragGuide(e, el, sheet, axis, index) {
+        if (this.locked || e.button !== 0)
+            return;
         e.preventDefault();
         e.stopPropagation();
         el.setPointerCapture(e.pointerId);
@@ -519,16 +598,24 @@ export class PageView {
         const toMm = (ev) => ((axis === "v" ? ev.clientX - rect.left : ev.clientY - rect.top) / this.zoom) / MM_PX;
         this.dragging = true;
         const move = (ev) => { const at = Math.max(0, Math.min(limit, toMm(ev))); el.style.setProperty(axis === "v" ? "left" : "top", `${at * MM_PX}px`); this.showReadout(sheet, axis, Math.round(at * 2) / 2, "Guide"); };
-        const up = (ev) => {
+        const finish = (ev, apply) => {
             el.removeEventListener("pointermove", move);
             el.removeEventListener("pointerup", up);
+            el.removeEventListener("pointercancel", cancel);
             this.dragging = false;
             this.hideReadout();
+            if (!apply) {
+                el.style.setProperty(axis === "v" ? "left" : "top", `${(this.last?.guides[axis]?.[index] ?? 0) * MM_PX}px`);
+                return;
+            }
             const mm = toMm(ev);
             this.events.guideMove(axis, index, mm < 0 || mm > limit ? null : Math.round(mm * 2) / 2);
         };
+        const up = (ev) => finish(ev, true);
+        const cancel = (ev) => finish(ev, false);
         el.addEventListener("pointermove", move);
         el.addEventListener("pointerup", up);
+        el.addEventListener("pointercancel", cancel);
     }
     ticks(lengthMm, vertical, sheet, kinds, label) {
         const w = vertical ? RULER : lengthMm * MM_PX;
@@ -659,7 +746,7 @@ export class PageView {
         if (!sheet)
             return;
         const rect = sheet.el.getBoundingClientRect();
-        this.events.pageDouble(sheet.section, ((e.clientX - rect.left) / this.zoom) / MM_PX, ((e.clientY - rect.top) / this.zoom) / MM_PX);
+        this.events.pageDouble(this.sheets.indexOf(sheet), sheet.section, ((e.clientX - rect.left) / this.zoom) / MM_PX, ((e.clientY - rect.top) / this.zoom) / MM_PX);
     }
     get total() { return this.sheets.length; }
     get layoutInput() { return this.last; }
