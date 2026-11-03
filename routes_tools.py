@@ -283,8 +283,15 @@ def source_verify(app, req: Request):
 @router.route("POST", "/api/docs/{sid}/cite")
 def cite(app, req: Request):
     body = req.json()
+    group = body.get("sources")
+    if group is not None and (not isinstance(group, list) or not 1 <= len(group) <= 20 or
+                              not all(isinstance(s, str) and 0 < len(s) <= 128 for s in group)):
+        raise BadRequest("Select 1–20 citation sources.")
     return app.academic.cite(session_of(app, req), text(body, "block", max_len=100), whole(body, "at", low=0, high=10**7, required=True),
-                             text(body, "source", max_len=64), base=base_version(body))
+                             text(body, "source", max_len=128), base=base_version(body), sources=group,
+                             mode=text(body, "mode", required=False, max_len=20, default="parenthetical") or "parenthetical",
+                             locator=text(body, "locator", required=False, max_len=100) or None,
+                             label=text(body, "label", required=False, max_len=20, default="page") or "page")
 
 
 @router.route("POST", "/api/docs/{sid}/footnote")

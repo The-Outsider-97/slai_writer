@@ -9,6 +9,7 @@ reportlab             # tested with 5.0.1  : the QR encoder for authenticator en
 # Needed only by the feature named. Writer says exactly what is missing when one is absent (503 dependency_missing):
 pypdfium2             # tested with 5.13.0 : print preview (rasterises the real PDF)
 pypdf                 # tested with 6.17.0 : PDF preflight (page count, fonts not embedded)
+citeproc-py>=0.11.1   # APA 7 CSL citation processor; bundled assets/csl/apa.csl provides the offline style
 #
 # Not on PyPI, part of the SLAI checkout:
 #   applications/Documaster   DOCX/ODT/RTF/HTML/Markdown/PDF import and export

@@ -3,7 +3,7 @@
 ## 1. Install
 
 1. Python 3.10 or newer and the SLAI checkout (Writer finds it by walking up from its own folder, or use `--slai-root` / `SLAI_ROOT`).
-2. `pip install -r applications/slai_writer/requirements.txt` (cryptography, Pillow, reportlab; pypdfium2 and pypdf for print preview and PDF checks).
+2. `pip install -r applications/slai_writer/requirements.txt` (cryptography, Pillow, reportlab, the `citeproc-py` APA 7 processor; pypdfium2 and pypdf for print preview and PDF checks).
 3. Node (built and tested with 22) is needed only to build or test the browser client: in `applications/slai_writer` run `npm install` then `npm run build` (this writes `dist/`).
    A pre-built `dist/` is included in the delivered folder, so Node is not needed just to run Writer.
 
@@ -56,7 +56,9 @@ An invalid value is refused at start-up with a message that names the key.
 | Sign up, resend code, password reset | An SMTP server in `mail:` (+ the password variable) | Sign-up says e-mail is not configured. No code is ever shown on screen or logged. Guest use and existing accounts are unaffected |
 | Import/export of DOCX, ODT, RTF, HTML, Markdown, PDF, text | `applications/Documaster` in the SLAI checkout | The Export/Import screens list the missing piece (503); SLDC save/open still work |
 | Print preview, PDF page count and fonts | `pypdfium2`, `pypdf` | The preview says which package is missing |
-| Spelling, grammar, AI Assistant | The SLAI language agent, and **AI switched on in Settings** | Spelling: "not available". Grammar/AI: "AI is off" with a button to Settings. Nothing is checked or sent unless you press a button |
+| Spelling and grammar | Local SLAI English wordlist, NLP engine and grammar rules | Automatic proofreading is enabled independently of AI rewriting and runs locally. A missing full spelling dictionary or grammar dependency reports unavailability; it never marks the whole document as incorrect |
+| Generative AI Assistant | SLAI language model, permission and privacy checks | Generative rewriting needs AI enabled in Settings; spelling and deterministic grammar checking do not |
+| APA 7 citations and References | `citeproc-py` and the bundled offline `assets/csl/apa.csl` | Citation formatting reports the missing processor or style explicitly; source records remain editable |
 | Native file dialogs | `tkinter` | Writer's own in-page file chooser is used |
 | Shared workspace, Request access, roles, cloud storage, paid plans | A workspace/billing service that this installation does not have | Shown as "not connected"; merge-an-edited-copy works locally. No purchase can succeed |
 | SReader, SPlanner, SciCal, Secure folder | The corresponding SLAI applications and links | Tools panel shows "Not connected" / "Unavailable" |

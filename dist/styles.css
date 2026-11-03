@@ -207,6 +207,14 @@ table.tbl { border-collapse: collapse; width: 100%; margin: 2mm 0; table-layout:
 table.tbl .cell { border: 1px solid #888; padding: 1.2mm 2mm; vertical-align: top; outline: none; overflow-wrap: anywhere; }
 table.tbl th.cell { background: rgba(0, 0, 0, .07); font-weight: 700; text-align: left; }
 table.tbl caption { caption-side: top; font-size: 9pt; text-align: left; padding-bottom: 1mm; }
+.b-table .table-grow { position: absolute; z-index: 2; display: none; place-items: center;
+  width: 21px; height: 21px; padding: 0; border: 1px solid var(--focus); border-radius: 50%;
+  background: var(--chrome); color: var(--focus); font-weight: 700; line-height: 1; cursor: pointer; }
+.b-table:hover .table-grow, .b-table:focus-within .table-grow { display: grid; }
+.b-table .table-grow-row { left: 50%; bottom: -13px; transform: translateX(-50%); }
+.b-table .table-grow-col { right: -13px; top: 50%; transform: translateY(-50%); }
+.b-table .table-grow:focus-visible { display: grid; outline: 2px solid var(--focus); outline-offset: 2px; }
+@media print { .b-table .table-grow { display: none !important; } }
 figure.fig { margin: 2mm 0; display: grid; justify-items: center; gap: 1mm; }
 figure.fig.align-left { justify-items: start; } figure.fig.align-right { justify-items: end; }
 /* a picture is a box (the space it takes), a frame (the visible part, turned and mirrored) and the whole picture inside the frame; figlayout.ts sets the sizes */
@@ -241,8 +249,9 @@ sup.fn { color: #1d4ed8; cursor: pointer; font-size: .7em; }
 /* highlights (CSS Custom Highlight API) */
 ::highlight(w-search) { background-color: var(--hl-search); }
 ::highlight(w-search-current) { background-color: var(--hl-search-current); }
-::highlight(w-typo) { background-color: var(--hl-typo); text-decoration: underline wavy #d33; }
-::highlight(w-grammar) { background-color: var(--hl-grammar); text-decoration: underline wavy #e07000; }
+/* Proofreading points out exact characters, without painting whole passages. */
+::highlight(w-typo) { background-color: transparent; text-decoration: underline wavy #d33; }
+::highlight(w-grammar) { background-color: transparent; text-decoration: underline wavy #e07000; }
 ::highlight(w-note) { background-color: var(--hl-note); }
 ::highlight(w-comment) { background-color: var(--hl-comment); }
 .sheets[data-cur-text] .txt { cursor: var(--cur-text, text); }

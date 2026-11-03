@@ -135,10 +135,9 @@ export function createProofPanel(ctx: DocCtx): Panel {
       // Run these checks independently: an unavailable grammar model must not
       // disable deterministic spelling, and neither path may block editing.
       if (app.prefs.spell) void check("spell", undefined, changed);
-      // The canonical grammar route currently uses the Language Agent's
-      // explicit assistance/privacy gate. Do not make forbidden requests on
-      // every keystroke or silently weaken that gate.
-      if (app.prefs.grammar && app.prefs.ai_enabled) void check("grammar", undefined, changed);
+      // Deterministic local grammar analysis is available independently of
+      // optional AI rewriting and its separate privacy permission setting.
+      if (app.prefs.grammar) void check("grammar", undefined, changed);
     }, 500);
   };
 
@@ -160,7 +159,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
     const prefs = app.prefs;
     const status = app.boot.capabilities.ai;
     if (!prefs.ai_enabled) {
-      aiBox.appendChild(notice("The AI Assistant is off. Typing and local spelling continue to work. Grammar checking currently requires the local Language Agent and its privacy gate; enable assistance in Settings to use it.", "info", "AI is off."));
+      aiBox.appendChild(notice("The AI Assistant is off. Local spelling and grammar checking remain available from the Proofreading panel. Enable assistance in Settings only for generative rewrites.", "info", "AI is off."));
       aiBox.appendChild(h("div", { class: "actions" }, button("Open Settings", () => { app.go({ name: "settings" }); }, "", "settings")));
       return;
     }

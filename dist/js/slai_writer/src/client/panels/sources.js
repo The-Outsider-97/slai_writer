@@ -5,6 +5,7 @@
 import { announce, clear, confirmDialog, h, labelled, openDialog, toast } from "../kit.js";
 import * as A from "../actions.js";
 import { api, errorText } from "../net.js";
+import { tocCoverAnchor } from "../toc_position.js";
 import { button, checkbox, emptyState, notice, selectField, statusBadge, fill } from "../widgets.js";
 const url = (ctx, tail) => `/docs/${encodeURIComponent(ctx.sid)}/${tail}`;
 export function badgeClass(status) { return status === "registry" ? "verified" : status === "ai" ? "ai" : "user"; }
@@ -13,18 +14,61 @@ async function mutate(ctx, work) {
         await ctx.ed.resync(r.state); return r; });
 }
 export async function loadSources(ctx) { return api.get(url(ctx, "sources")); }
+/** Shared by the References ribbon and the Sources sidebar. */
+export async function bibliographyDialog(ctx) {
+    const current = ctx.ed.model.list().some((b) => !!b.extensions?.["slai.sldc.references"]);
+    const only = checkbox("Include only sources cited in this document", true);
+    const handle = openDialog({
+        title: current ? "Update References" : "Insert References", size: "narrow",
+        body: h("div", { class: "stack" }, only.root, notice("References starts on a new page. Repeating this action updates the same section, preserving the heading and avoiding duplicates.", "info")),
+        actions: [{ label: current ? "Update References" : "Insert References", kind: "primary", run: async () => {
+                    try {
+                        const after = ctx.ed.model.order[ctx.ed.model.order.length - 1] ?? null;
+                        const result = await mutate(ctx, () => api.post(url(ctx, "bibliography"), { onlyCited: only.input.checked, after, heading: "References" }));
+                        toast(`References ${current ? "updated" : "inserted"}: ${result.entries} entries.`, { kind: "ok" });
+                        if (result.warnings?.length)
+                            toast(result.warnings[0], { kind: "info" });
+                        return true;
+                    }
+                    catch (error) {
+                        toast(errorText(error), { kind: "error" });
+                        return undefined;
+                    }
+                } }],
+    });
+    await handle.result;
+}
+export async function removeBibliography(ctx) {
+    const ok = await confirmDialog({ title: "Remove generated References?", message: "Saved sources and in-text citations will remain in the document.",
+        confirmLabel: "Remove References", danger: true });
+    if (!ok)
+        return;
+    try {
+        await mutate(ctx, () => api.del(url(ctx, "bibliography")));
+        toast("Generated References removed. Your sources and citations are preserved.", { kind: "ok" });
+    }
+    catch (error) {
+        toast(errorText(error), { kind: "error" });
+    }
+}
 /* -------------------------------------------------------------------------------------------------- add / edit */
 export async function sourceDialog(ctx, existing) {
     const d = (existing?.data ?? {});
     const text = (key, label, hint, max = 300) => labelled(label, h("input", { type: "text", name: key, value: String(d[key] ?? ""), maxLength: max, attrs: { autocomplete: "off" } }), hint ? { hint } : {});
     const authors = h("textarea", { rows: 3, name: "authors", maxLength: 2000, value: Array.isArray(d["authors"]) ? d["authors"].join("\n") : "" });
+    const editors = h("textarea", { rows: 2, name: "editors", maxLength: 2000, value: Array.isArray(d["editors"]) ? d["editors"].join("\n") : "" });
+    const sourceType = selectField("Source type", [["article-journal", "Journal article"], ["book", "Book"], ["chapter", "Book chapter"],
+        ["webpage", "Website"], ["report", "Report"], ["thesis", "Thesis / dissertation"], ["paper-conference", "Conference paper"],
+        ["article", "Preprint / article"], ["dataset", "Dataset"], ["software", "Software"], ["motion_picture", "Video"],
+        ["document", "Document"]], String(d["source_type"] ?? "article-journal"));
     const status = selectField("Where does this source come from?", [["user", "I am entering it myself"], ["imported", "It came with an imported document"], ["ai", "An AI assistant suggested it (not verified)"]], "user");
     const error = h("p", { class: "form-error", attrs: { role: "alert" }, hidden: true });
-    const body = h("form", { class: "stack", attrs: { novalidate: true } }, notice("Enter only what you can see on the real work. Writer will not fill in or correct missing details: anything left empty stays empty, and shows as “n.d.” or is listed as a problem.", "info"), text("title", "Title (required)", undefined, 1000), labelled("Authors (one per line)", authors), h("div", { class: "grid-3" }, text("year", "Year", "Four digits", 4), text("volume", "Volume", undefined, 40), text("issue", "Issue", undefined, 40)), text("container", "Journal, book or website", undefined, 500), h("div", { class: "grid-2" }, text("publisher", "Publisher", undefined, 300), text("pages", "Pages", "For example 12–34", 40)), h("div", { class: "grid-2" }, text("doi", "DOI", "For example 10.1000/xyz123", 200), text("url", "Link", undefined, 2000)), h("div", { class: "grid-2" }, text("accessed", "Date accessed", "YYYY-MM-DD", 10), text("note", "Note", undefined, 2000)), existing ? null : status.root, error);
+    const body = h("form", { class: "stack", attrs: { novalidate: true } }, notice("Enter only what you can see on the real work. Writer will not fill in or correct missing details: anything left empty stays empty, and shows as “n.d.” or is listed as a problem.", "info"), sourceType.root, text("title", "Title (required)", undefined, 1000), labelled("Authors (one per line)", authors), h("details", {}, h("summary", { text: "Additional source-specific metadata" }), labelled("Editors (one per line)", editors), text("organization", "Organization as author", undefined, 300), h("div", { class: "grid-3" }, text("published", "Publication date", "YYYY-MM-DD", 10), text("edition", "Edition", undefined, 40), text("isbn", "ISBN", undefined, 40))), h("div", { class: "grid-3" }, text("year", "Year", "Four digits", 4), text("volume", "Volume", undefined, 40), text("issue", "Issue", undefined, 40)), text("container", "Journal, book or website", undefined, 500), h("div", { class: "grid-2" }, text("publisher", "Publisher", undefined, 300), text("pages", "Pages", "For example 12–34", 40)), h("div", { class: "grid-2" }, text("doi", "DOI", "For example 10.1000/xyz123", 200), text("url", "Link", undefined, 2000)), h("div", { class: "grid-2" }, text("accessed", "Date accessed", "YYYY-MM-DD", 10), text("note", "Note", undefined, 2000)), existing ? null : status.root, error);
     const read = () => {
         const out = {};
         for (const el of Array.from(body.querySelectorAll("input[name], textarea[name]")))
             out[el.name] = el.value;
+        out["source_type"] = sourceType.select.value;
         return out;
     };
     const handle = openDialog({
@@ -64,18 +108,25 @@ export async function citeDialog(ctx) {
         cites = data.sources.filter((s) => s.kind === "citation");
     }
     const choose = selectField("Source", cites.map((s) => [s.id, `${s.inText} ${String(s.data.title ?? "")}`.slice(0, 120)]), cites[0]?.id ?? "");
+    const multiple = cites.map((s) => ({ id: s.id, ...checkbox(String(s.data.title ?? s.id).slice(0, 85), false) }));
+    const mode = selectField("Citation form", [["parenthetical", "Parenthetical (Remy, 2026)"], ["narrative", "Narrative Remy (2026)"]], "parenthetical");
+    const locator = h("input", { type: "text", maxLength: 100, attrs: { placeholder: "Optional: 42, 42–43, section 2…", "aria-label": "Citation locator" } });
+    const label = selectField("Locator type", [["page", "Page"], ["paragraph", "Paragraph"], ["chapter", "Chapter"], ["section", "Section"], ["figure", "Figure"], ["table", "Table"]], "page");
     const detail = h("div", { class: "muted", attrs: { "aria-live": "polite" } });
     const paint = () => { const s = cites.find((c) => c.id === choose.select.value); if (s)
         fill(detail, s.statusLabel + (s.problems.length ? ` · ${s.problems[0]}` : "")); };
     choose.select.addEventListener("change", () => { clear(detail); paint(); });
     paint();
     const handle = openDialog({
-        title: "Insert a citation", size: "narrow", body: h("div", { class: "stack" }, choose.root, detail, h("p", { class: "fine", text: "The in-text mark is built only from the source's own fields." })),
+        title: "Insert a citation", size: "wide", body: h("div", { class: "stack" }, choose.root, detail, h("details", {}, h("summary", { text: "Combine with other sources" }), h("p", { class: "fine", text: "Check any additional sources to include in this citation group." }), ...multiple.map((entry) => entry.root)), mode.root, h("div", { class: "grid-2" }, labelled("Locator (optional)", locator), label.root), h("p", { class: "fine", text: "APA 7 formatting is generated locally using the saved bibliographic metadata." })),
         actions: [{ label: "Add a new source…", run: async () => { await sourceDialog(ctx); return null; } },
             { label: "Insert citation", kind: "primary", run: async () => {
                     try {
                         ctx.ed.refocus(sel);
-                        await mutate(ctx, () => api.post(url(ctx, "cite"), { block: sel.start.block, at: sel.start.offset, source: choose.select.value, base: ctx.ed.model.version }));
+                        const selected = [choose.select.value, ...multiple.filter((x) => x.input.checked && x.id !== choose.select.value).map((x) => x.id)];
+                        await mutate(ctx, () => api.post(url(ctx, "cite"), { block: sel.start.block, at: sel.start.offset,
+                            source: choose.select.value, sources: selected, mode: mode.select.value,
+                            locator: locator.value.trim(), label: label.select.value, base: ctx.ed.model.version }));
                         announce("Citation inserted.");
                         return true;
                     }
@@ -150,6 +201,8 @@ export function createSourcesPanel(ctx) {
     const list = h("div", { attrs: { "aria-live": "polite" } });
     const place = (where) => {
         const order = ctx.ed.model.order;
+        if (where === "cover")
+            return tocCoverAnchor(ctx.ed.model.list(), ctx.ed.model.meta.sections ?? []);
         if (where === "start")
             return null;
         if (where === "end")
@@ -157,23 +210,132 @@ export function createSourcesPanel(ctx) {
         return A.anchorBlock(ctx.ed);
     };
     const insertDialog = async (kind) => {
-        const where = selectField("Insert it", [["cursor", "After the cursor"], ["end", "At the end of the document"], ["start", "At the start of the document"]], kind === "bibliography" ? "end" : "start");
+        if (kind === "contents" && ctx.ed.model.list().some((block) => block.extensions?.["slai.sldc.toc"]?.role === "title")) {
+            toast("A table of contents already exists. Use Update table of contents to edit it.", { kind: "info" });
+            return;
+        }
+        const hasCover = (ctx.ed.model.meta.sections ?? []).some((s) => s.role === "cover") && tocCoverAnchor(ctx.ed.model.list(), ctx.ed.model.meta.sections ?? []) !== null;
+        const where = selectField("Insert it", [...(kind === "contents" && hasCover ? [["cover", "Immediately after cover"]] : []), ["cursor", "After the cursor"], ["end", "At the end of the document"], ["start", "At the start of the document"]], kind === "bibliography" ? "end" : hasCover ? "cover" : "start");
         const only = checkbox("Only sources I have cited", true);
         const depth = selectField("Headings to include", [["1", "Level 1"], ["2", "Levels 1–2"], ["3", "Levels 1–3"], ["4", "Levels 1–4"], ["5", "Levels 1–5"], ["6", "Levels 1–6"]], "3");
+        const titleField = h("input", { type: "text", value: "Contents", maxLength: 80, attrs: { "aria-label": "Contents title" } });
+        const preset = selectField("Contents appearance", [["standard", "Standard"], ["compact", "Compact"], ["academic", "Academic"]], "standard");
+        const pageNumbers = checkbox("Right-aligned printed page references", true);
+        const leaderDots = checkbox("Leader dots between entries and page references", true);
+        const automatic = checkbox("Automatically refresh when headings change", true);
         const handle = openDialog({
             title: kind === "bibliography" ? "Insert a reference list" : "Insert a table of contents", size: "narrow",
-            body: h("div", { class: "stack" }, where.root, kind === "bibliography" ? only.root : depth.root, h("p", { class: "fine", text: kind === "bibliography" ? "The list is built from each source's own fields. Check it against the real works before you publish." : "A contents list is a snapshot of the headings now. Make it again after you change the outline." })),
+            body: h("div", { class: "stack" }, where.root, kind === "bibliography" ? only.root : h("div", { class: "stack" }, labelled("Title", titleField), depth.root, preset.root, pageNumbers.root, leaderDots.root, automatic.root), h("p", { class: "fine", text: kind === "bibliography" ? "The list is built from each source's own fields. Check it against the real works before you publish." : "Contents entries use stable heading references. Printed page numbers are measured by the PDF layout engine; custom entry labels and formatting survive refresh." })),
             actions: [{ label: "Insert", kind: "primary", run: async () => {
                         try {
                             const after = place(where.select.value);
                             const reply = await mutate(ctx, () => kind === "bibliography"
                                 ? api.post(url(ctx, "bibliography"), { onlyCited: only.input.checked, after, heading: "References" })
-                                : api.post(url(ctx, "contents"), { after, title: "Contents", depth: Number(depth.select.value) }));
+                                : api.post(url(ctx, "contents"), { after, title: titleField.value, depth: Number(depth.select.value), preset: preset.select.value,
+                                    showPageNumbers: pageNumbers.input.checked, leaderDots: leaderDots.input.checked, refreshMode: automatic.input.checked ? "automatic" : "manual" }));
                             const warnings = reply.warnings ?? [];
                             if (warnings.length)
                                 toast(warnings.slice(0, 3).join(" "), { kind: "info", timeoutMs: 9000 });
                             else
                                 toast(kind === "bibliography" ? "Reference list inserted." : "Table of contents inserted.", { kind: "ok" });
+                            return true;
+                        }
+                        catch (e) {
+                            toast(errorText(e), { kind: "error" });
+                            return undefined;
+                        }
+                    } }],
+        });
+        await handle.result;
+        await paint();
+    };
+    const updateContentsDialog = async () => {
+        const entries = ctx.ed.model.list().filter((b) => {
+            const meta = (b.extensions?.["slai.sldc.toc"] ?? {});
+            return meta.role === "title";
+        });
+        if (!entries.length) {
+            toast("Insert a table of contents first.", { kind: "info" });
+            return;
+        }
+        const choice = selectField("Table of contents", entries.map((b) => {
+            const meta = b.extensions?.["slai.sldc.toc"];
+            return [meta.id, b.text];
+        }), (entries[0]?.extensions?.["slai.sldc.toc"]).id);
+        const titleField = h("input", { type: "text", maxLength: 80, attrs: { "aria-label": "Contents title" } });
+        const depth = selectField("Heading depth", [["1", "Level 1"], ["2", "Levels 1–2"], ["3", "Levels 1–3"], ["4", "Levels 1–4"], ["5", "Levels 1–5"], ["6", "Levels 1–6"]], "3");
+        const preset = selectField("Appearance", [["standard", "Standard"], ["compact", "Compact"], ["academic", "Academic"]], "standard");
+        const pageNumbers = checkbox("Right-aligned printed page references", true);
+        const leaderDots = checkbox("Leader dots between entries and page references", true);
+        const automatic = checkbox("Automatically refresh when headings change", true);
+        const headings = ctx.ed.model.list().filter((b) => b.type === "heading" && !b.extensions?.["slai.sldc.toc"]);
+        const individual = selectField("Individual entry", [["", "No individual change"], ...headings.map((b) => [b.id, b.text || "(Untitled heading)"])], "");
+        const custom = checkbox("Use a custom entry label (leave the heading unchanged)", false);
+        const label = h("input", { type: "text", maxLength: 500, attrs: { "aria-label": "Custom TOC entry label" } });
+        const hidden = checkbox("Hide this heading in this TOC", false);
+        const entryControls = h("div", { class: "stack" }, individual.root, custom.root, labelled("Entry label", label), hidden.root);
+        const updateEntryState = () => {
+            const enabled = !!individual.select.value;
+            custom.input.disabled = !enabled;
+            hidden.input.disabled = !enabled;
+            label.disabled = !enabled || !custom.input.checked;
+        };
+        const fillEntry = () => {
+            const title = entries.find((b) => (b.extensions?.["slai.sldc.toc"]).id === choice.select.value);
+            const heading = individual.select.value;
+            const meta = title?.extensions?.["slai.sldc.toc"];
+            const override = meta?.overrides?.[heading];
+            const actual = ctx.ed.model.list().find((b) => {
+                const m = b.extensions?.["slai.sldc.toc"];
+                return m?.role === "entry" && m.id === choice.select.value && m.heading === heading;
+            });
+            const m = actual?.extensions?.["slai.sldc.toc"];
+            const manuallyEdited = !!actual && m?.source_text !== undefined && actual.text !== m.source_text;
+            custom.input.checked = !!override?.label || manuallyEdited;
+            label.value = override?.label ?? (manuallyEdited ? actual?.text ?? "" : "");
+            hidden.input.checked = override?.hidden === true;
+            updateEntryState();
+        };
+        const fillSettings = () => {
+            const current = entries.find((b) => (b.extensions?.["slai.sldc.toc"]).id === choice.select.value);
+            if (!current)
+                return;
+            const meta = current.extensions?.["slai.sldc.toc"];
+            titleField.value = current.text;
+            depth.select.value = String(meta.depth);
+            preset.select.value = meta.preset ?? "standard";
+            pageNumbers.input.checked = meta.show_page_numbers !== false;
+            leaderDots.input.checked = meta.leader_dots !== false;
+            automatic.input.checked = meta.refresh_mode !== "manual";
+            fillEntry();
+        };
+        choice.select.addEventListener("change", fillSettings);
+        individual.select.addEventListener("change", fillEntry);
+        custom.input.addEventListener("change", updateEntryState);
+        fillSettings();
+        const handle = openDialog({ title: "Update table of contents", size: "narrow",
+            body: h("div", { class: "stack" }, choice.root, labelled("Title", titleField), depth.root, preset.root, pageNumbers.root, leaderDots.root, automatic.root, entryControls, notice("Refresh follows heading IDs, not heading text. Custom labels and level-specific paragraph typography survive refresh. Printed page references come from the PDF layout engine.", "info")),
+            actions: [{ label: "Remove TOC", run: async () => {
+                        const confirmed = await confirmDialog({ title: "Remove this table of contents?", message: "All generated TOC entries will be removed. Original headings and other document content will remain.", confirmLabel: "Remove TOC", danger: true });
+                        if (!confirmed)
+                            return undefined;
+                        try {
+                            await mutate(ctx, () => api.post(url(ctx, `contents/${encodeURIComponent(choice.select.value)}/remove`), {}));
+                            toast("Table of contents removed.", { kind: "ok" });
+                            return true;
+                        }
+                        catch (e) {
+                            toast(errorText(e), { kind: "error" });
+                            return undefined;
+                        }
+                    } }, { label: "Update", kind: "primary", run: async () => {
+                        try {
+                            const entry = individual.select.value ? { heading: individual.select.value,
+                                label: custom.input.checked ? label.value : null, hidden: hidden.input.checked } : undefined;
+                            await mutate(ctx, () => api.post(url(ctx, `contents/${encodeURIComponent(choice.select.value)}/refresh`), { title: titleField.value, depth: Number(depth.select.value), preset: preset.select.value, entry,
+                                showPageNumbers: pageNumbers.input.checked, leaderDots: leaderDots.input.checked,
+                                refreshMode: automatic.input.checked ? "automatic" : "manual" }));
+                            toast("Table of contents updated.", { kind: "ok" });
                             return true;
                         }
                         catch (e) {
@@ -278,7 +440,7 @@ export function createSourcesPanel(ctx) {
         }
     };
     fill(root, h("h2", { text: "Sources" }), h("p", { class: "fine", text: "Writer never invents a source. Each one shows who provided it and whether it was checked; only a DOI-registry match is shown as verified." }), h("div", { class: "actions" }, button("Add a source…", async () => { const id = await sourceDialog(ctx); if (id)
-        await paint(); }, "primary", "plus"), button("Cross-reference…", () => xrefDialog(ctx), "", "link")), h("div", { class: "actions" }, button("Insert reference list…", () => insertDialog("bibliography"), "", "book"), button("Insert contents…", () => insertDialog("contents"), "", "list")), list);
+        await paint(); }, "primary", "plus"), button("Cross-reference…", () => xrefDialog(ctx), "", "link")), h("div", { class: "actions" }, button("Insert reference list…", () => insertDialog("bibliography"), "", "book"), button("Insert contents…", () => insertDialog("contents"), "", "list"), button("Update contents…", () => updateContentsDialog(), "", "list")), list);
     void statusBadge;
     return { el: root, refresh: paint };
 }

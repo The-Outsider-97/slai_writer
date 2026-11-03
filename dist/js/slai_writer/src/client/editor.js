@@ -19,6 +19,8 @@ const NEW_ID = () => `b${uid().slice(0, 16)}`;
 const SIG = (b) => JSON.stringify([b.type, b.style, b.attributes, b.spans, b.table, b.figure, b.equation, b.embed, b.type === "table" || b.type === "figure" ? b.text : 0]);
 export class Editor {
     hooks;
+    /** Measured PDF layout, never the editor's approximate block-granular sheet positions. */
+    printLayout = null;
     model;
     queue;
     page;
@@ -35,6 +37,9 @@ export class Editor {
     reflowTimer;
     settleTimer;
     flushTimer;
+    printLayoutTimer;
+    tocRefreshTimer;
+    lastTocHeadingSignature = "";
     destroyed = false;
     stale = false;
     /** Formatting switched on with the caret in place (Ctrl+B with nothing selected): applied to the next text typed. */
@@ -46,10 +51,11 @@ export class Editor {
         this.model = new DocModel(state);
         const pageEvents = {
             rulerDouble: () => this.events.emit({ type: "ruler-double" }),
-            pageDouble: (section, xMm, yMm) => this.events.emit({ type: "page-double", section, xMm, yMm }),
+            pageDouble: (sheetIndex, section, xMm, yMm) => this.events.emit({ type: "page-double", sheetIndex, section, xMm, yMm }),
             margin: (section, side, mm) => { void this.setMargin(section, side, mm); },
             band: (section, edge, mm) => { void this.setBand(section, edge, mm); },
             guideMove: (axis, index, mm) => { void this.moveGuide(axis, index, mm); },
+            guideAdd: (axis, mm) => { void this.addGuide(axis, mm); },
         };
         this.page = new PageView(pageEvents, this.model.readOnly ? "false" : EDIT_MODE);
         this.decor = new Decor((id) => this.textEl(id));
@@ -63,9 +69,13 @@ export class Editor {
                 hf.footer = sec.footer;
             if (sec?.numbering)
                 hf.numbering = sec.numbering;
+            if (sec?.role)
+                hf.role = sec.role;
             return hf;
         });
         this.renderAll();
+        this.lastTocHeadingSignature = this.headingSignature();
+        this.schedulePrintLayout();
         document.addEventListener("selectionchange", this.onSelectionChange);
     }
     destroy() {
@@ -74,6 +84,8 @@ export class Editor {
         window.clearTimeout(this.reflowTimer);
         window.clearTimeout(this.settleTimer);
         window.clearTimeout(this.flushTimer);
+        window.clearTimeout(this.printLayoutTimer);
+        window.clearTimeout(this.tocRefreshTimer);
         this.decor.clear();
     }
     /** The last place the caret was inside the page. Panels, menus and dialogs take focus away, and commands still need to know where to act. */
@@ -174,7 +186,91 @@ export class Editor {
         if (this.selectedBlock)
             this.els.get(this.selectedBlock)?.setAttribute("data-selected", ""); // the block was drawn again: keep showing that it is selected
         this.decor.refresh();
+        this.paintTocNumbers();
         this.events.emit({ type: "layout" });
+    }
+    /** Exact TOC page labels are non-editable CSS decorations, not serialized text. */
+    paintTocNumbers() {
+        const labels = this.printLayout?.blockLabels ?? {};
+        const titles = new Map();
+        for (const block of this.model.list()) {
+            const toc = block.extensions?.["slai.sldc.toc"];
+            if (toc?.role === "title" && toc.id)
+                titles.set(toc.id, toc);
+        }
+        for (const element of this.els.values()) {
+            const heading = element.dataset["tocEntry"];
+            if (!heading)
+                continue;
+            const text = element.querySelector("[data-edit=text]");
+            if (!text)
+                continue;
+            const options = titles.get(element.dataset["tocId"] ?? "");
+            const label = options?.show_page_numbers === false ? "" : labels[heading] ?? "";
+            // Keep the editable text element's inline formatting and selection model
+            // untouched; page references are decorations on its block wrapper.
+            if (label)
+                element.dataset["tocPage"] = label;
+            else
+                delete element.dataset["tocPage"];
+            element.toggleAttribute("data-no-leaders", options?.leader_dots === false);
+        }
+    }
+    headingSignature() {
+        return JSON.stringify(this.model.list().filter((b) => b.type === "heading")
+            .map((b) => [b.id, b.text, b.attributes?.level ?? 1]));
+    }
+    /** Refresh only managed automatic TOCs after the heading outline actually changes.
+     * Each refresh is an ordinary server transaction and patch, so undo and local
+     * selections are preserved. Debouncing avoids regenerating on every keypress. */
+    scheduleTocRefresh() {
+        window.clearTimeout(this.tocRefreshTimer);
+        this.tocRefreshTimer = window.setTimeout(async () => {
+            if (this.destroyed || this.model.readOnly)
+                return;
+            await this.flush();
+            await this.queue.idle();
+            if (this.destroyed)
+                return;
+            const ids = this.model.list().flatMap((b) => {
+                const meta = b.extensions?.["slai.sldc.toc"];
+                return meta?.role === "title" && meta.refresh_mode !== "manual" && meta.id ? [meta.id] : [];
+            });
+            for (const id of ids) {
+                if (this.destroyed)
+                    return;
+                try {
+                    await this.call(() => api.post(`/docs/${encodeURIComponent(this.sid)}/contents/${encodeURIComponent(id)}/refresh`, {}), (result) => result.patch);
+                }
+                catch (error) {
+                    this.events.emit({ type: "error", error });
+                    return;
+                }
+            }
+        }, 1000);
+    }
+    /** Debounced PDF measurement: one native layout source for preview and TOC references. */
+    schedulePrintLayout() {
+        window.clearTimeout(this.printLayoutTimer);
+        this.printLayout = null;
+        this.paintTocNumbers();
+        this.printLayoutTimer = window.setTimeout(async () => {
+            if (this.destroyed || this.queue.pending) {
+                if (!this.destroyed)
+                    this.schedulePrintLayout();
+                return;
+            }
+            const version = this.model.version;
+            try {
+                const layout = await api.get(`/docs/${encodeURIComponent(this.sid)}/layout`);
+                if (this.destroyed || this.model.version !== version || layout.version !== version)
+                    return;
+                this.printLayout = layout;
+                this.paintTocNumbers();
+                this.events.emit({ type: "layout" });
+            }
+            catch { /* Local editing still works if Documaster is not installed. */ }
+        }, 1200);
     }
     scheduleReflow() {
         window.clearTimeout(this.reflowTimer);
@@ -410,6 +506,7 @@ export class Editor {
         this.dirty.clear();
         this.deferred.clear();
         this.model.load(fresh);
+        this.lastTocHeadingSignature = this.headingSignature();
         this.stale = false;
         this.renderAll();
         this.restoreSelection(saved);
@@ -435,6 +532,11 @@ export class Editor {
     applyExternalPatch(patch) { this.afterPatch(patch, { op: "external" }, false); }
     afterPatch(patch, op, local) {
         const { changed, removed, reordered, documentChanged } = this.model.applyPatch(patch);
+        const headingSignature = this.headingSignature();
+        if (headingSignature !== this.lastTocHeadingSignature) {
+            this.lastTocHeadingSignature = headingSignature;
+            this.scheduleTocRefresh();
+        }
         this.invalidate();
         const ctx = this.ctx();
         let relayout = reordered || documentChanged;
@@ -518,6 +620,7 @@ export class Editor {
         if (documentChanged || relayout)
             this.decor.refresh();
         this.events.emit({ type: "patch", patch, local });
+        this.schedulePrintLayout();
         void op;
     }
     /** Re-render one block in place and put the caret back where it was. */
@@ -578,14 +681,39 @@ export class Editor {
         }
     }
     async moveGuide(axis, index, mm) {
+        if (this.readOnly)
+            return;
         const guides = { v: [...(this.model.ext.guides?.v ?? [])], h: [...(this.model.ext.guides?.h ?? [])] };
         const list = guides[axis];
+        if (index < 0 || index >= list.length)
+            return;
+        const g = this.model.geometry();
+        const limit = axis === "v" ? g.widthMm : g.heightMm;
+        if (mm !== null && (!Number.isFinite(mm) || mm < 0 || mm > limit))
+            return;
         if (mm === null)
             list.splice(index, 1);
         else
             list[index] = Math.round(mm * 2) / 2;
         try {
             await this.op({ op: "ext_set", values: { guides: guides.v.length || guides.h.length ? guides : null }, label: "guides" });
+        }
+        catch (e) {
+            this.failed(e);
+        }
+    }
+    async addGuide(axis, mm) {
+        if (!Number.isFinite(mm) || this.readOnly)
+            return;
+        const g = this.model.geometry();
+        if (mm < 0 || mm > (axis === "v" ? g.widthMm : g.heightMm))
+            return;
+        const guides = { v: [...(this.model.ext.guides?.v ?? [])], h: [...(this.model.ext.guides?.h ?? [])] };
+        if (guides[axis].length >= 200)
+            return;
+        guides[axis].push(Math.round(mm * 2) / 2);
+        try {
+            await this.op({ op: "ext_set", values: { guides }, label: "add guide" });
         }
         catch (e) {
             this.failed(e);
@@ -599,6 +727,50 @@ export class Editor {
         catch (e) {
             this.failed(e);
         }
+    }
+    /** Begin the next ordinary flow paragraph at a blank-page double-click.
+     * Uses existing paragraph indentation and leading space (both SLDC and PDF
+     * supported), never absolute CSS or a run of blank paragraphs. As preceding
+     * content changes, this remains a flow paragraph rather than a fixed frame. */
+    async placeTextAt(sheetIndex, xMm, yMm) {
+        if (this.readOnly || !Number.isFinite(xMm) || !Number.isFinite(yMm))
+            return false;
+        const sheet = this.page.sheets[sheetIndex];
+        if (!sheet)
+            return false;
+        const { widthMm, heightMm, margins } = sheet.geometry;
+        if (xMm < margins.left || xMm > widthMm - margins.right - 5 ||
+            yMm < margins.top || yMm > heightMm - margins.bottom - 5)
+            return false;
+        const last = sheet.blocks[sheet.blocks.length - 1];
+        if (!last)
+            return false;
+        const lastId = last.dataset["id"];
+        const block = lastId ? this.model.block(lastId) : undefined;
+        if (!block)
+            return false;
+        const reuseEmpty = block.type === "paragraph" && block.text.length === 0 && !block.spans?.length;
+        const previous = reuseEmpty ? sheet.blocks[sheet.blocks.length - 2] : last;
+        const sheetRect = sheet.el.getBoundingClientRect();
+        const previousBottom = previous ? (previous.getBoundingClientRect().bottom - sheetRect.top) / this.page.zoom / MM_PX : margins.top;
+        // A paragraph cannot be moved on top of earlier content. A positive gap
+        // is a genuine paragraph-space-before value, not artificial newlines.
+        if (yMm < previousBottom + (previous ? 2 : 0))
+            return false;
+        const before = Math.round(Math.max(0, yMm - previousBottom) * 72 / 25.4 * 10) / 10;
+        const indent = Math.round((xMm - margins.left) * 10) / 10;
+        const attrs = { space_before_pt: before, indent_mm: indent };
+        const guides = { v: [...(this.model.ext.guides?.v ?? []), Math.round(xMm * 2) / 2],
+            h: [...(this.model.ext.guides?.h ?? []), Math.round(yMm * 2) / 2] };
+        const newId = reuseEmpty ? lastId : NEW_ID();
+        if (!newId)
+            return false;
+        const edit = reuseEmpty
+            ? { op: "block_set", block: lastId, attributes: attrs }
+            : { op: "block_insert", after: lastId, block: { id: newId, type: "paragraph", text: "", attributes: attrs, ...(sheet.section ? { section: sheet.section } : {}) } };
+        await this.op({ op: "batch", ops: [edit, { op: "ext_set", values: { guides } }], label: "position paragraph with guides" });
+        this.focusBlock(newId, 0);
+        return true;
     }
     setCursors(prefs, custom) {
         const css = (value, fallback) => {

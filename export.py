@@ -43,9 +43,9 @@ LOSSY = {
     "xml": ["XML is a structural dump of the text, not a layout.", *COMMON_LOSS],
 }
 IMPORT_LOSS = {
-    "pdf": "Text was read from the PDF. Page layout, fonts, columns and figures are not reconstructed, and scanned pages need OCR (not applied unless you ask).",
-    "docx": "Text, headings, lists and tables were read. Page layout, fonts and anything the converter does not model are not carried over.",
-    "doc": "The old Word format was converted with LibreOffice first (when installed); layout and fonts are not carried over.",
+    "pdf": "Editable layout is reconstructed where possible: positioned fonts, pages, repeated headers/footers and detected tables when PyMuPDF is installed. Results are approximate; complex columns, artwork, underlining and scanned pages may need review or OCR.",
+    "docx": "Editable fonts, sizes, paragraphs, tables, page margins, and headers/footers are preserved where supported. Floating objects, text boxes and some Word-specific layout features may require review.",
+    "doc": "The old Word format is converted through LibreOffice first (when available). Formatting is preserved only to the extent supported by the resulting DOCX conversion.",
     "odt": "Text, headings, lists and tables were read. Page layout and fonts are not carried over.",
     "rtf": "Basic text and formatting were read through LibreOffice (when installed); layout is not carried over.",
     "html": "Text and structure were read; scripts, styles from the web page and layout are ignored.",
@@ -86,7 +86,7 @@ def available_formats(docmaster: Any) -> dict[str, Any]:
         why = None if ok else reason
         if ok and f in ("doc", "rtf") and not soffice:
             ok, why = False, "Reading this older format needs LibreOffice, which is not installed."
-        if ok and f in ("md", "txt", "html", "xml", "csv", "pdf") and not _parser_ready(docmaster):
+        if ok and f in ("md", "txt", "html", "xml", "csv") and not _parser_ready(docmaster):
             ok, why = False, "Reading this format needs SLAI Reader's parser engine, which could not be loaded."
         imports.append({"id": f, "label": LABELS.get(f, f), "available": ok, "reason": why, "note": IMPORT_LOSS.get(f, "")})
     return {"export": export, "import": imports, "documaster": docmaster.status(), "libreoffice": soffice}

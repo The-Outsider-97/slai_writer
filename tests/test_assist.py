@@ -1,6 +1,7 @@
 """Assistance tests. SLAI's SpellChecker, language agent and Privacy agent cannot be loaded in every environment, so these tests use
 *contract doubles* with the same public methods Writer calls, and verify Writer's own behaviour around them: permissions, scoping,
 revision binding, review-before-apply, reversibility and honest failure. They do not claim anything about the quality of SLAI's models."""
+import os
 import threading
 import time
 import types
@@ -12,7 +13,7 @@ from applications.slai_writer.assist import Assist
 from applications.slai_writer.docmaster import DocumasterLink
 from .helpers import Workbench
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(os.environ["SLAI_ROOT"]).resolve() if os.environ.get("SLAI_ROOT") else Path(__file__).resolve().parents[3]
 
 
 class FakeSuggestion:
@@ -142,9 +143,23 @@ class AssistTests(Workbench):
         a = Assist(self.app, gateway=FakeGateway(agent))
         with self.assertRaises(Forbidden):
             a.propose(self.make(), {"kind": "document"}, "shorten", None)
-        with self.assertRaises(Forbidden):
-            a.grammar(self.make())
+        # Local proofreading is not generative AI and does not require the
+        # assistant permission setting. Its corrections remain suggestions.
+        result = a.grammar(self.make())
+        self.assertTrue(result["available"])
         self.assertEqual(agent.prompts, [])
+
+    @unittest.skipUnless(os.environ.get("SLAI_REAL_GRAMMAR_TEST") == "1", "set SLAI_REAL_GRAMMAR_TEST=1 for integration with the installed Language Agent")
+    def test_real_grammar_is_local_without_ai_permission(self):
+        """End-to-end adapter test using actual SLAI NLP and grammar rules."""
+        self.prefs["ai_enabled"] = False
+        text = "The components is connected."
+        session = self.make(text)
+        result = Assist(self.app).grammar(session)
+        self.assertTrue(result["available"])
+        fixes = [issue for issue in result["issues"] if issue["replacement"] == "are"]
+        self.assertEqual(len(fixes), 1)
+        self.assertEqual(text[fixes[0]["start"]:fixes[0]["end"]], "is")
 
     def test_only_local_provider_exists(self):
         a = Assist(self.app, gateway=FakeGateway(FakeAgent("x")))

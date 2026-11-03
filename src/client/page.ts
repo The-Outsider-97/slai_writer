@@ -6,7 +6,7 @@
 import { h, s, glyph, openMenu, promptDialog } from "./kit.js";
 import { MM_PX, roman } from "./textops.js";
 import type { PageGeometry } from "./model.js";
-import type { GuideSet, HeaderFooter, Margins } from "./types.js";
+import type { BandTextFormat, GuideSet, HeaderFooter, Margins } from "./types.js";
 
 export interface LayoutBlock { id: string; el: HTMLElement; section: string | undefined; pageBreak?: boolean; footnotes: Array<{ n: number; text: string }> }
 
@@ -328,14 +328,24 @@ export class PageView {
       const band = (edge: "header" | "footer", spec: HeaderFooter | undefined): HTMLElement | null => {
         if (!spec || (!spec.left && !spec.center && !spec.right)) return null;
         const cell = (part: "left" | "center" | "right", cls: string): HTMLElement => {
-          const node = h("span", { class: cls, text: fillTemplate(spec[part] ?? "", values) });
-          const format = spec.formats?.[part];
-          if (format?.font_family) node.style.fontFamily = format.font_family;
-          if (format?.font_size_pt) node.style.fontSize = `${format.font_size_pt}pt`;
-          if (format?.color) node.style.color = format.color;
-          if (format?.bold !== undefined) node.style.fontWeight = format.bold ? "bold" : "normal";
-          if (format?.italic !== undefined) node.style.fontStyle = format.italic ? "italic" : "normal";
-          if (format?.underline !== undefined) node.style.textDecoration = format.underline ? "underline" : "none";
+          const node = h("span", { class: cls });
+          const paint = (target: HTMLElement, format: BandTextFormat | undefined): void => {
+            if (format?.font_family) target.style.fontFamily = format.font_family;
+            if (format?.font_size_pt) target.style.fontSize = `${format.font_size_pt}pt`;
+            if (format?.color) target.style.color = format.color;
+            if (format?.bold !== undefined) target.style.fontWeight = format.bold ? "bold" : "normal";
+            if (format?.italic !== undefined) target.style.fontStyle = format.italic ? "italic" : "normal";
+            if (format?.underline !== undefined) target.style.textDecoration = format.underline ? "underline" : "none";
+          };
+          paint(node, spec.formats?.[part]);
+          const fragments = spec.runs?.[part];
+          if (fragments?.length && fragments.map((x) => x.text).join("") === (spec[part] ?? "")) {
+            for (const fragment of fragments) {
+              const span = h("span", { text: fillTemplate(fragment.text, values) });
+              paint(span, fragment.format);
+              node.appendChild(span);
+            }
+          } else node.textContent = fillTemplate(spec[part] ?? "", values);
           return node;
         };
         const row = h("div", { class: `hf ${edge}`, attrs: { contenteditable: "false", "data-edge": edge } },

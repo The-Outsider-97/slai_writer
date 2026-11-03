@@ -380,9 +380,28 @@ def op_span(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
             tm.set_span(block, start, end, "style", style=name)
         elif kind == "ref":
             ref = _s(op, "ref")
-            if not any(r["id"] == ref for r in tr.doc.get("references", [])):
+            references = {r["id"] for r in tr.doc.get("references", [])}
+            if ref not in references:
                 raise OpError(f"There is no reference '{ref}'")
-            tm.set_span(block, start, end, "ref", ref=ref)
+            extras: dict[str, Any] = {}
+            if "refs" in op:
+                group = op["refs"]
+                if not isinstance(group, list) or not 1 <= len(group) <= 20 or group[0] != ref or len(set(group)) != len(group):
+                    raise OpError("A citation group must contain 1–20 unique source IDs")
+                if not all(r in references for r in group):
+                    raise OpError("A citation group contains an unknown source")
+                extras["refs"] = group
+            if "mode" in op:
+                if op["mode"] not in ("parenthetical", "narrative"):
+                    raise OpError("Citation mode must be narrative or parenthetical")
+                extras["mode"] = op["mode"]
+            if "locator" in op:
+                extras["locator"] = _s(op, "locator", limit=100)
+            if "label" in op:
+                if op["label"] not in ("page", "chapter", "paragraph", "section", "figure", "table", "timestamp"):
+                    raise OpError("Unknown citation locator kind")
+                extras["label"] = op["label"]
+            tm.set_span(block, start, end, "ref", ref=ref, **extras)
         elif kind == "xref":
             target = _s(op, "target")
             tr.peek(target)
@@ -610,7 +629,11 @@ def op_table_cell(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     grid = _plain_grid(table)
     if row >= len(grid) or col >= len(grid[row]):
         raise OpError("That table cell does not exist")
-    grid[row][col]["text"] = text
+    if grid[row][col]["text"] != text:
+        grid[row][col]["text"] = text
+        # The table editor currently replaces a complete cell. Keeping old
+        # character offsets would attach styling to the wrong characters.
+        grid[row][col].pop("spans", None)
     return {}
 
 
@@ -979,9 +1002,9 @@ def op_reference_delete(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     rid = _s(op, "id")
     refs = [r for r in copy.deepcopy(tr.key("references") or []) if r["id"] != rid]
     for block in tr.doc["blocks"]:                              # spans that cite it go too (so the document stays valid)
-        if any(s.get("type") == "ref" and s.get("ref") == rid for s in block.get("spans", ())):
+        if any(s.get("type") == "ref" and rid in s.get("refs", [s.get("ref")]) for s in block.get("spans", ())):
             b = tr.get(block["id"])
-            b["spans"] = [s for s in b["spans"] if not (s.get("type") == "ref" and s.get("ref") == rid)]
+            b["spans"] = [s for s in b["spans"] if not (s.get("type") == "ref" and rid in s.get("refs", [s.get("ref")]))]
             if not b["spans"]:
                 b.pop("spans")
     tr.set_key("references", refs or None)

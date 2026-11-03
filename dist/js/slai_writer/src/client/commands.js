@@ -43,6 +43,11 @@ export const COMMANDS = [
     { id: "h4", label: "Heading 4", group: "Paragraph", icon: "heading", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "heading", { level: 4 }) },
     { id: "h5", label: "Heading 5", group: "Paragraph", icon: "heading", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "heading", { level: 5 }) },
     { id: "h6", label: "Heading 6", group: "Paragraph", icon: "heading", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "heading", { level: 6 }) },
+    ...["Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"].map((name) => ({
+        id: `style-${name.toLowerCase().replaceAll(" ", "-")}`, label: name, group: "Paragraph",
+        keywords: "front matter document title cover style", unavailable: needsCaret,
+        run: (c) => A.applyNamedStyle(c.ed, name),
+    })),
     { id: "paragraph", label: "Normal text", group: "Paragraph", icon: "paragraph", keywords: "body plain", shortcut: "Ctrl+Alt+0", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "paragraph") },
     { id: "bullets", label: "Bulleted list", group: "Paragraph", icon: "list", keywords: "unordered", shortcut: "Ctrl+Shift+8", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "list_item", { ordered: false, depth: 0 }) },
     { id: "numbered", label: "Numbered list", group: "Paragraph", icon: "list-ordered", keywords: "ordered", shortcut: "Ctrl+Shift+7", unavailable: needsCaret, run: (c) => A.setBlockType(c.ed, "list_item", { ordered: true, depth: 0 }) },
@@ -68,6 +73,9 @@ export const COMMANDS = [
     { id: "sources", label: "Sources and bibliography", group: "Insert", icon: "book", keywords: "references bibliography doi contents", run: (c) => c.ui.openPanel("yellow", "sources") },
     { id: "page-break", label: "New page (page break)", group: "Insert", icon: "page", keywords: "new page add page break", shortcut: "Ctrl+Enter", unavailable: needsCaret, run: (c) => A.newPage(c.ed) },
     { id: "section-break", label: "New section (section break)", group: "Insert", icon: "pages", keywords: "new section chapter add section break", shortcut: "Ctrl+Alt+Enter", unavailable: needsCaret, run: (c) => A.sectionBreak(c.ed) },
+    { id: "cover-insert", label: "Insert cover page", group: "Insert", icon: "page", keywords: "cover title page front matter", unavailable: (c) => EDITING(c) ?? (c.ed.model.meta.sections?.some((s) => s.role === "cover") ? "This document already has a cover page." : null), run: (c) => A.insertCoverPage(c.ed) },
+    { id: "cover-convert", label: "Convert first page into cover", group: "Document", icon: "page", keywords: "cover front page existing", unavailable: (c) => EDITING(c) ?? (c.ed.model.meta.sections?.some((s) => s.role === "cover") ? "This document already has a cover page." : null), run: (c) => A.convertFirstPageToCover(c.ed) },
+    { id: "cover-remove", label: "Remove cover designation (keep content)", group: "Document", icon: "page", keywords: "unmark cover keep content", unavailable: (c) => EDITING(c) ?? (!c.ed.model.meta.sections?.some((s) => s.role === "cover") ? "There is no cover page." : null), run: (c) => A.removeCoverDesignation(c.ed) },
     { id: "comment", label: "Comment…", group: "Insert", icon: "comment", keywords: "review discuss", shortcut: "Ctrl+Alt+M", unavailable: needsCaret, run: (c) => addComment(c) },
     { id: "note", label: "Private note…", group: "Insert", icon: "sticky", keywords: "annotation", unavailable: (c) => (c.ed.recallSelection() ? null : "Place the cursor in the text first."), run: async (c) => { await addNoteAtSelection(c); } },
     { id: "embed", label: "EMBED component…", group: "Insert", icon: "layers", keywords: "declarative component calculation", unavailable: EDITING, run: (c) => embedNew(c) },
@@ -90,6 +98,16 @@ export const COMMANDS = [
     { id: "zoom-100", label: "Zoom 100%", group: "View", shortcut: "Ctrl+0", run: (c) => c.ui.setZoom(100) },
     { id: "rulers", label: "Show or hide rulers", group: "View", icon: "ruler", run: (c) => toggleView(c, "show_rulers") },
     { id: "guides", label: "Show or hide margin and guide lines", group: "View", run: (c) => toggleView(c, "show_guides") },
+    { id: "guide-vertical", label: "Add a vertical guide", group: "View", keywords: "page layout ruler guide vertical", unavailable: EDITING,
+        run: (c) => {
+            const g = c.ed.model.geometry(c.ed.model.block(c.ed.recallSelection()?.start.block ?? "")?.section);
+            return c.ed.addGuide("v", (g.margins.left + g.widthMm - g.margins.right) / 2);
+        } },
+    { id: "guide-horizontal", label: "Add a horizontal guide", group: "View", keywords: "page layout ruler guide horizontal", unavailable: EDITING,
+        run: (c) => {
+            const g = c.ed.model.geometry(c.ed.model.block(c.ed.recallSelection()?.start.block ?? "")?.section);
+            return c.ed.addGuide("h", (g.margins.top + g.heightMm - g.margins.bottom) / 2);
+        } },
     { id: "clear-guides", label: "Remove all guides", group: "View", unavailable: (c) => EDITING(c) ?? ((c.ed.model.ext.guides?.v?.length ?? 0) + (c.ed.model.ext.guides?.h?.length ?? 0) ? null : "There are no guides."), run: async (c) => { await c.ed.op({ op: "ext_set", values: { guides: null }, label: "guides" }); } },
     { id: "hide", label: "Hide or reveal (dim everything except the page)", group: "View", icon: "eye", keywords: "privacy blur cover", run: (c) => c.ui.toggleHidden() },
     { id: "layer-new", label: "New layer", group: "Document", icon: "layers", keywords: "add layer", shortcut: "Ctrl+Alt+Shift+N", unavailable: EDITING, run: async (c) => { const id = await A.newLayer(c.ed); if (id)

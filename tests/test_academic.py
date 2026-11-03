@@ -3,6 +3,7 @@ import unittest
 
 from applications.tools.errors import BadRequest, DependencyMissing, NotFound
 from applications.slai_writer.academic import Academic, clean_entry, in_text, reference_line, FOOTNOTE_ANCHOR
+from applications.slai_writer.citation_engine import CitationEngine
 from applications.slai_writer.session import sldc
 from .helpers import Workbench
 
@@ -128,6 +129,98 @@ class AcademicTests(Workbench):
         text = self.s.plain_text()
         self.assertIn("Deep learning for document layout", text)
         self.assertNotIn("Never cited", text)
+
+    def test_apa7_csl_narrative_locator_group_and_reference_italics(self):
+        try:
+            import citeproc  # noqa: F401 - optional standards-based formatter
+        except ImportError:
+            self.skipTest("citeproc-py is an optional dependency")
+        first = self.add(source_type="article-journal")["id"]
+        second = self.add(title="Second research report", authors=["Remy, Jean-Erolle"],
+                          source_type="report", doi="", publisher="SLAI Research")["id"]
+        self.ac.cite(self.s, self.block, 0, first, mode="narrative", locator="42")
+        self.assertIn("Smith and Jones (2020, p. 42)", self.s.doc["blocks"][-1]["text"])
+        block = self.s.doc["blocks"][-1]
+        self.ac.cite(self.s, self.block, len(block["text"]), first, sources=[first, second])
+        spans = [s for s in self.s.doc["blocks"][-1]["spans"] if s["type"] == "ref"]
+        self.assertEqual(spans[-1]["refs"], [first, second])
+        results = self.ac.bibliography(self.s, after=self.block)
+        self.assertEqual(results["entries"], 2)
+        entries = [b for b in self.s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.references", {}).get("role") == "entry"]
+        self.assertTrue(any(any(s.get("italic") for s in b.get("spans", [])) for b in entries))
+        sldc().validate_package(self.s.pkg)
+
+    def test_same_author_year_uses_deterministic_apa_suffixes_in_cites_and_references(self):
+        try:
+            import citeproc  # noqa: F401
+        except ImportError:
+            self.skipTest("citeproc-py is an optional dependency")
+        first = self.add(title="Alpha systems", source_type="article-journal")["id"]
+        self.ac.cite(self.s, self.block, 0, first)
+        second = self.add(title="Beta systems", source_type="article-journal", doi="10.1000/xyz124")["id"]
+        # Adding the second source rerenders the previous linked mark, and
+        # creating a new citation uses the same suffix assignment.
+        self.assertIn("(Smith & Jones, 2020a)", self.s.doc["blocks"][-1]["text"])
+        self.ac.cite(self.s, self.block, 0, second)
+        self.assertIn("(Smith & Jones, 2020b)", self.s.doc["blocks"][-1]["text"])
+        self.ac.bibliography(self.s, after=self.block)
+        entries = [b["text"] for b in self.s.doc["blocks"]
+                   if b.get("extensions", {}).get("slai.sldc.references", {}).get("role") == "entry"]
+        self.assertEqual(len(entries), 2)
+        self.assertTrue(any("(2020a)" in text for text in entries))
+        self.assertTrue(any("(2020b)" in text for text in entries))
+
+    def test_references_start_on_new_page_with_apa_spacing_and_hanging_indent(self):
+        sid = self.add()["id"]
+        self.ac.cite(self.s, self.block, 0, sid)
+        out = self.ac.bibliography(self.s, after=self.block)
+        title = next(b for b in self.s.doc["blocks"] if b["id"] == out["heading"])
+        self.assertTrue(title["attributes"]["page_break_before"])
+        self.assertEqual(title["attributes"]["align"], "center")
+        self.assertTrue(title["spans"][0]["bold"])
+        rows = [b for b in self.s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.references", {}).get("role") == "entry"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["attributes"]["line_height"], 2)
+        self.assertEqual(rows[0]["attributes"]["indent_mm"], 12.7)
+        self.assertEqual(rows[0]["attributes"]["first_line_indent_mm"], -12.7)
+        self.assertEqual(sldc().loads_package(self.s.to_bytes()).document["blocks"][-2]["id"], title["id"])
+
+    def test_regenerating_references_keeps_one_heading_and_is_undoable(self):
+        first = self.add()["id"]
+        self.ac.cite(self.s, self.block, 0, first)
+        a = self.ac.bibliography(self.s, after=self.block)
+        second = self.add(title="Another real study", year="2021")["id"]
+        self.ac.cite(self.s, self.block, 0, second)
+        b = self.ac.bibliography(self.s, after=self.block)
+        self.assertEqual(a["heading"], b["heading"])
+        managed = [x for x in self.s.doc["blocks"] if x.get("extensions", {}).get("slai.sldc.references")]
+        self.assertEqual(len([x for x in managed if x["extensions"]["slai.sldc.references"]["role"] == "title"]), 1)
+        self.assertEqual(len(managed), 3)
+        self.s.undo(None)
+        self.assertEqual(len([x for x in self.s.doc["blocks"] if x.get("extensions", {}).get("slai.sldc.references")]), 2)
+
+    def test_editing_source_updates_linked_citation_and_managed_references(self):
+        sid = self.add()["id"]
+        self.ac.cite(self.s, self.block, 0, sid)
+        self.ac.bibliography(self.s, after=self.block)
+        self.ac.put_source(self.s, {"title": "Deep learning for document layout", "authors": ["Smith, Ann", "Jones, Bo"],
+                                    "year": "2021", "doi": "10.1000/xyz123"}, source_id=sid)
+        source_block = next(b for b in self.s.doc["blocks"] if b["id"] == self.block)
+        self.assertTrue(source_block["text"].startswith("(Smith & Jones, 2021)"))
+        self.assertTrue(any(sp.get("ref") == sid for sp in source_block.get("spans", [])))
+        rows = [b for b in self.s.doc["blocks"] if b.get("extensions", {}).get("slai.sldc.references", {}).get("role") == "entry"]
+        self.assertEqual(len(rows), 1)
+        self.assertIn("2021", rows[0]["text"])
+        sldc().validate_package(self.s.pkg)
+
+    def test_remove_references_preserves_sources_and_citation_spans(self):
+        sid = self.add()["id"]
+        self.ac.cite(self.s, self.block, 0, sid)
+        self.ac.bibliography(self.s, after=self.block)
+        result = self.ac.remove_bibliography(self.s)
+        self.assertEqual(result["removed"], 2)
+        self.assertEqual(len(self.s.doc["references"]), 1)
+        self.assertTrue(any(sp.get("ref") == sid for b in self.s.doc["blocks"] for sp in b.get("spans", [])))
 
     def test_ai_marked_source_blocks_a_clean_export_check(self):
         sid = self.ac.put_source(self.s, {"title": "Maybe real"}, status="ai")["id"]

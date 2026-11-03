@@ -4,6 +4,7 @@ import { announce, h, labelled, openDialog, toast } from "./kit.js";
 import * as A from "./actions.js";
 import { errorText, rawPost } from "./net.js";
 import { PAGE_MM } from "./textops.js";
+import { FONT_FAMILIES } from "./font_rules.js";
 import { checkbox, errorLine, notice, selectField } from "./widgets.js";
 /* ------------------------------------------------------------------------------------------------------ helpers */
 function numberInput(value, min, max, step = 1) {
@@ -37,15 +38,138 @@ export async function headerFooterDialog(ctx) {
     const field = (value, label) => { const i = h("input", { type: "text", value: value ?? "", maxLength: 200, attrs: { "aria-label": label } }); return i; };
     const hl = field(target.header?.left, "Header, left"), hc = field(target.header?.center, "Header, centre"), hr = field(target.header?.right, "Header, right");
     const fl = field(target.footer?.left, "Footer, left"), fc = field(target.footer?.center, "Footer, centre"), fr = field(target.footer?.right, "Footer, right");
-    const start = numberInput(Number(target.numbering?.start ?? 1), 1, 99999);
+    // Each header/footer position owns its own typography. The six saved
+    // positions are edited through one compact set of the standard font fields.
+    const positions = ["left", "center", "right"];
+    const formats = {
+        header: structuredClone(target.header?.formats ?? {}), footer: structuredClone(target.footer?.formats ?? {}),
+    };
+    const runs = {
+        header: structuredClone(target.header?.runs ?? {}), footer: structuredClone(target.footer?.runs ?? {}),
+    };
+    const fields = {
+        header: { left: hl, center: hc, right: hr }, footer: { left: fl, center: fc, right: fr },
+    };
+    for (const edge of ["header", "footer"])
+        for (const pos of positions) {
+            fields[edge][pos].addEventListener("input", () => { delete runs[edge][pos]; });
+        }
+    const choice = selectField("Format text in", [["header:left", "Header — left"], ["header:center", "Header — centre"], ["header:right", "Header — right"],
+        ["footer:left", "Footer — left"], ["footer:center", "Footer — centre"], ["footer:right", "Footer — right"]], "header:left");
+    const fontFamily = h("input", { type: "text", maxLength: 100, attrs: { list: "writer-font-families", "aria-label": "Header or footer font family", placeholder: "Default font" } });
+    const fonts = h("datalist", { attrs: { id: "writer-header-footer-fonts" } }, FONT_FAMILIES.map((name) => h("option", { value: name })));
+    fontFamily.setAttribute("list", "writer-header-footer-fonts");
+    const fontSize = h("input", { type: "number", min: 4, max: 400, step: 0.5, attrs: { "aria-label": "Header or footer font size", placeholder: "Default" } });
+    const fontColor = h("input", { type: "color", value: "#000000", attrs: { "aria-label": "Header or footer font color" } });
+    const useColor = checkbox("Custom font color", false);
+    const isBold = checkbox("Bold", false), isItalic = checkbox("Italic", false), isUnderlined = checkbox("Underline", false);
+    let selected = ["header", "left"];
+    const storeFormat = () => {
+        const [band, position] = selected;
+        const out = {};
+        const family = fontFamily.value.trim();
+        if (family)
+            out.font_family = family;
+        if (fontSize.value)
+            out.font_size_pt = Number(fontSize.value);
+        if (useColor.input.checked)
+            out.color = fontColor.value;
+        if (isBold.input.checked)
+            out.bold = true;
+        if (isItalic.input.checked)
+            out.italic = true;
+        if (isUnderlined.input.checked)
+            out.underline = true;
+        if (Object.keys(out).length)
+            formats[band][position] = out;
+        else
+            delete formats[band][position];
+    };
+    const selectedFormat = () => {
+        const style = {};
+        if (fontFamily.value.trim())
+            style.font_family = fontFamily.value.trim();
+        if (fontSize.value)
+            style.font_size_pt = Number(fontSize.value);
+        if (useColor.input.checked)
+            style.color = fontColor.value;
+        if (isBold.input.checked)
+            style.bold = true;
+        if (isItalic.input.checked)
+            style.italic = true;
+        if (isUnderlined.input.checked)
+            style.underline = true;
+        return style;
+    };
+    const applySelected = h("button", { type: "button", class: "btn", text: "Apply font to selected characters" });
+    applySelected.addEventListener("click", () => {
+        const [edge, pos] = selected;
+        const input = fields[edge][pos];
+        const start = input.selectionStart ?? 0, end = input.selectionEnd ?? 0;
+        if (start >= end) {
+            toast("First select characters inside the chosen header/footer text field.", { kind: "info" });
+            input.focus();
+            return;
+        }
+        const content = input.value;
+        const existing = runs[edge][pos]?.map((r) => ({ text: r.text, format: r.format })) ?? [{ text: content }];
+        const base = existing.map((r) => r.text).join("") === content ? existing : [{ text: content }];
+        const changed = [];
+        let cursor = 0;
+        for (const item of base) {
+            const stop = cursor + item.text.length;
+            const a = Math.max(start, cursor), b = Math.min(end, stop);
+            if (a > cursor)
+                changed.push({ text: item.text.slice(0, a - cursor), ...(item.format ? { format: item.format } : {}) });
+            if (b > a)
+                changed.push({ text: item.text.slice(a - cursor, b - cursor), format: { ...item.format, ...selectedFormat() } });
+            if (stop > Math.max(b, cursor))
+                changed.push({ text: item.text.slice(Math.max(b, cursor) - cursor), ...(item.format ? { format: item.format } : {}) });
+            cursor = stop;
+        }
+        if (changed.length > 200) {
+            toast("Too many separately formatted ranges in this field.", { kind: "error" });
+            return;
+        }
+        runs[edge][pos] = changed.filter((r) => r.text);
+        toast("Character formatting will be saved when you click Apply.", { kind: "ok" });
+    });
+    const loadFormat = () => {
+        const stored = formats[selected[0]][selected[1]] ?? {};
+        fontFamily.value = stored.font_family ?? "";
+        fontSize.value = stored.font_size_pt?.toString() ?? "";
+        useColor.input.checked = !!stored.color;
+        fontColor.value = /^#[0-9a-fA-F]{6}$/.test(stored.color ?? "") ? stored.color : "#000000";
+        fontColor.disabled = !useColor.input.checked;
+        isBold.input.checked = !!stored.bold;
+        isItalic.input.checked = !!stored.italic;
+        isUnderlined.input.checked = !!stored.underline;
+    };
+    choice.select.addEventListener("change", () => { storeFormat(); selected = choice.select.value.split(":"); loadFormat(); });
+    useColor.input.addEventListener("change", () => { fontColor.disabled = !useColor.input.checked; });
+    loadFormat();
+    const start = numberInput(target.numbering?.start ?? 1, 1, 99999);
+    const restart = checkbox("Restart numbering in this section", target.numbering?.start !== undefined);
+    const visible = checkbox("Show printed page numbers", target.role !== "cover" && target.numbering?.show !== false);
+    restart.input.addEventListener("change", () => { start.disabled = !restart.input.checked; });
+    start.disabled = !restart.input.checked;
     const format = selectField("Page number style", [["decimal", "1, 2, 3"], ["lower-roman", "i, ii, iii"], ["upper-roman", "I, II, III"], ["lower-alpha", "a, b, c"], ["upper-alpha", "A, B, C"]], String(target.numbering?.format ?? "decimal"));
     const all = sections.length > 1 ? checkbox("Apply to every section", false) : null;
     const row = (title, a, b, c) => h("fieldset", { class: "hf-row" }, h("legend", { text: title }), h("div", { class: "grid-3" }, labelled("Left", a), labelled("Centre", b), labelled("Right", c)));
-    const body = h("div", { class: "stack" }, sections.length > 1 ? h("p", { class: "muted", text: `Editing ${sectionLabel(sections, sectionId)}.` }) : null, notice("Use {page} for the page number, {pages} for the page count and {title} for the document title. These are filled in when the document is printed or exported; the on-screen page count is approximate.", "info"), row("Header", hl, hc, hr), row("Footer", fl, fc, fr), h("div", { class: "grid-2" }, labelled("First page number", start), format.root), all?.root ?? null);
+    const body = h("div", { class: "stack" }, sections.length > 1 ? h("p", { class: "muted", text: `Editing ${sectionLabel(sections, sectionId)}.` }) : null, notice("Use {page} for the page number, {pages} for the page count and {title} for the document title. These are filled in when the document is printed or exported; the on-screen page count is approximate.", "info"), row("Header", hl, hc, hr), row("Footer", fl, fc, fr), h("fieldset", { class: "hf-row" }, h("legend", { text: "Header and footer typography" }), h("p", { class: "fine", text: "Each left, centre and right field can have its own font, size, colour and emphasis. Leave font fields blank to keep the default." }), choice.root, fonts, h("div", { class: "grid-3" }, labelled("Font family", fontFamily), labelled("Size (pt)", fontSize), labelled("Color", fontColor)), h("div", { class: "actions" }, useColor.root, isBold.root, isItalic.root, isUnderlined.root), h("p", { class: "fine", text: "To mix fonts in one field, select characters in the matching Header/Footer input above, choose formatting, then press the button below." }), applySelected), h("div", { class: "grid-2" }, labelled("First page number", start), format.root), restart.root, visible.root, all?.root ?? null);
     const handle = openDialog({
         title: "Header and footer", size: "wide", body,
         actions: [{ label: "Apply", kind: "primary", run: async () => {
-                    const pack = (l, c, r) => {
+                    storeFormat();
+                    if (fontFamily.value && /[\x00-\x1f\x7f{};<>\\"'`]/.test(fontFamily.value)) {
+                        toast("Enter a valid font family.", { kind: "error" });
+                        return undefined;
+                    }
+                    if (fontSize.value && (!Number.isFinite(Number(fontSize.value)) || Number(fontSize.value) < 4 || Number(fontSize.value) > 400)) {
+                        toast("Font size must be 4–400 pt.", { kind: "error" });
+                        return undefined;
+                    }
+                    const pack = (edge, l, c, r) => {
                         const out = {};
                         if (l.value)
                             out["left"] = l.value;
@@ -53,11 +177,19 @@ export async function headerFooterDialog(ctx) {
                             out["center"] = c.value;
                         if (r.value)
                             out["right"] = r.value;
-                        return Object.keys(out).length ? out : null;
+                        if (Object.keys(formats[edge]).length)
+                            out.formats = formats[edge];
+                        const rich = Object.fromEntries(positions.filter((pos) => runs[edge][pos]?.length &&
+                            runs[edge][pos].map((x) => x.text).join("") === fields[edge][pos].value)
+                            .map((pos) => [pos, runs[edge][pos]]));
+                        if (Object.keys(rich).length)
+                            out.runs = rich;
+                        return l.value || c.value || r.value ? out : null;
                     };
                     const ids = all?.input.checked ? sections.map((s) => s.id) : [sectionId];
-                    const numbering = { start: Math.max(1, Math.round(Number(start.value) || 1)), format: format.select.value };
-                    const ops = ids.map((id) => ({ op: "page_setup", section: id, header: pack(hl, hc, hr), footer: pack(fl, fc, fr), numbering }));
+                    const numbering = { ...(restart.input.checked ? { start: Math.max(1, Math.round(Number(start.value) || 1)) } : {}),
+                        format: format.select.value, show: visible.input.checked };
+                    const ops = ids.map((id) => ({ op: "page_setup", section: id, header: pack("header", hl, hc, hr), footer: pack("footer", fl, fc, fr), numbering }));
                     const ok = await guarded(ctx, () => ed.op(ops.length === 1 ? ops[0] : { op: "batch", ops, label: "header and footer" }));
                     return ok ? true : undefined;
                 } }],
@@ -78,31 +210,70 @@ export async function pageSetupDialog(ctx) {
     const width = numberInput(Math.round(g.widthMm * 10) / 10, 50, 1000, 0.5), height = numberInput(Math.round(g.heightMm * 10) / 10, 50, 1000, 0.5);
     const margin = (v) => numberInput(v, 0, 200, 0.5);
     const top = margin(g.margins.top), right = margin(g.margins.right), bottom = margin(g.margins.bottom), left = margin(g.margins.left);
+    const preset = selectField("Margin preset", [["custom", "Custom"], ["normal", "Normal (25 mm)"], ["narrow", "Narrow (15 mm)"], ["wide", "Wide (35 mm)"]], "custom");
+    preset.select.addEventListener("change", () => {
+        const value = { normal: 25, narrow: 15, wide: 35 }[preset.select.value];
+        if (value === undefined)
+            return;
+        for (const input of [top, right, bottom, left])
+            input.value = String(value);
+    });
+    const header = numberInput(g.headerMm, 0, 500, 0.5), footer = numberInput(g.footerMm, 0, 500, 0.5);
+    const defaultHeader = checkbox("Automatic header position", page.header_mm === undefined);
+    const defaultFooter = checkbox("Automatic footer position", page.footer_mm === undefined);
+    const syncBand = () => { header.disabled = defaultHeader.input.checked; footer.disabled = defaultFooter.input.checked; };
+    defaultHeader.input.addEventListener("change", syncBand);
+    defaultFooter.input.addEventListener("change", syncBand);
+    syncBand();
+    const showRulers = checkbox("Show rulers", ctx.app.prefs.show_rulers);
+    const showGuides = checkbox("Show editing guides", ctx.app.prefs.show_guides);
+    const units = selectField("Ruler units", [["mm", "Millimetres"], ["in", "Inches"]], ctx.app.prefs.units);
     const custom = h("div", { class: "grid-2" }, labelled("Width (mm)", width), labelled("Height (mm)", height));
     const all = sections.length > 1 ? checkbox("Apply to every section", false) : null;
     const error = errorLine();
     const sync = () => { custom.hidden = size.select.value !== "custom"; };
     size.select.addEventListener("change", sync);
     sync();
-    const body = h("div", { class: "stack" }, sections.length > 1 ? h("p", { class: "muted", text: `Editing ${sectionLabel(sections, sectionId)}.` }) : null, h("div", { class: "grid-2" }, size.root, orientation.root), custom, h("fieldset", {}, h("legend", { text: "Margins (mm)" }), h("div", { class: "grid-4" }, labelled("Top", top), labelled("Right", right), labelled("Bottom", bottom), labelled("Left", left))), notice("Pages on screen are laid out block by block, so the page count here is approximate. The exact count comes from Print preview, which uses the same layout as the exported PDF.", "info"), all?.root ?? null, error.el);
+    const body = h("div", { class: "stack" }, sections.length > 1 ? h("p", { class: "muted", text: `Editing ${sectionLabel(sections, sectionId)}.` }) : null, h("div", { class: "grid-2" }, size.root, orientation.root), custom, h("fieldset", {}, h("legend", { text: "Margins (mm)" }), preset.root, h("div", { class: "grid-4" }, labelled("Top", top), labelled("Right", right), labelled("Bottom", bottom), labelled("Left", left))), h("details", {}, h("summary", { text: "Header and footer positions" }), h("div", { class: "grid-2" }, labelled("Header distance from top (mm)", header), labelled("Footer distance from bottom (mm)", footer), defaultHeader.root, defaultFooter.root)), h("details", {}, h("summary", { text: "Ruler and guide preferences" }), h("div", { class: "stack" }, showRulers.root, showGuides.root, units.root)), notice("Pages on screen are laid out block by block, so the page count here is approximate. The exact count comes from Print preview, which uses the same layout as the exported PDF.", "info"), all?.root ?? null, error.el);
     const handle = openDialog({
         title: "Page dimensions", body,
         actions: [{ label: "Apply", kind: "primary", run: async () => {
                     error.show(null);
-                    const mm = (i) => Math.round((Number(i.value) || 0) * 2) / 2;
+                    const mm = (i) => i.value.trim() ? Math.round(Number(i.value) * 2) / 2 : NaN;
                     const wMm = size.select.value === "custom" ? mm(width) : (PAGE_MM[size.select.value]?.[0] ?? 210);
                     const hMm = size.select.value === "custom" ? mm(height) : (PAGE_MM[size.select.value]?.[1] ?? 297);
                     const pageWidth = orientation.select.value === "landscape" ? Math.max(wMm, hMm) : Math.min(wMm, hMm);
                     const pageHeight = orientation.select.value === "landscape" ? Math.min(wMm, hMm) : Math.max(wMm, hMm);
                     const m = { top: mm(top), right: mm(right), bottom: mm(bottom), left: mm(left) };
+                    if (![pageWidth, pageHeight, ...Object.values(m)].every((v) => Number.isFinite(v) && v >= 0)) {
+                        error.show("Enter valid finite page dimensions and margins.");
+                        return undefined;
+                    }
                     if (m.left + m.right > pageWidth - 25 || m.top + m.bottom > pageHeight - 25) {
                         error.show("The margins leave less than 25 mm for text. Make them smaller.");
                         return undefined;
                     }
-                    const pageProps = size.select.value === "custom" ? { width_mm: pageWidth, height_mm: pageHeight, orientation: orientation.select.value, margins_mm: m } : { size: size.select.value, orientation: orientation.select.value, margins_mm: m };
+                    const headerMm = defaultHeader.input.checked ? null : mm(header);
+                    const footerMm = defaultFooter.input.checked ? null : mm(footer);
+                    if ((headerMm !== null && (!Number.isFinite(headerMm) || headerMm < 0)) ||
+                        (footerMm !== null && (!Number.isFinite(footerMm) || footerMm < 0)) ||
+                        (headerMm ?? 0) + (footerMm ?? 0) > pageHeight - 25) {
+                        error.show("Header and footer positions must leave at least 25 mm between them.");
+                        return undefined;
+                    }
+                    const pageProps = size.select.value === "custom" ? { width_mm: pageWidth, height_mm: pageHeight, orientation: orientation.select.value, margins_mm: m, header_mm: headerMm, footer_mm: footerMm } : { size: size.select.value, orientation: orientation.select.value, margins_mm: m, header_mm: headerMm, footer_mm: footerMm };
                     const ids = all?.input.checked ? sections.map((s) => s.id) : [sectionId];
                     const ops = ids.map((id) => ({ op: "page_setup", section: id, page: pageProps }));
                     const ok = await guarded(ctx, () => ed.op(ops.length === 1 ? ops[0] : { op: "batch", ops, label: "page setup" }));
+                    if (ok) {
+                        try {
+                            await ctx.app.setPrefs({ show_rulers: showRulers.input.checked, show_guides: showGuides.input.checked, units: units.select.value });
+                            ed.layout();
+                        }
+                        catch (e) {
+                            toast(errorText(e), { kind: "error" });
+                        }
+                    }
                     return ok ? true : undefined;
                 } }],
     });
@@ -178,12 +349,15 @@ export async function figureDialog(ctx, block) {
 }
 /* -------------------------------------------------------------------------------------------------------- tables */
 export async function tableDialog(ctx) {
+    // Remember the caret before the modal steals focus. Never infer an insertion
+    // anchor from an inactive browser selection when the user confirms.
+    const selection = ctx.ed.recallSelection();
     const rows = numberInput(3, 1, 200), cols = numberInput(3, 1, 40);
     const handle = openDialog({
         title: "Insert table", size: "narrow", body: h("div", { class: "grid-2" }, labelled("Rows", rows), labelled("Columns", cols)),
         actions: [{ label: "Insert table", kind: "primary", run: async () => {
                     const r = Math.max(1, Math.min(200, Math.round(Number(rows.value) || 3))), c = Math.max(1, Math.min(40, Math.round(Number(cols.value) || 3)));
-                    return (await guarded(ctx, () => A.insertTable(ctx.ed, r, c))) ? true : undefined;
+                    return await A.insertTable(ctx.ed, r, c, selection) ? true : undefined;
                 } }],
     });
     await handle.result;
@@ -277,69 +451,31 @@ export async function linkDialog(ctx) {
     await A.setLink(ed, choice === "set" ? url.value.trim() : null);
 }
 /* ------------------------------------------------------------------------------------------------------ page colour */
-const PAGE_COLOUR_PRESETS = [
-    ["White", "#ffffff"], ["Warm paper", "#fff8e7"], ["Soft blue", "#eaf3ff"],
-    ["Soft green", "#eaf6ec"], ["Soft rose", "#fff0f2"], ["Charcoal", "#30343a"],
-];
-/** The SLDC Writer background is a six-digit RGB colour, not an arbitrary CSS value. */
+/** A page colour is precisely one opaque six-digit RGB value, never a CSS expression. */
 export function parsePageColour(value) {
-    const colour = value.trim();
-    return /^#[\da-f]{6}$/i.test(colour) ? colour.toLowerCase() : null;
+    if (typeof value !== "string")
+        return null;
+    const candidate = value.trim();
+    return /^#[0-9a-fA-F]{6}$/.test(candidate) ? candidate.toLowerCase() : null;
 }
 export async function backgroundDialog(ctx) {
     const { ed } = ctx;
-    if (ed.readOnly) {
-        toast("This document is read-only.", { kind: "info" });
-        return;
-    }
-    const current = parsePageColour(ed.model.ext.background?.color ?? "") ?? "#ffffff";
-    const colour = h("input", { type: "color", value: current, attrs: { "aria-label": "Pick page colour" } });
-    const hex = h("input", { type: "text", value: current.toUpperCase(), maxLength: 7,
-        attrs: { "aria-label": "Page colour hexadecimal code", autocomplete: "off", spellcheck: "false", placeholder: "#RRGGBB" } });
-    const error = errorLine();
-    const samples = PAGE_COLOUR_PRESETS.map(([name, value]) => h("button", { type: "button", class: "page-colour-preset",
-        css: { "--preset-colour": value }, attrs: { "aria-label": `${name}, ${value}`, "aria-pressed": String(current === value), title: name } }));
-    const syncPresets = (value) => {
-        for (let index = 0; index < samples.length; index += 1)
-            samples[index]?.setAttribute("aria-pressed", String(value === PAGE_COLOUR_PRESETS[index]?.[1]));
-    };
-    const pick = (value) => {
-        colour.value = value;
-        hex.value = value.toUpperCase();
-        syncPresets(value);
-        error.show(null);
-    };
-    for (let index = 0; index < samples.length; index += 1) {
-        const value = PAGE_COLOUR_PRESETS[index]?.[1];
-        if (value)
-            samples[index]?.addEventListener("click", () => pick(value));
-    }
-    colour.addEventListener("input", () => pick(colour.value));
-    hex.addEventListener("input", () => {
-        const value = parsePageColour(hex.value);
-        if (value)
-            colour.value = value;
-        syncPresets(value);
-        error.show(null);
-    });
+    const current = ed.model.ext.background?.color ?? "#ffffff";
+    const colour = h("input", { type: "color", value: /^#[0-9a-fA-F]{6}$/.test(current) ? current : "#ffffff", attrs: { "aria-label": "Page colour" } });
     const handle = openDialog({
         title: "Page background", size: "narrow",
-        body: h("div", { class: "stack" }, labelled("Colour", colour), h("div", {}, h("p", { class: "fine", text: "Presets" }), h("div", { class: "page-colour-presets", attrs: { role: "group", "aria-label": "Page background colour presets" } }, samples)), labelled("Hexadecimal RGB (#RRGGBB)", hex, { hint: "Enter an exact six-digit RGB colour; for example #F5F5F5." }), error.el, notice("Page colour is saved with this SLDC document. Background images and gradients are not yet supported by the export renderer. Check that your text remains readable.", "info")),
-        actions: [{ label: "Use white", run: () => "clear" }, { label: "Apply", kind: "primary", run: () => {
-                    const value = parsePageColour(hex.value);
-                    if (!value) {
-                        error.show("Enter a valid colour such as #F5F5F5.");
-                        hex.focus();
-                        return undefined;
-                    }
-                    pick(value);
-                    return "set";
-                } }],
+        body: h("div", { class: "stack" }, labelled("Colour", colour), notice("Only a plain colour is supported. A background picture is not, because exported formats cannot reproduce it faithfully. Text colours are not changed, so check that the text stays readable.", "info")),
+        actions: [{ label: "Use white", run: () => "clear" }, { label: "Apply", kind: "primary", run: () => "set" }],
     });
     const choice = await handle.result;
     if (!choice)
         return;
-    await guarded(ctx, () => ed.op({ op: "ext_set", values: { background: choice === "set" ? { color: parsePageColour(hex.value) } : null }, label: "page background" }));
+    const selected = parsePageColour(colour.value);
+    if (choice === "set" && selected === null) {
+        toast("Choose an RGB colour in #rrggbb format.", { kind: "error" });
+        return;
+    }
+    await guarded(ctx, () => ed.op({ op: "ext_set", values: { background: choice === "set" ? { color: selected } : null }, label: "page background" }));
 }
 /* ----------------------------------------------------------------------------------------------------- comments */
 export async function commentDialog(ctx) {
