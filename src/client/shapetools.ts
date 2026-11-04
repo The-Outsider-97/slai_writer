@@ -97,7 +97,8 @@ export class ShapeTools {
       node.style.width=`${original.width_mm}mm`;node.style.height=`${original.height_mm}mm`;
       if(ok&&(w!==original.width_mm||h!==original.height_mm)){
         const corners=original.corners_mm.map(x=>Math.min(x,w/2,h/2));
-        void this.commit({...original,width_mm:w,height_mm:h,corners_mm:corners},"resize shape");
+        const text={...original.text,padding_mm:Math.min(original.text.padding_mm,w/4,h/4)};
+        void this.commit({...original,width_mm:w,height_mm:h,corners_mm:corners,text},"resize shape");
       }else this.refresh();
     });
   }
