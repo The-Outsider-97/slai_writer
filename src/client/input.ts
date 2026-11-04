@@ -6,6 +6,7 @@ import * as A from "./actions.js";
 import { blockIdOf, editableOf } from "./domtext.js";
 import type { Editor } from "./editor.js";
 import { highlightsSupported } from "./decor.js";
+import { objectKind } from "./object_kind.js";
 import { parseMarkdownTable } from "./textops.js";
 
 interface DropPoint { node: Node; offset: number }
@@ -221,7 +222,11 @@ export function installInput(ed: Editor): () => void {
     }
     if (ed.selectedBlock) {
       if (e.key === "Delete" || e.key === "Backspace") return run(() => A.deleteBlocks(ed, [ed.selectedBlock as string]));
-      if (e.key === "Enter") return run(() => { const b = ed.model.block(ed.selectedBlock as string); if (b && (b.type === "figure" || b.type === "equation" || b.type === "embed" || b.type === "table" || Boolean(b.extensions?.["slai.writer.shape"]))) ed.events.emit({ type: "open-object", kind: b.type === "paragraph" ? "figure" : b.type, block: b.id }); });
+      if (e.key === "Enter") return run(() => {
+        const b = ed.model.block(ed.selectedBlock as string);
+        const kind = objectKind(b?.type, Boolean(b?.extensions?.["slai.writer.shape"]));
+        if (b && kind) ed.events.emit({ type: "open-object", kind, block: b.id });
+      });
       if (e.key === "Escape") { A.clearBlockSelection(ed); return; }
     }
     if (e.key === "Escape") { const s = window.getSelection(); if (s && !s.isCollapsed) s.collapseToEnd(); }
@@ -258,7 +263,8 @@ export function installInput(ed: Editor): () => void {
     const wrap = wrapperAt(ed, target);
     const type = wrap?.dataset["type"];
     if (target.closest(".i-eq")) { const id = blockIdOf(target); if (id) ed.events.emit({ type: "open-object", kind: "equation", block: id }); return; }
-    if (wrap && (wrap.querySelector(".writer-shape") || type === "figure" || type === "equation" || type === "embed") && !target.closest("[data-edit]")) { ed.events.emit({ type: "open-object", kind: type === "paragraph" ? "figure" : type, block: wrap.dataset["id"] as string }); return; }
+    const kind = objectKind(type, Boolean(wrap?.querySelector(".writer-shape")), false);
+    if (wrap && kind && !target.closest("[data-edit]")) { ed.events.emit({ type: "open-object", kind, block: wrap.dataset["id"] as string }); return; }
     // double-click on a search result turns it into a note
     const at = pointFromXY(e.clientX, e.clientY);
     const id = at ? blockIdOf(at.node) : null;
