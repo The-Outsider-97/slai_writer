@@ -396,3 +396,7 @@ table.tbl .cell { height: 7mm; }
 @media print { .writer-shape[data-text-overflow="true"] .writer-shape-text::after { display: none; } }
 .blk[data-selected] > .writer-shape { outline: 2px solid var(--focus, #3b82f6); outline-offset: 2px; }
 @media print { .blk[data-selected] > .writer-shape { outline: none; } }
+
+.blk[data-shape-multi] > .writer-shape { outline: 2px dashed var(--focus, #3b82f6); outline-offset: 3px; }
+.blk[data-selected][data-shape-multi] > .writer-shape { outline-style: solid; }
+@media print { .blk[data-shape-multi] > .writer-shape { outline: none; } }
