@@ -83,3 +83,15 @@ describe("physical vector path fidelity",()=>{
     assert.equal(roundedRectPhysical([0,0,0,0],200,50).includes("M0 0"),true);
   });
 });
+
+describe("mirror flags",()=>{
+  test("a shape can be mirrored without changing text content",()=>{
+    const star=defaultShape("star");
+    star.text.content="Readable";
+    star.flip_horizontal=true;
+    star.flip_vertical=true;
+    assert.equal(star.text.content,"Readable");
+    assert.equal(star.flip_horizontal,true);
+    assert.equal(star.flip_vertical,true);
+  });
+});
