@@ -281,10 +281,20 @@ export function renderBlock(block: Block, ctx: RenderContext): HTMLElement {
       if(shape){
         const node=paintShape(shape);
         if(shape.layout?.mode==="floating"){
-          node.style.left=`${shape.layout.x_mm??0}mm`;
-          node.style.top=`${shape.layout.y_mm??0}mm`;
-          node.style.zIndex=String(shape.z_index??0);
-          wrap.setAttribute("data-floating",shape.layout.layer??"content");
+          if(shape.layout.wrap==="top_bottom"){
+            // A top-and-bottom shape consumes normal block-flow space,
+            // so the existing pagination engine measures its actual height.
+            wrap.setAttribute("data-shape-wrap","top_bottom");
+            node.style.position="relative";
+            node.style.left=`${shape.layout.x_mm??0}mm`;
+            node.style.marginTop=`${Math.max(0,shape.layout.y_mm??0)}mm`;
+            node.style.marginBottom="2mm";
+          }else{
+            node.style.left=`${shape.layout.x_mm??0}mm`;
+            node.style.top=`${shape.layout.y_mm??0}mm`;
+            node.style.zIndex=String(shape.z_index??0);
+            wrap.setAttribute("data-floating",shape.layout.layer??"content");
+          }
         }
         wrap.appendChild(node);
       }else wrap.appendChild(textElement(block, ctx));
