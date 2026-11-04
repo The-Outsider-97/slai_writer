@@ -142,7 +142,8 @@ class Exchange:
                         continue
                     shadows = shape.get("shadows") or []
                     advanced_runs = any(
-                        "font_size_pt" in s or "font_family" in s
+                        any(key in s for key in ("font_size_pt","font_family","strike","background",
+                                               "superscript","subscript","letter_spacing_pt","word_spacing_pt"))
                         for s in (shape.get("text", {}).get("spans") or []))
                     if fmt == "pdf":
                         if (float(shape.get("opacity", 1)) != 1
@@ -155,6 +156,7 @@ class Exchange:
                     elif fmt == "docx":
                         corners = shape.get("corners_mm") or []
                         if (len(shadows) > 1
+                                or advanced_runs
                                 or any(float(x) > 0 for x in corners)
                                 or float(shape.get("opacity", 1)) != 1
                                 or shape.get("text", {}).get("fit") == "shrink"
