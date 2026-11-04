@@ -218,7 +218,7 @@ export function buildShapeWorkspace(ctx:DocCtx):{el:HTMLElement;update():void} {
         const selectedWrap=anchorKind==="page"?"none":wrap.value as "none"|"top_bottom";
         sh.layout={mode:"floating",anchor:anchorKind,...(anchorKind==="block"?{target}:{}),
           x_mm:sh.layout?.x_mm??0,y_mm:sh.layout?.y_mm??0,wrap:selectedWrap,
-          layer:selectedWrap==="none"?layers.value as ShapeData["layout"] extends never?never:"content"|"behind_text"|"in_front_of_text":"content"};
+          layer:selectedWrap==="none"?(layers.value as "content"|"behind_text"|"in_front_of_text"):"content"};
       };
       for(const combo of [mode,anchor,layers,wrap])combo.addEventListener("change",()=>change(placement,"shape placement"));
       row(label("Position",mode),label("Anchor",anchor),label("Wrap",wrap),label("Layer",layers),
