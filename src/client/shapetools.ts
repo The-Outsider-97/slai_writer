@@ -4,6 +4,7 @@
 import type { Editor } from "./editor.js";
 import * as A from "./actions.js";
 import { shapeOf, type ShapeData } from "./shape.js";
+import { openShapeTextEditor } from "./shape_text_edit.js";
 import { h } from "./kit.js";
 import { MM_PX } from "./textops.js";
 
@@ -47,9 +48,9 @@ export class ShapeTools {
   }
   private build():void{
     const root=h("div",{class:"imgsel shape-selection",attrs:{role:"group","aria-label":"Vector shape editing handles"}});
-    const surface=h("div",{class:"imgsel-move",attrs:{title:"Drag shape to another position or page; double click for Shape Format"}});
+    const surface=h("div",{class:"imgsel-move",attrs:{title:"Drag shape to move; double click to edit its text"}});
     surface.addEventListener("pointerdown",e=>this.move(e,surface));
-    surface.addEventListener("dblclick",()=>{if(this.id)this.edit(this.id);});
+    surface.addEventListener("dblclick",()=>{if(this.id)openShapeTextEditor(this.ed,this.id);});
     root.appendChild(surface);
     for(const corner of ["nw","ne","sw","se"] as const){
       const handle=h("div",{class:`ih ${corner}`,attrs:{role:"button",tabindex:"0","aria-label":`Resize shape from ${corner}`}});
