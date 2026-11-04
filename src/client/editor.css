@@ -499,3 +499,22 @@
   .shape-properties-tab { flex:0 0 auto; padding:6px 8px; }
   .shape-properties-content { padding:9px 5px 9px; }
 }
+
+
+/* Direct, content-aware shape text editor. Explicitly non-document editable:
+   all edits are submitted via one validated shape_set transaction. */
+.shape-direct-editor { position:absolute; z-index:120; pointer-events:auto; display:flex;
+  flex-direction:column; box-sizing:border-box; min-width:28px; min-height:25px;
+  border:2px solid var(--focus,#387dd9); border-radius:4px; background:var(--paper,#fff);
+  box-shadow:0 5px 17px rgba(0,0,0,.2); transform:translateZ(0); }
+.shape-direct-textarea { display:block; flex:1 1 auto; min-height:24px; width:100%; max-width:100%;
+  box-sizing:border-box; border:0; outline:0; resize:none; white-space:pre-wrap; overflow-wrap:anywhere;
+  color:inherit; background:transparent; font:inherit; line-height:1.2; cursor:text; }
+.shape-direct-toolbar { position:absolute; display:flex; gap:3px; left:0; top:100%;
+  margin-top:4px; width:max-content; max-width:min(500px,90vw); padding:4px 5px;
+  border:1px solid #bbb; background:#fdfdfd; color:#303030; border-radius:7px;
+  box-shadow:0 4px 12px rgba(0,0,0,.24); z-index:125; }
+.shape-direct-tool { border:1px solid #d9d9d9; border-radius:5px; padding:4px 7px;
+  background:#fff; min-height:27px; font-size:11px; white-space:nowrap; color:#333; }
+.shape-direct-tool:hover { background:#f0f0f0; }
+.shape-direct-tool:focus-visible { outline:2px solid #286ac1; }
