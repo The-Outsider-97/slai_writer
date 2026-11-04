@@ -130,6 +130,48 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
   rebuild();
   const add=h("button",{type:"button",text:"+ Add Shadow"});
   add.addEventListener("click",()=>{if(shadows.length<8){shadows.push(shadowDefault());rebuild();}else toast("Eight shadows is the maximum.",{kind:"info"});});
+  const selected=():Array<{id:string;shape:ShapeData}>=>[...ctx.ed.selectedShapes].flatMap(key=>{
+    const value=shapeOf(ctx.ed.model.block(key));return value?[{id:key,shape:value}]:[];
+  });
+  const operation=(label:string,work:()=>Promise<void>):HTMLButtonElement=>{
+    const button=h("button",{type:"button",text:label});
+    button.addEventListener("click",()=>{void work().catch(error=>toast(errorText(error),{kind:"error"}));});
+    return button;
+  };
+  const duplicate=operation("Duplicate",async()=>{
+    const duplicate=structuredClone(shapeOf(ctx.ed.model.block(id))??s);
+    delete duplicate.group_id;
+    if(duplicate.layout?.mode==="floating"){
+      duplicate.layout.x_mm=(duplicate.layout.x_mm??0)+5;
+      duplicate.layout.y_mm=(duplicate.layout.y_mm??0)+5;
+    }
+    const created=await A.insertBlock(ctx.ed,{type:"paragraph",text:"",extensions:{[SHAPE_KEY]:duplicate}},id);
+    if(created)A.selectBlock(ctx.ed,created);
+  });
+  const group=operation("Group selected",async()=>{
+    const items=selected();if(items.length<2){toast("Shift-click at least two shapes first.",{kind:"info"});return;}
+    const modes=new Set(items.map(item=>item.shape.layout?.mode??"inline"));
+    if(modes.size!==1){toast("Group shapes with the same positioning mode.",{kind:"info"});return;}
+    const groupId=ctx.ed.newId();
+    await ctx.ed.op({op:"batch",ops:items.map(item=>({op:"shape_set",block:item.id,
+      shape:{...item.shape,group_id:groupId}})),label:"group shapes"});
+  });
+  const ungroup=operation("Ungroup",async()=>{
+    const seed=shapeOf(ctx.ed.model.block(id));
+    const items=seed?.group_id?ctx.ed.model.list().flatMap(block=>{
+      const value=shapeOf(block);return value?.group_id===seed.group_id?[{id:block.id,shape:value}]:[];
+    }):selected();
+    if(!items.length)return;
+    await ctx.ed.op({op:"batch",ops:items.map(item=>({op:"shape_set",block:item.id,
+      shape:{...item.shape,group_id:null}})),label:"ungroup shapes"});
+  });
+  const moveLayer=(step:number):HTMLButtonElement=>operation(step>0?"Bring forward":"Send backward",async()=>{
+    const items=selected().length?selected():[{id,shape:shapeOf(ctx.ed.model.block(id))??s}];
+    await ctx.ed.op({op:"batch",ops:items.map(item=>({op:"shape_set",block:item.id,
+      shape:{...item.shape,z_index:Math.max(-1000,Math.min(1000,(item.shape.z_index??0)+step))}})),label:"arrange shapes"});
+  });
+  const arrange=h("div",{class:"actions"},duplicate,group,ungroup,moveLayer(1),moveLayer(-1));
+
   const body=h("div",{class:"shape-format-form stack"},
     h("h3",{text:"Geometry"}),kind.root,h("div",{class:"grid-2"},row("Width (mm)",width),row("Height (mm)",height)),
     row("Rotation (degrees)",rotation),
@@ -142,6 +184,8 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
     h("p",{class:"muted",text:"Select characters inside the text field, then apply a character format."}),
     formatSelected,h("div",{class:"actions"},formatColor,colorSelected,formatSize,sizeSelected,clearRuns),
     h("h3",{text:"Position and arrangement"}),layout.root,floatingControls,
+    h("p",{class:"muted",text:"Shift-click other shapes to select several. Grouping preserves editable individual shapes."}),
+    arrange,
     h("h3",{text:"Shadow layers"}),shadowList,add);
   const dialog=openDialog<true>({title:"Shape Format",body,
     actions:[{label:"Apply changes",kind:"primary",run:async()=>{
