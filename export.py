@@ -132,21 +132,35 @@ class Exchange:
                 native = bool(getattr(module, "SLDC_WRITER_SHAPES", False))
             except (ImportError, AttributeError):
                 native = False
-            if native and fmt == "docx":
-                # Word DrawingML has a single shadow and one preset corner
-                # geometry. Keep complex cases visually intact as PNG.
+            if native:
+                # Only select a native writer when it can visually preserve
+                # every shape. Unsupported effects trigger the measured PNG
+                # fallback rather than silently dropping fidelity.
                 for block in package.document["blocks"]:
                     shape = (block.get("extensions") or {}).get(SHAPE_KEY)
                     if shape is None:
                         continue
-                    corners = shape.get("corners_mm") or []
-                    if (len(shape.get("shadows") or []) > 1
-                            or any(float(x) > 0 for x in corners)
-                            or float(shape.get("opacity", 1)) != 1
-                            or shape.get("text", {}).get("fit") == "shrink"
-                            or any(float(s.get("spread_mm", 0)) != 0 for s in shape.get("shadows", []))):
-                        native = False
-                        break
+                    shadows = shape.get("shadows") or []
+                    advanced_runs = any(
+                        "font_size_pt" in s or "font_family" in s
+                        for s in (shape.get("text", {}).get("spans") or []))
+                    if fmt == "pdf":
+                        if (float(shape.get("opacity", 1)) != 1
+                                or advanced_runs
+                                or any(float(s.get("blur_mm", 0)) > 0
+                                       or float(s.get("spread_mm", 0)) != 0
+                                       for s in shadows)):
+                            native = False
+                            break
+                    elif fmt == "docx":
+                        corners = shape.get("corners_mm") or []
+                        if (len(shadows) > 1
+                                or any(float(x) > 0 for x in corners)
+                                or float(shape.get("opacity", 1)) != 1
+                                or shape.get("text", {}).get("fit") == "shrink"
+                                or any(float(s.get("spread_mm", 0)) != 0 for s in shadows)):
+                            native = False
+                            break
             if native:
                 return package, []
         return prepare_shapes(package, fmt, sldc())
