@@ -19,7 +19,7 @@ SHAPE_KINDS = frozenset({"rectangle", "ellipse", "line", "triangle", "diamond",
                          "pentagon", "hexagon", "star", "arrow", "plus"})
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 _ALLOWED = frozenset({"version", "kind", "width_mm", "height_mm", "rotation_deg", "fill",
-                       "outline", "opacity", "corners_mm", "text", "shadows"})
+                       "outline", "opacity", "corners_mm", "text", "shadows", "layout", "z_index", "group_id"})
 
 
 def _object(value: Any, name: str, keys: set[str] | frozenset[str]) -> dict[str, Any]:
@@ -87,7 +87,7 @@ def validate_shape(value: Any) -> dict[str, Any]:
         raise OpError("Corner radii overlap")
 
     text = _object(shape.get("text"), "text",
-                   {"content", "color", "font_size_pt", "bold", "italic", "align", "padding_mm"})
+                   {"content", "color", "font_size_pt", "bold", "italic", "align", "padding_mm", "spans", "fit"})
     if not isinstance(text.get("content"), str) or len(text["content"]) > 4000:
         raise OpError("Shape text must be at most 4000 characters")
     _color(text.get("color"), "text.color")
@@ -97,6 +97,70 @@ def validate_shape(value: Any) -> dict[str, Any]:
     _bool(text.get("italic"), "text.italic")
     if text.get("align") not in ("left", "center", "right"):
         raise OpError("Unsupported text alignment")
+    if text.get("fit", "keep") not in ("keep", "shrink"):
+        raise OpError("text.fit must be keep or shrink")
+    spans = text.get("spans", [])
+    if not isinstance(spans, list) or len(spans) > 300:
+        raise OpError("Shape text allows at most 300 formatting spans")
+    utf16_length = len(text["content"].encode("utf-16-le", errors="surrogatepass")) // 2
+    for index, entry in enumerate(spans):
+        span = _object(entry, f"text.spans[{index}]",
+                       {"type", "start", "end", "bold", "italic", "underline",
+                        "color", "font_family", "font_size_pt"})
+        if span.get("type") != "format":
+            raise OpError("Shape text supports format spans only")
+        start, end = span.get("start"), span.get("end")
+        if (type(start) is not int or type(end) is not int
+                or not 0 <= start < end <= utf16_length):
+            raise OpError("Shape text formatting span has invalid offsets")
+        for key in ("bold", "italic", "underline"):
+            if key in span:
+                _bool(span[key], f"text.spans[{index}].{key}")
+        if "color" in span:
+            _color(span["color"], "span color")
+        if "font_family" in span:
+            family = span["font_family"]
+            if not isinstance(family, str) or not 1 <= len(family) <= 100 or any(
+                    ch in family for ch in '\\x00\\r\\n<>;{}'):
+                raise OpError("Invalid shape text font family")
+        if "font_size_pt" in span:
+            _num(span["font_size_pt"], "span font size", 5, 144)
+
+    layout = shape.get("layout")
+    if layout is not None:
+        fields = _object(layout, "layout", {"mode", "anchor", "target", "x_mm", "y_mm", "wrap", "layer"})
+        if fields.get("mode") not in ("inline", "floating"):
+            raise OpError("Unknown shape positioning mode")
+        if fields["mode"] == "inline":
+            if set(fields) != {"mode"}:
+                raise OpError("Inline shapes cannot have floating placement fields")
+        else:
+            if fields.get("anchor") not in ("block", "page"):
+                raise OpError("A floating shape must be anchored to a block or page")
+            if fields["anchor"] == "block":
+                target = fields.get("target")
+                if not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", target):
+                    raise OpError("A block-anchored shape needs a valid target ID")
+            elif "target" in fields:
+                raise OpError("A page anchor cannot specify a block target")
+            _num(fields.get("x_mm"), "layout.x_mm", -5000, 5000)
+            _num(fields.get("y_mm"), "layout.y_mm", -5000, 5000)
+            if fields.get("wrap", "none") not in ("none", "square", "top_bottom"):
+                raise OpError("Unknown wrapping mode")
+            if fields.get("layer", "content") not in ("content", "behind_text", "in_front_of_text"):
+                raise OpError("Unknown shape layer")
+            if fields.get("layer", "content") != "content" and fields.get("wrap", "none") != "none":
+                raise OpError("Shapes behind or in front of text cannot wrap text")
+            if fields["anchor"] == "page" and fields.get("wrap", "none") != "none":
+                raise OpError("Page-anchored shapes cannot wrap text")
+    if "z_index" in shape:
+        z = shape["z_index"]
+        if type(z) is not int or not -1000 <= z <= 1000:
+            raise OpError("Shape z_index must be an integer between -1000 and 1000")
+    if "group_id" in shape:
+        g = shape["group_id"]
+        if g is not None and (not isinstance(g, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", g)):
+            raise OpError("Shape group_id is not valid")
 
     shadows = shape.get("shadows")
     if not isinstance(shadows, list) or len(shadows) > 8:
