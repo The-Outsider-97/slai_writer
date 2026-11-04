@@ -54,7 +54,7 @@ export function openShapeTextEditor(ed:Editor,id:string):void{
     lastText=next;
   };
   text.addEventListener("input",()=>{if(!composing)updateSpans();});
-  const format=(flag:"bold"|"italic"|"underline"):void=>{
+  const format=(flag:"bold"|"italic"|"underline"|"strike"|"superscript"|"subscript"):void=>{
     updateSpans();
     const start=text.selectionStart,end=text.selectionEnd;
     if(end<=start){toast("Select text within the shape to format it.",{kind:"info"});return;}
@@ -62,12 +62,28 @@ export function openShapeTextEditor(ed:Editor,id:string):void{
     if(spans.length>300)spans=spans.slice(-300);
     text.focus();text.setSelectionRange(start,end);
   };
-  for(const [name,key] of [["Bold","bold"],["Italic","italic"],["Underline","underline"]] as const){
+  for(const [name,key] of [["Bold","bold"],["Italic","italic"],["Underline","underline"],
+    ["Strike","strike"],["Superscript","superscript"],["Subscript","subscript"]] as const){
     const control=h("button",{type:"button",class:"shape-direct-tool",text:name,
       attrs:{"aria-label":`${name} selected shape text`}});
     control.addEventListener("pointerdown",event=>event.preventDefault());
     control.addEventListener("click",()=>format(key));menu.append(control);
   }
+  const paintRange=(key:"color"|"background",value:string):void=>{
+    updateSpans();
+    const start=text.selectionStart,end=text.selectionEnd;
+    if(end<=start){toast("Select shape text to color first.",{kind:"info"});text.focus();return;}
+    spans.push({type:"format",start,end,[key]:value});
+    if(spans.length>300)spans=spans.slice(-300);
+    text.focus();text.setSelectionRange(start,end);
+  };
+  const ink=h("input",{type:"color",value:shape.text.color,
+    attrs:{"aria-label":"Selected shape text color"}});
+  ink.addEventListener("change",()=>paintRange("color",ink.value));
+  const highlight=h("input",{type:"color",value:"#ffff00",
+    attrs:{"aria-label":"Highlight selected shape text"}});
+  highlight.addEventListener("change",()=>paintRange("background",highlight.value));
+  menu.append(ink,highlight);
   const saveBtn=h("button",{type:"button",class:"shape-direct-tool",text:"✓ Done",
     attrs:{"aria-label":"Finish editing shape text"}});
   const cancelBtn=h("button",{type:"button",class:"shape-direct-tool",text:"Cancel",
