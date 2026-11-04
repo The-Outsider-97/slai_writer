@@ -72,12 +72,11 @@ export function openShapeTextEditor(ed:Editor,id:string):void{
     attrs:{"aria-label":"Finish editing shape text"}});
   const cancelBtn=h("button",{type:"button",class:"shape-direct-tool",text:"Cancel",
     attrs:{"aria-label":"Cancel shape text edits"}});
-  const detach=():void=>{editor.remove();};
+  const detach=():void=>{document.removeEventListener("pointerdown",outside,true);editor.remove();};
   const complete=(commit:boolean):void=>{
     if(closed)return;
     closed=true;
-    if(composing)updateSpans();
-    else updateSpans();
+    updateSpans();
     detach();
     if(!commit||ed.readOnly)return;
     const source=shapeOf(ed.model.block(id));
@@ -115,7 +114,6 @@ export function openShapeTextEditor(ed:Editor,id:string):void{
     }
   };
   document.addEventListener("pointerdown",outside,true);
-  const originalDetach=detach;
   const focusOut=():void=>{
     queueMicrotask(()=>{
       if(!closed&&!editor.contains(document.activeElement))complete(true);
@@ -123,7 +121,6 @@ export function openShapeTextEditor(ed:Editor,id:string):void{
   };
   editor.addEventListener("focusout",focusOut);
   text.addEventListener("blur",focusOut);
-  editor.append(menu);
   host.append(editor);
   if(textRegion){
     editor.style.left=textRegion.style.left;
@@ -137,6 +134,5 @@ export function openShapeTextEditor(ed:Editor,id:string):void{
   text.style.fontStyle=shape.text.italic?"italic":"normal";
   text.style.textAlign=shape.text.align;
   text.style.padding=`${shape.text.padding_mm}mm`;
-  void originalDetach;
   text.focus();text.setSelectionRange(text.value.length,text.value.length);
 }
