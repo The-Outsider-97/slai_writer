@@ -484,6 +484,11 @@ def op_block_insert(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
                           "rows": [[{"text": ""} for _ in range(cols)] for _ in range(rows)]}
     if "section" not in block:
         _inherit_section(tr, block, tr.doc["blocks"][where - 1] if where else (tr.doc["blocks"][0] if tr.doc["blocks"] else None))
+    if "extensions" in block and "slai.writer.shape" in block["extensions"]:
+        from .shape_validation import validate_shape, SHAPE_KEY
+        if kind != "paragraph" or block["text"] or set(block["extensions"]) != {SHAPE_KEY}:
+            raise OpError("Vector shapes require a dedicated empty paragraph block")
+        block["extensions"][SHAPE_KEY] = validate_shape(block["extensions"][SHAPE_KEY])
     _tidy_attributes(block)
     if kind == "heading" and "attributes" not in block:
         block["attributes"] = {"level": 1}
@@ -734,6 +739,18 @@ def _check_figure_props(tr: Tracker, block_id: str, props: dict[str, Any]) -> No
             tr.get(placement.get("target"))
         elif "target" in placement:
             raise OpError("Only a block anchor has a target")
+
+
+@handler("shape_set")
+def op_shape_set(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
+    """Replace a shape atomically using the existing block transaction and undo machinery."""
+    from .shape_validation import SHAPE_KEY, validate_shape
+    block = tr.get(op.get("block"))
+    if block["type"] != "paragraph" or SHAPE_KEY not in block.get("extensions", {}):
+        raise OpError("This block is not a vector shape")
+    shape = validate_shape(op.get("shape"))
+    block["extensions"][SHAPE_KEY] = shape
+    return {}
 
 
 @handler("figure_set")
@@ -1123,7 +1140,7 @@ def op_batch(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
 LABELS = {
     "text": "typing", "format": "formatting", "span": "link or reference", "inline_object": "insert object", "block_set": "paragraph style",
     "block_insert": "insert block", "block_delete": "delete", "split": "new paragraph", "merge": "join paragraphs", "move": "move",
-    "table_cell": "table cell", "table_edit": "table", "caption": "caption", "figure_set": "picture", "equation_set": "equation",
+    "table_cell": "table cell", "table_edit": "table", "caption": "caption", "figure_set": "picture", "shape_set": "shape", "equation_set": "equation",
     "meta": "document details", "page_setup": "page setup", "section_break": "section break", "style_define": "style",
     "reference_put": "citation or footnote", "reference_delete": "remove citation", "embed_put": "EMBED", "embed_delete": "remove EMBED",
     "ext_set": "page settings", "batch": "edit",
