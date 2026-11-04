@@ -4,6 +4,7 @@ import { assetUrl } from "./net.js";
 import { plaintextOnlySupported } from "./domtext.js";
 import { segments, MM_PX, type Segment } from "./textops.js";
 import { paintFigure } from "./figlayout.js";
+import { shapeOf, paintShape } from "./shape.js";
 import type { Block, DocMeta, EmbedDecl, Reference } from "./types.js";
 
 export const EDIT_MODE = plaintextOnlySupported() ? "plaintext-only" : "true";
@@ -275,7 +276,7 @@ export function renderBlock(block: Block, ctx: RenderContext): HTMLElement {
     case "figure": wrap.appendChild(figureElement(block, ctx)); break;
     case "equation": wrap.appendChild(equationElement(block)); break;
     case "embed": wrap.appendChild(embedElement(block, ctx)); break;
-    default: wrap.appendChild(textElement(block, ctx));
+    default: { const shape = shapeOf(block); wrap.appendChild(shape ? paintShape(shape) : textElement(block, ctx)); }
   }
   if (block.type === "figure" && block.figure?.placement) wrap.setAttribute("data-floating", block.figure.placement.layer ?? "content");
   syncLayer(wrap, block, ctx);
