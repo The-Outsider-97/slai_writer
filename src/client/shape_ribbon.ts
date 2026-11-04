@@ -65,18 +65,34 @@ export function buildShapeWorkspace(ctx:DocCtx):{el:HTMLElement;update():void} {
     return [...ids].flatMap(id=>{const shape=shapeOf(ed.model.block(id));return shape?[{id,shape}]:[];});
   };
   const run=(promise:Promise<unknown>):void=>{void promise.catch(error=>toast(errorText(error),{kind:"error"}));};
+  // Serialize edits per workspace, re-reading current model state after each
+  // operation. Otherwise two rapid controls can clone the same stale object
+  // and silently overwrite one another's changes.
+  let pending:Promise<void>=Promise.resolve();
+  const enqueue=(task:()=>Promise<unknown>):void=>{
+    const next=pending.then(task).then(()=>{});
+    pending=next.catch(()=>{});
+    run(next);
+  };
   const change=(modifier:(s:ShapeData)=>void,caption:string):void=>{
-    const item=selected();if(!item||ed.readOnly)return;
-    const next=structuredClone(item.shape);
-    try{modifier(next);}catch(error){toast(errorText(error),{kind:"error"});return;}
-    run(ed.op({op:"shape_set",block:item.id,shape:next,label:caption}));
+    const id=selected()?.id;if(!id||ed.readOnly)return;
+    enqueue(async()=>{
+      const source=shapeOf(ed.model.block(id));if(!source)throw Error("Selected shape no longer exists");
+      const next=structuredClone(source);
+      modifier(next);
+      await ed.op({op:"shape_set",block:id,shape:next,label:caption});
+    });
   };
   const changeMany=(fn:(entry:Pair)=>ShapeData,caption:string):void=>{
-    const items=members();if(!items.length||ed.readOnly)return;
-    try{
-      const ops=items.map(entry=>({op:"shape_set",block:entry.id,shape:fn(entry)}));
-      run(ed.op({op:"batch",ops,label:caption}));
-    }catch(error){toast(errorText(error),{kind:"error"});}
+    const ids=members().map(item=>item.id);if(!ids.length||ed.readOnly)return;
+    enqueue(async()=>{
+      const ops=ids.map(id=>{
+        const shape=shapeOf(ed.model.block(id));
+        if(!shape)throw Error("A selected shape no longer exists");
+        return {op:"shape_set",block:id,shape:fn({id,shape})};
+      });
+      await ed.op({op:"batch",ops,label:caption});
+    });
   };
   const inputChange=(node:HTMLInputElement,min:number,max:number,fn:(n:number)=>void):void=>{
     node.addEventListener("change",()=>{
