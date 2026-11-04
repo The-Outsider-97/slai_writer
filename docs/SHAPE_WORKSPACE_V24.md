@@ -40,8 +40,8 @@ unacceptably precise numbers such as `48,83661048689139`.
 ## Contour-aware text
 
 - `shape_contour.ts` provides deterministic point/polygon geometry,
-  half-open scanline intersections, interval clipping across line-height
-  bands, and UTF-16-preserving line positions.
+  half-open scanline intersections, critical-vertex scanline band clipping
+  across whole line heights, and UTF-16-preserving line positions.
 - The renderer maps text runs onto per-line bands of real shape silhouettes
   instead of one generic rectangular inset.
 - Rounded rectangles use physical X/Y radius conversion, not a single
@@ -74,6 +74,16 @@ Shape text spans are derived from existing Writer spans, and the server now
 accepts safe strike/super/sub, highlighting and letter/word-spacing fields
 with bounded validation. No independent document store or undo engine was
 introduced.
+
+Mirror flags are now version-1 optional shape attributes, with Python
+validation and SVG, PDF, DOCX and raster-fallback geometry adapters. Text
+glyphs remain unmirrored. The existing `ops.py` move operation also updates
+the section of a moved shape to the section of the destination block.
+
+Interactive group selection now computes one compound bounding box for
+floating members on the same sheet; dragging rotation/scale handles paints a
+temporary CSS preview and commits one batch operation on pointer release.
+Arrow-key nudging affects all eligible group members in one batch.
 
 Native PDF and DOCX are delegated to Documaster. Unsupported effects use an
 explicit high-resolution fallback and loss reporting; the DOCX importer in
@@ -119,7 +129,8 @@ py -3.12 -m pytest applications\Documaster\tests_py\test_read_vector_shapes.py -
    must NOT be advertised as implemented by this PR.
 3. Complete cross-section/page anchor transformation policies, portrait and
    landscape movement, and stable recovery when an anchor is deleted.
-4. Generalize group selection handles and arbitrary group affine transforms.
+4. Verify and extend group selection handles and transforms for nested
+   groups, constraints and movement across different page coordinate systems.
 5. Verify full rich-text parity, complex typography and bidirectional
    scripts; current direct text editing is a native textarea with transferable
    character spans rather than a complete embedded Writer editor.
