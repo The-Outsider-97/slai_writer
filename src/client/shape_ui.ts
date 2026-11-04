@@ -3,10 +3,11 @@ import { h, labelled, openDialog, toast } from "./kit.js";
 import { errorText } from "./net.js";
 import { checkbox, selectField } from "./widgets.js";
 import { diffText } from "./textops.js";
+import { beginShapePlacement } from "./shape_placement.js";
 import type { Span } from "./types.js";
 import * as A from "./actions.js";
 import type { DocCtx } from "./docctx.js";
-import { SHAPE_KEY, SHAPE_KINDS, defaultShape, shapeOf, pathFor, roundedRect, type ShapeData, type ShapeKind, type Shadow } from "./shape.js";
+import { SHAPE_KEY, SHAPE_KINDS, shapeOf, pathFor, roundedRect, type ShapeData, type ShapeKind, type Shadow } from "./shape.js";
 
 const number = (value:number,min:number,max:number,step=1):HTMLInputElement =>
   h("input",{type:"number",value:String(value),min,max,step,attrs:{inputmode:"decimal"}});
@@ -43,12 +44,7 @@ export async function insertShape(ctx:DocCtx):Promise<void> {
     preview.setAttribute("stroke","#202020");preview.setAttribute("stroke-width","4");
     svg.appendChild(preview);
     btn.append(svg,h("span",{text:kind[0]?.toUpperCase()+kind.slice(1)??kind}));
-    btn.addEventListener("click",()=>{void (async()=>{
-      try {
-        const id=await A.insertBlock(ctx.ed,{type:"paragraph",text:"",extensions:{[SHAPE_KEY]:defaultShape(kind)}});
-        if(id){handle.close();A.selectBlock(ctx.ed,id);await editShape(ctx,id);}
-      }catch(e){toast(errorText(e),{kind:"error"});}
-    })();});
+    btn.addEventListener("click",()=>{handle.close();beginShapePlacement(ctx,kind);});
     grid.appendChild(btn);
   }
   await handle.result;
