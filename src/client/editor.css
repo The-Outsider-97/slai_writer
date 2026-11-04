@@ -410,3 +410,9 @@
 .shape-format-form { max-height: min(65vh, 700px); overflow: auto; min-width: min(540px, 80vw); }
 .shape-format-form h3 { margin: 12px 0 4px; font-size: 13px; }
 .shape-shadow { border: 1px solid var(--e-line, #ddd); padding: 10px; margin: 8px 0; }
+
+.shape-gallery-item { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; text-align:center; }
+.shape-gallery-item svg { flex:none; pointer-events:none; }
+.shape-insert-preview { position:absolute; z-index:8; min-width:2mm; min-height:2mm;
+  pointer-events:none; border:1px dashed #276dc5; outline:1px solid #fff;
+  background:rgba(51,119,210,.09); box-sizing:border-box; }
