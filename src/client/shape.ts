@@ -61,10 +61,11 @@ export function paintShape(shape:ShapeData):HTMLElement {
   const host=document.createElement("div"); host.className="writer-shape";
   host.style.width=`${shape.width_mm}mm`;host.style.height=`${shape.height_mm}mm`;
   host.style.transform=`rotate(${shape.rotation_deg}deg)`;
+  host.style.opacity=String(shape.opacity);
   const svg=el("svg",{viewBox:"0 0 100 100",width:"100%",height:"100%",preserveAspectRatio:"none",role:"img","aria-label":`${shape.kind} shape`});
   svg.style.overflow="visible";
   const defs=el("defs");svg.appendChild(defs);
-  const group=el("g",{opacity:shape.opacity});
+  const group=el("g");
   const paint=(node:SVGElement,shadow=false):void=>{
     node.setAttribute("fill",shape.kind==="line"||!shape.fill.enabled?"none":shape.fill.color);
     node.setAttribute("fill-opacity",String(shape.fill.opacity));
