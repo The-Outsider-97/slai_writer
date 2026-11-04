@@ -61,6 +61,8 @@ export class Editor {
   readonly dirty = new Set<string>();
   composing = false;
   selectedBlock: string | null = null;
+  /** Multi-object selection for vector illustrations; current selectedBlock remains the focus. */
+  readonly selectedShapes = new Set<string>();
   private sigs = new Map<string, string>();
   private deferred = new Set<string>();
   private ctxCache: RenderContext | null = null;
