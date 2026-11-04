@@ -382,7 +382,17 @@ table.tbl .cell { height: 7mm; }
 .blk:has(> .writer-shape) { width: max-content; max-width: 100%; margin: 2mm auto; }
 .writer-shape { position: relative; flex: none; transform-origin: center; overflow: visible; cursor: pointer; }
 .writer-shape svg { display: block; overflow: visible; }
-.writer-shape-text { position: absolute; inset: 17% 17%; display: flex; align-items: center; justify-content: center;
-  white-space: pre-wrap; overflow-wrap: anywhere; overflow: hidden; pointer-events: none; line-height: 1.2; }
+.writer-shape-text { position: absolute; display: flex; align-items: center; justify-content: center;
+  box-sizing: border-box; white-space: pre-wrap; overflow-wrap: anywhere; overflow: hidden;
+  pointer-events: none; line-height: 1.2; }
+.writer-shape-text-runs { max-width: 100%; max-height: 100%; white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
+.writer-shape[data-text-overflow="true"] .writer-shape-text::after {
+  content: "Text overflow"; position: absolute; right: 0; bottom: 0;
+  background: #9d1c1c; color: #fff; font: 8px system-ui, sans-serif;
+  padding: 1px 3px; border-radius: 2px; }
+.blk[data-floating] > .writer-shape { position: absolute; margin: 0; z-index: 2; }
+.blk[data-floating="behind_text"] > .writer-shape { z-index: 0; }
+.blk[data-floating="in_front_of_text"] > .writer-shape { z-index: 3; }
+@media print { .writer-shape[data-text-overflow="true"] .writer-shape-text::after { display: none; } }
 .blk[data-selected] > .writer-shape { outline: 2px solid var(--focus, #3b82f6); outline-offset: 2px; }
 @media print { .blk[data-selected] > .writer-shape { outline: none; } }
