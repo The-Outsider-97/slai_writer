@@ -92,10 +92,14 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
     for char in chars:
         style = {"bold": text.get("bold", False), "italic": text.get("italic", False),
                  "color": text.get("color", "#101010"),
-                 "font_size_pt": text.get("font_size_pt", 12), "underline": False}
+                 "font_size_pt": text.get("font_size_pt", 12), "underline": False,
+                 "strike": False, "superscript": False, "subscript": False,
+                 "background": None, "letter_spacing_pt": 0, "word_spacing_pt": 0}
         for span in spans:
             if span["start"] <= offset < span["end"]:
-                for key in ("bold", "italic", "color", "font_size_pt", "underline"):
+                for key in ("bold", "italic", "color", "font_size_pt", "underline",
+                            "strike", "superscript", "subscript", "background",
+                            "letter_spacing_pt", "word_spacing_pt"):
                     if key in span:
                         style[key] = span[key]
         styles.append((char, style))
@@ -117,9 +121,13 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
                 lines.append([])
                 current = 0
                 continue
-            pixel_size = max(5, round(float(style["font_size_pt"]) * scale * 25.4 / 72 * factor))
+            modifier = .75 if style.get("superscript") or style.get("subscript") else 1
+            pixel_size = max(5, round(float(style["font_size_pt"]) * modifier * scale * 25.4 / 72 * factor))
             font = font_for(pixel_size, bool(style["bold"]), bool(style["italic"]))
-            advance = float(draw.textlength(char, font=font))
+            advance = (float(draw.textlength(char, font=font))
+                       + (float(style.get("letter_spacing_pt", 0))
+                          + (float(style.get("word_spacing_pt", 0)) if char == " " else 0))
+                          * scale * 25.4 / 72)
             if current > 0 and current + advance > width:
                 lines.append([])
                 current = 0.0
