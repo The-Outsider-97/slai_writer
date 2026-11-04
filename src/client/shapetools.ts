@@ -29,9 +29,19 @@ export class ShapeTools {
         const move=e.shiftKey?5:.5;
         const deltaX=e.key==="ArrowLeft"?-move:e.key==="ArrowRight"?move:0;
         const deltaY=e.key==="ArrowUp"?-move:e.key==="ArrowDown"?move:0;
-        const placement={...shape.layout,x_mm:Math.max(-5000,Math.min(5000,(shape.layout.x_mm??0)+deltaX)),
-          y_mm:Math.max(-5000,Math.min(5000,(shape.layout.y_mm??0)+deltaY))};
-        void ed.op({op:"shape_set",block:this.id,shape:{...shape,layout:placement},label:"nudge shape"}).catch(err=>ed.failed(err));
+        const group=this.groupMembers();
+        if(group.length>1){
+          const ops=group.map(({id,shape:s})=>({op:"shape_set",block:id,shape:{...s,
+            layout:{...s.layout,x_mm:Math.max(-5000,Math.min(5000,(s.layout?.x_mm??0)+deltaX)),
+              y_mm:Math.max(-5000,Math.min(5000,(s.layout?.y_mm??0)+deltaY))}}}));
+          void ed.op({op:"batch",ops,label:"nudge shape group"}).catch(err=>ed.failed(err));
+        }else{
+          const placement={...shape.layout,
+            x_mm:Math.max(-5000,Math.min(5000,(shape.layout.x_mm??0)+deltaX)),
+            y_mm:Math.max(-5000,Math.min(5000,(shape.layout.y_mm??0)+deltaY))};
+          void ed.op({op:"shape_set",block:this.id,shape:{...shape,layout:placement},label:"nudge shape"})
+            .catch(err=>ed.failed(err));
+        }
       }
     };
     ed.host.addEventListener("keydown",key);
