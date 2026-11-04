@@ -5,12 +5,14 @@ import type { Editor } from "./editor.js";
 import * as A from "./actions.js";
 import { shapeOf, type ShapeData } from "./shape.js";
 import { openShapeTextEditor } from "./shape_text_edit.js";
+import { transformShapeGroup } from "./shapegroup.js";
 import { h } from "./kit.js";
 import { MM_PX } from "./textops.js";
 
 export class ShapeTools {
   private id:string|null=null;
   private overlay:HTMLElement|null=null;
+  private groupActive:string[]=[];
   private readonly off:Array<()=>void>=[];
   constructor(private readonly ed:Editor,private readonly edit:(id:string)=>void){
     this.off.push(ed.events.on(e=>{
@@ -36,14 +38,41 @@ export class ShapeTools {
     this.off.push(()=>ed.host.removeEventListener("keydown",key));
   }
   destroy():void{this.off.forEach(x=>x());this.overlay?.remove();}
+  /** Compound selection uses one visual bounding box, not an unrelated handle
+   * around each member. Only shapes in the same page coordinate system may
+   * be transformed as one affine object. */
+  private groupMembers():Array<{id:string;shape:ShapeData;node:HTMLElement}>{
+    const id=this.id;
+    const shape=shapeOf(id?this.ed.model.block(id):undefined);
+    if(!id||!shape)return[];
+    const ids=shape.group_id?
+      this.ed.model.list().filter(block=>shapeOf(block)?.group_id===shape.group_id).map(b=>b.id):
+      this.ed.selectedShapes.size>1?[...this.ed.selectedShapes]:[id];
+    const all=ids.flatMap(current=>{
+      const item=shapeOf(this.ed.model.block(current));
+      const node=this.ed.els.get(current)?.querySelector<HTMLElement>(".writer-shape");
+      return item&&node&&node.isConnected&&item.layout?.mode==="floating"?[{id:current,shape:item,node}]:[];
+    });
+    if(all.length!==ids.length||all.length<2)return[];
+    const pages=new Set(all.map(entry=>entry.node.closest(".sheet")));
+    return pages.size===1?all:[];
+  }
   refresh():void{
     const b=this.id?this.ed.model.block(this.id):undefined;
     const shape=shapeOf(b);
     const target=this.id?this.ed.els.get(this.id)?.querySelector<HTMLElement>(".writer-shape"):null;
     if(!shape||!target||!target.isConnected||this.ed.readOnly){this.overlay?.remove();this.overlay=null;return;}
     if(!this.overlay)this.build();
-    const r=this.ed.page.rectOf(target),o=this.overlay as HTMLElement;
-    o.style.left=`${r.left}px`;o.style.top=`${r.top}px`;o.style.width=`${r.width}px`;o.style.height=`${r.height}px`;
+    const members=this.groupMembers();
+    this.groupActive=members.map(x=>x.id);
+    const bounds=(members.length?members.map(entry=>this.ed.page.rectOf(entry.node)):[this.ed.page.rectOf(target)]);
+    const left=Math.min(...bounds.map(r=>r.left)),top=Math.min(...bounds.map(r=>r.top));
+    const right=Math.max(...bounds.map(r=>r.left+r.width)),bottom=Math.max(...bounds.map(r=>r.top+r.height));
+    const o=this.overlay as HTMLElement;
+    o.style.left=`${left}px`;o.style.top=`${top}px`;
+    o.style.width=`${right-left}px`;o.style.height=`${bottom-top}px`;
+    o.dataset["group"]=String(members.length>1);
+    o.setAttribute("aria-label",members.length>1?`Transform group of ${members.length} vector shapes`:"Vector shape editing handles");
     o.style.setProperty("--s",String(1/this.ed.page.zoom));
   }
   private build():void{
@@ -81,7 +110,66 @@ export class ShapeTools {
     try{await this.ed.op({op:"shape_set",block:this.id,shape,label});}
     catch(e){this.ed.failed(e);}
   }
+  /** Live-paint the current affine proposal by changing DOM styles only.
+   * On release, the entire group is committed once as a batch operation;
+   * on cancel, every style is restored without modifying the document. */
+  private transformGroupGesture(e:PointerEvent,handle:HTMLElement,mode:"resize"|"rotate",
+    corner:"nw"|"ne"|"sw"|"se"="se"):boolean{
+    const members=this.groupMembers();
+    if(members.length<2||!this.overlay)return false;
+    const original=members.map(({id,shape})=>({id,shape}));
+    const originals=new Map(members.map(({id,node})=>[id,node.getAttribute("style")??""]));
+    const bounds=this.overlay.getBoundingClientRect();
+    const cx=bounds.left+bounds.width/2,cy=bounds.top+bounds.height/2;
+    const startAngle=Math.atan2(e.clientY-cy,e.clientX-cx);
+    const sx=e.clientX,sy=e.clientY;
+    let proposed=original,modified=false;
+    const restore=():void=>{
+      for(const entry of members)entry.node.setAttribute("style",originals.get(entry.id)??"");
+      this.refresh();
+    };
+    const preview=(result:typeof original):void=>{
+      for(const item of result){
+        const node=members.find(x=>x.id===item.id)?.node;
+        if(!node)continue;
+        node.style.left=`${item.shape.layout?.x_mm??0}mm`;
+        node.style.top=`${item.shape.layout?.y_mm??0}mm`;
+        node.style.width=`${item.shape.width_mm}mm`;
+        node.style.height=`${item.shape.height_mm}mm`;
+        node.style.transform=`rotate(${item.shape.rotation_deg}deg)`;
+      }
+    };
+    this.gesture(e,handle,ev=>{
+      const dx=ev.clientX-sx,dy=ev.clientY-sy;
+      let scale=1,rotation_deg=0;
+      if(mode==="resize"){
+        const signX=corner.endsWith("e")?1:-1,signY=corner.startsWith("s")?1:-1;
+        const factorX=1+signX*dx/Math.max(20,bounds.width);
+        const factorY=1+signY*dy/Math.max(20,bounds.height);
+        scale=Math.max(.1,Math.min(10,Math.abs(dx)>Math.abs(dy)?factorX:factorY));
+      }else{
+        rotation_deg=(Math.atan2(ev.clientY-cy,ev.clientX-cx)-startAngle)*180/Math.PI;
+        if(ev.shiftKey)rotation_deg=Math.round(rotation_deg/15)*15;
+      }
+      try{
+        proposed=transformShapeGroup(original,{scale,rotation_deg});
+        preview(proposed);modified=true;
+      }catch(_error){
+        // An invalid preview is not persisted. Existing geometry stays safe.
+        proposed=original;preview(original);modified=false;
+      }
+    },(_event,ok)=>{
+      restore();
+      if(!ok||!modified)return;
+      const ops=proposed.map(item=>({op:"shape_set",block:item.id,shape:item.shape}));
+      void this.ed.op({op:"batch",ops,label:mode==="resize"?"resize shape group":"rotate shape group"})
+        .catch(err=>this.ed.failed(err));
+    });
+    return true;
+  }
+
   private resize(e:PointerEvent,handle:HTMLElement,corner:"nw"|"ne"|"sw"|"se"):void{
+    if(this.transformGroupGesture(e,handle,"resize",corner))return;
     const original=shapeOf(this.id?this.ed.model.block(this.id):undefined);
     const node=this.id?this.ed.els.get(this.id)?.querySelector<HTMLElement>(".writer-shape"):null;
     if(!original||!node)return;
@@ -104,6 +192,7 @@ export class ShapeTools {
     });
   }
   private rotate(e:PointerEvent,handle:HTMLElement):void{
+    if(this.transformGroupGesture(e,handle,"rotate"))return;
     const original=shapeOf(this.id?this.ed.model.block(this.id):undefined);
     const node=this.id?this.ed.els.get(this.id)?.querySelector<HTMLElement>(".writer-shape"):null;
     if(!original||!node)return;
@@ -126,7 +215,8 @@ export class ShapeTools {
     const id=this.id,node=id?this.ed.els.get(id)?.querySelector<HTMLElement>(".writer-shape"):null;
     const shape=shapeOf(id?this.ed.model.block(id):undefined);
     if(!id||!node||!shape)return;
-    const cohort=shape.group_id?this.ed.model.list().filter(block=>
+    const compound=this.groupMembers().map(x=>x.id);
+    const cohort=compound.length>1?compound:shape.group_id?this.ed.model.list().filter(block=>
       shapeOf(block)?.group_id===shape.group_id).map(block=>block.id):[id];
     const movingIds=new Set(cohort);
     const sx=e.clientX,sy=e.clientY,z=this.ed.page.zoom;
