@@ -109,7 +109,7 @@ function paintRuns(shape:ShapeData):HTMLElement {
   const measure=(piece:string,offset:number,scale:number):number=>{
     const seg=decorated(offset);
     const size=(seg?.font_size_pt??shape.text.font_size_pt)*scale*
-      (seg?.flags.superscript||seg?.flags.subscript?.75:1);
+      (seg?.flags.superscript||seg?.flags.subscript ? 0.75 : 1);
     const bold=Boolean(seg?.flags.bold||shape.text.bold),italic=Boolean(seg?.flags.italic||shape.text.italic);
     const family=seg?.font_family??"Arial";
     if(metrics){
