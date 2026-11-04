@@ -1,5 +1,6 @@
 /** The browser's copy of one open document. The server owns the truth; this mirrors it and applies the patches the server returns. */
 import { api } from "./net.js";
+import { shapeOf } from "./shape.js";
 import { PAGE_MM } from "./textops.js";
 import type { Block, CommentThread, DocMeta, DocState, Margins, Op, Patch, Section, Stats, WriterExt } from "./types.js";
 
@@ -14,7 +15,7 @@ const DEFAULT_MARGIN = 25;
 /** The two layers every document has. A block is on the layer of its kind unless the person moved it to one of their own. */
 export const BUILT_IN_LAYERS: Array<{ id: string; name: string; what: string }> = [
   { id: "text", name: "Text", what: "paragraphs, headings, lists, tables and equations" },
-  { id: "illustrations", name: "Illustrations", what: "pictures" },
+  { id: "illustrations", name: "Illustrations", what: "pictures and vector shapes" },
 ];
 
 export interface LayerRow { id: string; name: string; visible: boolean; locked: boolean; custom: boolean; what?: string }
@@ -30,7 +31,7 @@ export function layerList(ext: WriterExt): LayerRow[] {
 export function layerOf(block: Block, ext: WriterExt): string {
   const own = ext.layer_of?.[block.id];
   if (own && (BUILT_IN_LAYERS.some((l) => l.id === own) || (ext.layers ?? []).some((l) => l.id === own))) return own;
-  return block.type === "figure" ? "illustrations" : "text";
+  return block.type === "figure" || shapeOf(block) ? "illustrations" : "text";
 }
 
 export class DocModel {
