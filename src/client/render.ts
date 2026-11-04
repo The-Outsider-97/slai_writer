@@ -276,7 +276,19 @@ export function renderBlock(block: Block, ctx: RenderContext): HTMLElement {
     case "figure": wrap.appendChild(figureElement(block, ctx)); break;
     case "equation": wrap.appendChild(equationElement(block)); break;
     case "embed": wrap.appendChild(embedElement(block, ctx)); break;
-    default: { const shape = shapeOf(block); wrap.appendChild(shape ? paintShape(shape) : textElement(block, ctx)); }
+    default: {
+      const shape = shapeOf(block);
+      if(shape){
+        const node=paintShape(shape);
+        if(shape.layout?.mode==="floating"){
+          node.style.left=`${shape.layout.x_mm??0}mm`;
+          node.style.top=`${shape.layout.y_mm??0}mm`;
+          node.style.zIndex=String(shape.z_index??0);
+          wrap.setAttribute("data-floating",shape.layout.layer??"content");
+        }
+        wrap.appendChild(node);
+      }else wrap.appendChild(textElement(block, ctx));
+    }
   }
   if (block.type === "figure" && block.figure?.placement) wrap.setAttribute("data-floating", block.figure.placement.layer ?? "content");
   syncLayer(wrap, block, ctx);
