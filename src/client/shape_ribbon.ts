@@ -43,7 +43,8 @@ export function buildShapeWorkspace(ctx:DocCtx):{el:HTMLElement;update():void} {
   const {ed}=ctx;
   const root=h("div",{class:"shape-workspace",attrs:{"aria-label":"Shape Format controls"}});
   const nav=h("div",{class:"shape-workspace-nav",attrs:{role:"tablist","aria-label":"Shape editing categories"}});
-  const surface=h("div",{class:"shape-workspace-surface"});
+  const surface=h("div",{class:"shape-workspace-surface",
+    attrs:{role:"tabpanel","aria-label":"Shape editing properties",tabindex:"0"}});
   const panelButtons=new Map<Panel,HTMLButtonElement>();
   let active:Panel="geometry";
   let currentId:string|null=null;
@@ -337,7 +338,10 @@ export function buildShapeWorkspace(ctx:DocCtx):{el:HTMLElement;update():void} {
   };
   const show=(key:Panel):void=>{
     active=key;
-    for(const [name,b]of panelButtons)b.setAttribute("aria-selected",String(name===key));
+    for(const [name,b]of panelButtons){
+      b.setAttribute("aria-selected",String(name===key));
+      b.setAttribute("tabindex",name===key?"0":"-1");
+    }
     surface.replaceChildren(areaFor(key));
     sync=():void=>{
       const activeNode=document.activeElement;
@@ -350,6 +354,17 @@ export function buildShapeWorkspace(ctx:DocCtx):{el:HTMLElement;update():void} {
     b.className="shape-category";b.setAttribute("role","tab");b.setAttribute("aria-selected","false");
     nav.append(b);panelButtons.set(key,b);
   }
+  nav.addEventListener("keydown",event=>{
+    if(!["ArrowLeft","ArrowRight","Home","End"].includes(event.key))return;
+    const keys=[...panelButtons.keys()];
+    const index=keys.indexOf(active);
+    const next=event.key==="Home"?0:event.key==="End"?keys.length-1:
+      (index+(event.key==="ArrowRight"?1:-1)+keys.length)%keys.length;
+    const target=keys[next];
+    if(target&&!panelButtons.get(target)?.disabled){
+      event.preventDefault();show(target);panelButtons.get(target)?.focus();
+    }
+  });
   const more=button("Full properties…",detail);more.className="shape-full-properties";
   nav.append(more);
   root.append(nav,surface);
