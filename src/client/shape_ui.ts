@@ -4,6 +4,7 @@ import { errorText } from "./net.js";
 import { checkbox, selectField } from "./widgets.js";
 import { diffText } from "./textops.js";
 import { beginShapePlacement } from "./shape_placement.js";
+import { transformShapeGroup } from "./shapegroup.js";
 import type { Span } from "./types.js";
 import * as A from "./actions.js";
 import type { DocCtx } from "./docctx.js";
@@ -184,6 +185,24 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
       shape:{...item.shape,z_index:Math.max(-1000,Math.min(1000,(item.shape.z_index??0)+step))}})),label:"arrange shapes"});
   });
   const arrange=h("div",{class:"actions"},duplicate,group,ungroup,moveLayer(1),moveLayer(-1));
+  const groupTransform=(label:string,scale:number,rotation_deg:number):HTMLButtonElement=>
+    operation(label,async()=>{
+      const seed=shapeOf(ctx.ed.model.block(id));
+      const items=seed?.group_id?ctx.ed.model.list().flatMap(block=>{
+        const value=shapeOf(block);return value?.group_id===seed.group_id?[{id:block.id,shape:value}]:[];
+      }):selected();
+      if(items.length<2){toast("Select or group at least two shapes first.",{kind:"info"});return;}
+      try{
+        const result=transformShapeGroup(items,{scale,rotation_deg});
+        await ctx.ed.op({op:"batch",ops:result.map(item=>({op:"shape_set",block:item.id,shape:item.shape})),
+          label:"transform shape group"});
+      }catch(error){toast(errorText(error),{kind:"error"});}
+    });
+  const groupActions=h("div",{class:"actions"},
+    groupTransform("Rotate group 90°",1,90),
+    groupTransform("Scale group 110%",1.1,0),
+    groupTransform("Scale group 90%",.9,0));
+
 
   const body=h("div",{class:"shape-format-form stack"},
     h("h3",{text:"Geometry"}),kind.root,h("div",{class:"grid-2"},row("Width (mm)",width),row("Height (mm)",height)),
@@ -198,7 +217,8 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
     formatSelected,h("div",{class:"actions"},formatColor,colorSelected,formatSize,sizeSelected,clearRuns),
     h("h3",{text:"Position and arrangement"}),layout.root,floatingControls,
     h("p",{class:"muted",text:"Shift-click other shapes to select several. Grouping preserves editable individual shapes."}),
-    arrange,
+    arrange,h("p",{class:"muted",text:"Compound scale and rotation operate on floating groups using a shared centre; individual shapes remain editable."}),
+    groupActions,
     h("h3",{text:"Shadow layers"}),shadowList,add);
   const dialog=openDialog<true>({title:"Shape Format",body,
     actions:[{label:"Apply changes",kind:"primary",run:async()=>{
