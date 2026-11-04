@@ -201,7 +201,8 @@ export class Editor {
     });
     // A margin, header or footer line (or its ruler handle) that has the focus keeps it: putting the caret back would take it away.
     if (!onLine) this.restoreSelection(saved);
-    if (this.selectedBlock) this.els.get(this.selectedBlock)?.setAttribute("data-selected", "");   // the block was drawn again: keep showing that it is selected
+    if (this.selectedBlock) this.els.get(this.selectedBlock)?.setAttribute("data-selected", "");
+    for (const selected of this.selectedShapes) this.els.get(selected)?.setAttribute("data-shape-multi", "");
     this.decor.refresh();
     this.paintTocNumbers();
     this.events.emit({ type: "layout" });
