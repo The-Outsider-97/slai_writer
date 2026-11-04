@@ -1154,6 +1154,20 @@ def apply_operation(doc: dict[str, Any], op: dict[str, Any]) -> tuple[Undo, dict
     tracker = Tracker(doc)
     try:
         result = HANDLERS[op["op"]](tracker, op)
+        # Shape-bearing paragraph blocks are inert SLDC carriers, not editable
+        # text paragraphs. Reject any mutation that would hide or corrupt them.
+        from .shape_validation import SHAPE_KEY, validate_shape
+        for item in doc["blocks"]:
+            if SHAPE_KEY not in item.get("extensions", {}):
+                continue
+            if item["type"] != "paragraph" or item["text"]:
+                raise OpError("Vector shape carriers cannot contain regular document text")
+            shape = validate_shape(item["extensions"][SHAPE_KEY])
+            placement = shape.get("layout") or {}
+            if placement.get("anchor") == "block":
+                target = placement["target"]
+                if target == item["id"] or not any(b["id"] == target for b in doc["blocks"]):
+                    raise OpError("Shape anchor must refer to a different existing block")
     except BaseException:
         apply_undo(doc, tracker.undo)                           # put back whatever was already touched
         raise
