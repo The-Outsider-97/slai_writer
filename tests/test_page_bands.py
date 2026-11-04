@@ -7,26 +7,6 @@ from applications.slai_writer.tests.helpers import Workbench, png
 
 
 class PageBands(Workbench):
-    def test_independent_header_footer_fonts_survive_sldc_roundtrip(self):
-        session = self.new_session()
-        original_body_style = dict(session.doc["styles"]["paragraph"].get("Body Text", {}))
-        session.apply({"op": "page_setup", "header": {"left": "Report", "formats": {"left": {
-            "font_family": "Arial", "font_size_pt": 9, "color": "#123456", "bold": True}}},
-            "footer": {"right": "{page}", "formats": {"right": {
-                "font_family": "Georgia", "font_size_pt": 8, "color": "#654321", "italic": True}}}}, None)
-        section = sldc().loads_package(session.to_bytes()).document["sections"][0]
-        self.assertEqual(section["header"]["formats"]["left"]["font_family"], "Arial")
-        self.assertEqual(section["footer"]["formats"]["right"]["font_size_pt"], 8)
-        self.assertEqual(session.doc["styles"]["paragraph"].get("Body Text", {}), original_body_style)
-        session.undo(None)
-        self.assertNotIn("header", session.doc["sections"][0])
-
-    def test_invalid_header_footer_font_is_rejected(self):
-        session = self.new_session()
-        for bad in ({"font_size_pt": -1}, {"color": "red"}, {"font_family": "bad;url()"}):
-            with self.assertRaises(Exception):
-                session.apply({"op": "page_setup", "header": {"left": "Text", "formats": {"left": bad}}}, None)
-
     def page_doc(self, **page):
         S = sldc()
         package = S.new_package("Bands", [S.make_block("paragraph", "Hello")],

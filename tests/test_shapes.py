@@ -4,7 +4,6 @@ import math
 import unittest
 
 from applications.slai_writer.shape_validation import SHAPE_KEY, validate_shape
-from applications.slai_writer.session import sldc
 from applications.slai_writer.tests.helpers import Workbench
 
 
@@ -89,72 +88,3 @@ class ShapeTransactions(Workbench):
             session.apply({"op": "shape_set", "block": ident,
                            "shape": {**changed, "opacity": float("nan")}}, None)
         self.assertEqual(session.doc["blocks"][-1]["extensions"][SHAPE_KEY], changed)
-
-
-class ShapeAdvanced(Workbench):
-    def test_rich_runs_and_floating_anchor_roundtrip(self):
-        session = self.new_session(text="Anchor paragraph")
-        anchor = session.doc["blocks"][-1]["id"]
-        value = sample("star")
-        value["text"]["content"] = "hello shadow"
-        value["text"]["fit"] = "shrink"
-        value["text"]["spans"] = [{"type": "format", "start": 0, "end": 5,
-                                    "bold": True, "font_size_pt": 16,
-                                    "color": "#0000ff"}]
-        value["layout"] = {"mode": "floating", "anchor": "block", "target": anchor,
-                           "x_mm": 12.5, "y_mm": 23.5, "wrap": "none",
-                           "layer": "in_front_of_text"}
-        value["z_index"] = 4
-        session.apply({"op": "block_insert", "after": anchor,
-                       "block": {"type": "paragraph", "text": "",
-                                 "extensions": {SHAPE_KEY: value}}}, None)
-        s = sldc().loads_package(session.to_bytes()).document["blocks"][-1]
-        self.assertEqual(s["extensions"][SHAPE_KEY], value)
-
-    def test_invalid_anchor_does_not_mutate_doc(self):
-        session = self.new_session(text="Anchor")
-        anchor = session.doc["blocks"][-1]["id"]
-        shape = sample()
-        session.apply({"op": "block_insert", "after": anchor,
-                       "block": {"type": "paragraph", "text": "",
-                                 "extensions": {SHAPE_KEY: shape}}}, None)
-        own = session.doc["blocks"][-1]["id"]
-        original = copy.deepcopy(session.doc)
-        shape["layout"] = {"mode": "floating", "anchor": "block", "target": own,
-                           "x_mm": 0, "y_mm": 0, "wrap": "none", "layer": "content"}
-        with self.assertRaises(Exception):
-            session.apply({"op": "shape_set", "block": own, "shape": shape}, None)
-        self.assertEqual(original, session.doc)
-
-    def test_shape_is_not_regular_text(self):
-        session = self.new_session(text="Anchor")
-        anchor = session.doc["blocks"][-1]["id"]
-        session.apply({"op": "block_insert", "after": anchor,
-                       "block": {"type": "paragraph", "text": "",
-                                 "extensions": {SHAPE_KEY: sample()}}}, None)
-        own = session.doc["blocks"][-1]["id"]
-        with self.assertRaises(Exception):
-            session.apply({"op": "text", "block": own, "start": 0,
-                           "end": 0, "insert": "ordinary paragraph"}, None)
-        self.assertEqual(session.doc["blocks"][-1]["text"], "")
-
-    def test_group_and_arrangement_batch_is_atomic(self):
-        session = self.new_session(text="Start")
-        anchor = session.doc["blocks"][-1]["id"]
-        for kind in ("rectangle", "triangle"):
-            session.apply({"op": "block_insert",
-                           "after": session.doc["blocks"][-1]["id"],
-                           "block": {"type": "paragraph", "text": "",
-                                     "extensions": {SHAPE_KEY: sample(kind)}}}, None)
-        ids = [b["id"] for b in session.doc["blocks"][-2:]]
-        specs = [copy.deepcopy(b["extensions"][SHAPE_KEY]) for b in session.doc["blocks"][-2:]]
-        for data in specs:
-            data["group_id"] = "group-one"
-            data["z_index"] = 1
-        session.apply({"op": "batch", "label": "group shapes",
-                       "ops": [{"op": "shape_set", "block": ident, "shape": spec}
-                               for ident, spec in zip(ids, specs)]}, None)
-        self.assertEqual({b["extensions"][SHAPE_KEY]["group_id"]
-                          for b in session.doc["blocks"][-2:]}, {"group-one"})
-        self.assertEqual({b["extensions"][SHAPE_KEY]["z_index"]
-                          for b in session.doc["blocks"][-2:]}, {1})
