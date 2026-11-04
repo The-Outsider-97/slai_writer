@@ -265,21 +265,42 @@ export async function forwardDelete(ed: Editor): Promise<boolean> {
 }
 
 /** Select a picture, table, equation or EMBED as a whole (Delete then removes it). */
-export function selectBlock(ed: Editor, id: string): void {
-  if (ed.selectedBlock) ed.els.get(ed.selectedBlock)?.removeAttribute("data-selected");
+export function selectBlock(ed: Editor, id: string, append = false): void {
+  if (!append) {
+    if (ed.selectedBlock) ed.els.get(ed.selectedBlock)?.removeAttribute("data-selected");
+    for (const prev of ed.selectedShapes) ed.els.get(prev)?.removeAttribute("data-shape-multi");
+    ed.selectedShapes.clear();
+  }
+  const block = ed.model.block(id);
+  const shape = block?.extensions?.["slai.writer.shape"] as {group_id?:string|null}|undefined;
+  if (shape) {
+    const cohort = shape.group_id
+      ? ed.model.list().filter(b=>(b.extensions?.["slai.writer.shape"] as {group_id?:string}|undefined)?.group_id===shape.group_id).map(b=>b.id)
+      : [id];
+    for (const other of cohort) {
+      if (append && ed.selectedShapes.has(other)) {
+        ed.selectedShapes.delete(other);ed.els.get(other)?.removeAttribute("data-shape-multi");
+      } else {
+        ed.selectedShapes.add(other);ed.els.get(other)?.setAttribute("data-shape-multi","");
+      }
+    }
+  }
+  if (ed.selectedBlock && ed.selectedBlock!==id) ed.els.get(ed.selectedBlock)?.removeAttribute("data-selected");
   ed.selectedBlock = id;
   const el = ed.els.get(id);
   el?.setAttribute("data-selected", "");
   el?.scrollIntoView({ block: "nearest" });
-  const label = ed.model.block(id)?.type ?? "block";
+  const label = shape ? "Shape" : block?.type ?? "block";
   announce(`${label} selected. Press Delete to remove it, or Enter to edit it.`);
   ed.events.emit({ type: "block-selected", id });
 }
 
 export function clearBlockSelection(ed: Editor): void {
   if (ed.selectedBlock) ed.els.get(ed.selectedBlock)?.removeAttribute("data-selected");
+  for (const prev of ed.selectedShapes) ed.els.get(prev)?.removeAttribute("data-shape-multi");
   const had = ed.selectedBlock !== null;
   ed.selectedBlock = null;
+  ed.selectedShapes.clear();
   if (had) ed.events.emit({ type: "block-selected", id: null });
 }
 

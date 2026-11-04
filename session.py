@@ -41,7 +41,13 @@ def words_and_chars(text: str) -> tuple[int, int]:
 
 
 def block_plain(block: dict[str, Any]) -> str:
-    """Readable text of a block for counting and searching (tables: caption and cells; equations: source)."""
+    """Readable text including native shape-owned text for word counts."""
+    from .shape_validation import SHAPE_KEY
+    shape = (block.get("extensions") or {}).get(SHAPE_KEY)
+    if isinstance(shape, dict):
+        text = (shape.get("text") or {})
+        if isinstance(text, dict) and isinstance(text.get("content"), str):
+            return text["content"]
     return sldc().block_text(block).replace(tm.OBJ, "")
 
 
@@ -93,6 +99,19 @@ class DocumentSession:
         self.password = password
         self.readonly_reason = readonly_reason
         self.notices = notices or []
+        from .shape_validation import SHAPE_KEY, validate_shape
+        for block in package.document["blocks"]:
+            shape = (block.get("extensions") or {}).get(SHAPE_KEY)
+            if shape is None:
+                continue
+            try:
+                if block.get("type") != "paragraph" or block.get("text"):
+                    raise ValueError("Shape extension requires an empty paragraph carrier")
+                validate_shape(shape)
+            except (ValueError, BadRequest) as exc:
+                self.readonly_reason = "This document has an invalid or unsupported vector shape and was opened read-only."
+                self.notices.append(f"Shape data in {block.get('id', '?')} was preserved but cannot be edited: {str(exc)[:160]}")
+                break
         self.origin = origin or {}                      # e.g. {"kind": "recovery", "path": ...} or {"kind": "snapshot", "id": ...}
         self.lock = threading.RLock()
         self.version = 0

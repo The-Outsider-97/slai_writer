@@ -23,6 +23,8 @@ from typing import Any
 
 from ..tools.errors import BadRequest, DependencyMissing, Forbidden, LimitExceeded, NotFound, Unauthorized
 from .session import DocumentSession, load_bytes, sldc
+from .shape_export import prepare_shapes
+from .shape_validation import SHAPE_KEY
 
 EXPORT_FORMATS = ("sldc", "pdf", "docx", "odt", "rtf", "html", "md", "txt", "xml")
 IMPORT_FORMATS = ("sldc", "docx", "doc", "odt", "rtf", "html", "md", "txt", "xml", "csv", "pdf")
@@ -122,6 +124,47 @@ class Exchange:
         with session.lock:
             return session._settled(session.pkg.copy())                         # noqa: SLF001
 
+    def _shape_export_package(self, package: Any, fmt: str, dm: Any) -> tuple[Any, list[str]]:
+        """Prefer Documaster's native vector adapter; retain a truthful legacy fallback."""
+        if fmt in ("pdf", "docx"):
+            try:
+                module = dm.module(f"docmodel.writers.write_{fmt}")
+                native = bool(getattr(module, "SLDC_WRITER_SHAPES", False))
+            except (ImportError, AttributeError):
+                native = False
+            if native:
+                # Only select a native writer when it can visually preserve
+                # every shape. Unsupported effects trigger the measured PNG
+                # fallback rather than silently dropping fidelity.
+                for block in package.document["blocks"]:
+                    shape = (block.get("extensions") or {}).get(SHAPE_KEY)
+                    if shape is None:
+                        continue
+                    shadows = shape.get("shadows") or []
+                    advanced_runs = any(
+                        "font_size_pt" in s or "font_family" in s
+                        for s in (shape.get("text", {}).get("spans") or []))
+                    if fmt == "pdf":
+                        if (float(shape.get("opacity", 1)) != 1
+                                or advanced_runs
+                                or any(float(s.get("blur_mm", 0)) > 0
+                                       or float(s.get("spread_mm", 0)) != 0
+                                       for s in shadows)):
+                            native = False
+                            break
+                    elif fmt == "docx":
+                        corners = shape.get("corners_mm") or []
+                        if (len(shadows) > 1
+                                or any(float(x) > 0 for x in corners)
+                                or float(shape.get("opacity", 1)) != 1
+                                or shape.get("text", {}).get("fit") == "shrink"
+                                or any(float(s.get("spread_mm", 0)) != 0 for s in shadows)):
+                            native = False
+                            break
+            if native:
+                return package, []
+        return prepare_shapes(package, fmt, sldc())
+
     # ---------------------------------------------------------------------------------------------------- preflight
     def preflight(self, session: DocumentSession, target: str | None = None) -> dict[str, Any]:
         """Problems worth fixing before the document leaves Writer. Findings never block an export; they say what to check."""
@@ -142,6 +185,25 @@ class Exchange:
         ids = {b["id"] for b in doc["blocks"]}
         for block in doc["blocks"]:
             kind = block["type"]
+            shape = (block.get("extensions") or {}).get(SHAPE_KEY)
+            if isinstance(shape, dict):
+                text = (shape.get("text") or {}).get("content", "")
+                if text and shape.get("kind") == "line":
+                    add("warn", "shape_line_text", "Line labels currently have limited support in visual exports.", block["id"])
+                layout = shape.get("layout") or {}
+                if layout.get("wrap") == "square":
+                    add("warn", "shape_square_wrap", "The Writer page layout cannot perform true square wrapping around this shape. Verify foreign-format layout.", block["id"])
+                if text and shape.get("text", {}).get("fit", "keep") == "keep":
+                    t = shape["text"]
+                    # Conservative estimate: actual font metrics and character
+                    # widths vary. This reports risk, not verified overflow.
+                    capacity = max(1, (float(shape["width_mm"]) - 2 * float(t.get("padding_mm", 0)))
+                                   * (float(shape["height_mm"]) - 2 * float(t.get("padding_mm", 0)))
+                                   / max(12.0, float(t.get("font_size_pt", 12)) ** 2 * 0.9))
+                    if len(text) > capacity * 2:
+                        add("info", "shape_text_fit", "Shape text may overflow; use the editor's visible overflow cue or enable shrink-to-fit.", block["id"])
+                if target in ("pdf", "docx", "odt", "rtf", "html"):
+                    add("info", "shape_export", "Vector shape export uses the installed Documaster capability; unsupported drawing features are converted to PNG with explicit loss reporting.", block["id"])
             if kind == "figure":
                 fig = block.get("figure", {})
                 if not fig.get("decorative") and not (fig.get("alt") or "").strip():
@@ -212,6 +274,7 @@ class Exchange:
         if fmt == "sldc":
             return self._export_sldc(session, package, out_dir, stem, password, pre)
         dm = self._dm()
+        converted, shape_warnings = self._shape_export_package(package, fmt, dm)
         files = dm.module("files")
         writers = dm.module("docmodel.writers")
         verify = dm.module("docmodel.verify")
@@ -225,8 +288,8 @@ class Exchange:
         try:
             with files.atomic_output(out_dir, stem, formats.ext_for(fmt)) as out:
                 wopts.stem = out.destination.stem
-                written = writers.get_writer(fmt)(package, out.temp, wopts)
-                check = verify.verify_written(out.temp, fmt, package, dm.services)
+                written = writers.get_writer(fmt)(converted, out.temp, wopts)
+                check = verify.verify_written(out.temp, fmt, converted, dm.services)
                 if not check["ok"]:
                     failed = "; ".join(f"{c['name']} ({c['detail']})" for c in check["checks"] if c["ok"] is False)
                     raise BadRequest("The exported file failed its own check and was discarded: " + failed,
@@ -249,7 +312,8 @@ class Exchange:
             target.write_bytes(data)
             extras.append(str(target))
         report = {"path": str(final), "name": final.name, "format": fmt, "bytes": final.stat().st_size, "sha256": files.sha256_file(final),
-                  "pages": written.pages, "kept": written.kept, "lost": sorted(set([*LOSSY[fmt], *written.lost])), "warnings": written.warnings,
+                  "pages": written.pages, "kept": written.kept,
+                   "lost": sorted(set([*LOSSY[fmt], *written.lost, *shape_warnings])), "warnings": [*written.warnings, *shape_warnings],
                   "extras": extras, "backend": written.backend, "preflight": pre,
                   "verification": {"ok": check["ok"], "checks": check["checks"]}}
         if fmt == "pdf":
@@ -319,6 +383,7 @@ class Exchange:
         dm = self._dm()
         writers, files, errors = dm.module("docmodel.writers"), dm.module("files"), dm.module("errors")
         package = self._settled(session)
+        package, _shape_warnings = self._shape_export_package(package, "pdf", dm)
         with tempfile.TemporaryDirectory(prefix="wr-pdf-", dir=self._tmp()) as tmp:
             target = Path(tmp) / "preview.pdf"
             try:

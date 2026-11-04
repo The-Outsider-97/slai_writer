@@ -2,15 +2,30 @@
 import { h, labelled, openDialog, toast } from "./kit.js";
 import { errorText } from "./net.js";
 import { checkbox, selectField } from "./widgets.js";
+import { diffText } from "./textops.js";
+import { beginShapePlacement } from "./shape_placement.js";
+import { transformShapeGroup } from "./shapegroup.js";
+import type { Span } from "./types.js";
 import * as A from "./actions.js";
 import type { DocCtx } from "./docctx.js";
-import { SHAPE_KEY, SHAPE_KINDS, defaultShape, shapeOf, type ShapeData, type ShapeKind, type Shadow } from "./shape.js";
+import { SHAPE_KEY, SHAPE_KINDS, shapeOf, pathFor, roundedRect, type ShapeData, type ShapeKind, type Shadow } from "./shape.js";
 
 const number = (value:number,min:number,max:number,step=1):HTMLInputElement =>
   h("input",{type:"number",value:String(value),min,max,step,attrs:{inputmode:"decimal"}});
 const color=(value:string):HTMLInputElement=>h("input",{type:"color",value});
 const row=(name:string,node:HTMLElement):HTMLElement=>labelled(name,node);
 const percent=(value:number):HTMLInputElement=>number(Math.round(value*100),0,100);
+/** Shift unaffected rich-text runs across edits; split runs when replacing text. */
+export function rebaseShapeSpans(spans:Span[],start:number,end:number,insertSize:number):Span[]{
+  const diff=insertSize-(end-start),next:Span[]=[];
+  for(const span of spans){
+    if(span.end<=start){next.push({...span});continue;}
+    if(span.start>=end){next.push({...span,start:span.start+diff,end:span.end+diff});continue;}
+    if(span.start<start)next.push({...span,end:start});
+    if(span.end>end)next.push({...span,start:start+insertSize,end:span.end+diff});
+  }
+  return next.filter(s=>s.start<s.end);
+}
 const shadowDefault=():Shadow=>({enabled:true,color:"#555555",opacity:.55,offset_x_mm:3,offset_y_mm:3,blur_mm:2,spread_mm:0});
 
 export async function insertShape(ctx:DocCtx):Promise<void> {
@@ -18,14 +33,19 @@ export async function insertShape(ctx:DocCtx):Promise<void> {
   const grid=h("div",{class:"shape-gallery",attrs:{role:"group","aria-label":"Choose a vector shape"}});
   const handle=openDialog<true>({title:"Insert Shape",body:grid,cancelLabel:"Cancel"});
   for(const kind of SHAPE_KINDS){
-    const btn=h("button",{type:"button",class:"shape-gallery-item",text:kind[0]?.toUpperCase()+kind.slice(1),
+    const btn=h("button",{type:"button",class:"shape-gallery-item",
       attrs:{"aria-label":`Insert ${kind}`}});
-    btn.addEventListener("click",()=>{void (async()=>{
-      try {
-        const id=await A.insertBlock(ctx.ed,{type:"paragraph",text:"",extensions:{[SHAPE_KEY]:defaultShape(kind)}});
-        if(id){handle.close();A.selectBlock(ctx.ed,id);await editShape(ctx,id);}
-      }catch(e){toast(errorText(e),{kind:"error"});}
-    })();});
+    const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+    svg.setAttribute("viewBox","0 0 100 100");svg.setAttribute("width","38");svg.setAttribute("height","38");
+    svg.setAttribute("aria-hidden","true");
+    const preview=document.createElementNS("http://www.w3.org/2000/svg",kind==="ellipse"?"ellipse":"path");
+    if(kind==="ellipse"){preview.setAttribute("cx","50");preview.setAttribute("cy","50");preview.setAttribute("rx","47");preview.setAttribute("ry","47");}
+    else preview.setAttribute("d",kind==="rectangle"?roundedRect([0,0,0,0]):pathFor(kind));
+    preview.setAttribute("fill",kind==="line"?"none":"#e3c54a");
+    preview.setAttribute("stroke","#202020");preview.setAttribute("stroke-width","4");
+    svg.appendChild(preview);
+    btn.append(svg,h("span",{text:kind[0]?.toUpperCase()+kind.slice(1)??kind}));
+    btn.addEventListener("click",()=>{handle.close();beginShapePlacement(ctx,kind);});
     grid.appendChild(btn);
   }
   await handle.result;
@@ -42,7 +62,56 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
   const borderWidth=number(s.outline.width_pt,.1,72,.5),borderOpacity=percent(s.outline.opacity);
   const borderStyle=selectField("Outline style",[["solid","Solid"],["dashed","Dashed"],["dotted","Dotted"]],s.outline.style);
   const opacity=percent(s.opacity);
-  const text=h("textarea",{rows:3,maxLength:4000,value:s.text.content,attrs:{"aria-label":"Text inside shape"}});
+  const text=h("textarea",{rows:3,maxLength:4000,value:s.text.content,attrs:{"aria-label":"Text inside shape"}}); 
+  let lastText=text.value;
+  let spans:Span[]=(s.text.spans??[]).map(x=>({...x}));
+  text.addEventListener("input",()=>{
+    const diff=diffText(lastText,text.value,text.selectionStart);
+    if(diff)spans=rebaseShapeSpans(spans,diff.start,diff.end,diff.insert.length);
+    lastText=text.value;
+  });
+  const addRun=(props:Partial<Span>):void=>{
+    const start=text.selectionStart,end=text.selectionEnd;
+    if(end<=start){toast("Select the characters to format first.",{kind:"info"});text.focus();return;}
+    spans.push({type:"format",start,end,...props});
+    if(spans.length>300)spans=spans.slice(-300);
+    text.focus();text.setSelectionRange(start,end);
+  };
+  const formatSelected=h("div",{class:"actions"},
+    ...([["Bold","bold"],["Italic","italic"],["Underline","underline"]] as const).map(([label,key])=>{
+      const button=h("button",{type:"button",text:label,attrs:{"aria-label":`${label} selected shape text`}});
+      button.addEventListener("mousedown",e=>e.preventDefault());
+      button.addEventListener("click",()=>addRun({[key]:true}));
+      return button;
+    }));
+  const formatColor=color("#222222"),formatSize=number(s.text.font_size_pt,5,144,.5);
+  const colorSelected=h("button",{type:"button",text:"Color selection"});
+  colorSelected.addEventListener("mousedown",e=>e.preventDefault());
+  colorSelected.addEventListener("click",()=>addRun({color:formatColor.value}));
+  const sizeSelected=h("button",{type:"button",text:"Size selection"});
+  sizeSelected.addEventListener("mousedown",e=>e.preventDefault());
+  sizeSelected.addEventListener("click",()=>addRun({font_size_pt:Number(formatSize.value)}));
+  const clearRuns=h("button",{type:"button",text:"Clear selected formatting"});
+  clearRuns.addEventListener("click",()=>{const a=text.selectionStart,b=text.selectionEnd;
+    spans=spans.flatMap(run=>a<b&&run.start<b&&run.end>a?
+      [{...run,end:a},{...run,start:b}].filter(x=>x.start<x.end):[run]);});
+  const fit=selectField("Text fitting",[["keep","Keep text size; warn if overflow"],["shrink","Shrink display text to fit"]],s.text.fit??"keep");
+  const layout=selectField("Positioning",[["inline","Inline with text"],["floating","Floating relative to page content"]],
+    s.layout?.mode??"inline");
+  const posX=number(s.layout?.x_mm??0,-5000,5000,.5),posY=number(s.layout?.y_mm??0,-5000,5000,.5);
+  const layer=selectField("Object layer",[["content","Content"],["behind_text","Behind text"],["in_front_of_text","In front of text"]],s.layout?.layer??"in_front_of_text");
+  const zIndex=number(s.z_index??0,-1000,1000,1);
+  const wrap=selectField("Text wrapping",[["none","No wrap / overlay"],["top_bottom","Above and below (flow-aware)"]],
+    s.layout?.wrap==="top_bottom"?"top_bottom":"none");
+  const syncWrap=():void=>{
+    if(wrap.select.value!=="none")layer.select.value="content";
+    layer.select.disabled=wrap.select.value!=="none";
+  };
+  wrap.select.addEventListener("change",syncWrap);syncWrap();
+  const floatingControls=h("div",{class:"stack"},row("Horizontal position (mm)",posX),
+    row("Vertical position (mm)",posY),wrap.root,layer.root,row("Stacking order",zIndex));
+  const updateFloat=():void=>{floatingControls.hidden=layout.select.value!=="floating";};
+  layout.select.addEventListener("change",updateFloat);updateFloat();
   const textColor=color(s.text.color),textSize=number(s.text.font_size_pt,5,144,.5);
   const textBold=checkbox("Bold",s.text.bold),textItalic=checkbox("Italic",s.text.italic);
   const textAlign=selectField("Text alignment",[["left","Left"],["center","Center"],["right","Right"]],s.text.align);
@@ -75,6 +144,68 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
   rebuild();
   const add=h("button",{type:"button",text:"+ Add Shadow"});
   add.addEventListener("click",()=>{if(shadows.length<8){shadows.push(shadowDefault());rebuild();}else toast("Eight shadows is the maximum.",{kind:"info"});});
+  const selected=():Array<{id:string;shape:ShapeData}>=>[...ctx.ed.selectedShapes].flatMap(key=>{
+    const value=shapeOf(ctx.ed.model.block(key));return value?[{id:key,shape:value}]:[];
+  });
+  const operation=(label:string,work:()=>Promise<void>):HTMLButtonElement=>{
+    const button=h("button",{type:"button",text:label});
+    button.addEventListener("click",()=>{void work().catch(error=>toast(errorText(error),{kind:"error"}));});
+    return button;
+  };
+  const duplicate=operation("Duplicate",async()=>{
+    const duplicate=structuredClone(shapeOf(ctx.ed.model.block(id))??s);
+    delete duplicate.group_id;
+    if(duplicate.layout?.mode==="floating"){
+      duplicate.layout.x_mm=(duplicate.layout.x_mm??0)+5;
+      duplicate.layout.y_mm=(duplicate.layout.y_mm??0)+5;
+    }
+    const created=await A.insertBlock(ctx.ed,{type:"paragraph",text:"",extensions:{[SHAPE_KEY]:duplicate}},id);
+    if(created)A.selectBlock(ctx.ed,created);
+  });
+  const group=operation("Group selected",async()=>{
+    const items=selected();if(items.length<2){toast("Shift-click at least two shapes first.",{kind:"info"});return;}
+    const modes=new Set(items.map(item=>item.shape.layout?.mode??"inline"));
+    if(modes.size!==1){toast("Group shapes with the same positioning mode.",{kind:"info"});return;}
+    const groupId=ctx.ed.newId();
+    await ctx.ed.op({op:"batch",ops:items.map(item=>({op:"shape_set",block:item.id,
+      shape:{...item.shape,group_id:groupId}})),label:"group shapes"});
+  });
+  const ungroup=operation("Ungroup",async()=>{
+    const seed=shapeOf(ctx.ed.model.block(id));
+    const items=seed?.group_id?ctx.ed.model.list().flatMap(block=>{
+      const value=shapeOf(block);return value?.group_id===seed.group_id?[{id:block.id,shape:value}]:[];
+    }):selected();
+    if(!items.length)return;
+    await ctx.ed.op({op:"batch",ops:items.map(item=>({op:"shape_set",block:item.id,
+      shape:{...item.shape,group_id:null}})),label:"ungroup shapes"});
+  });
+  const moveLayer=(step:number):HTMLButtonElement=>operation(step>0?"Bring forward":"Send backward",async()=>{
+    const items=selected().length?selected():[{id,shape:shapeOf(ctx.ed.model.block(id))??s}];
+    await ctx.ed.op({op:"batch",ops:items.map(item=>({op:"shape_set",block:item.id,
+      shape:{...item.shape,z_index:Math.max(-1000,Math.min(1000,(item.shape.z_index??0)+step))}})),label:"arrange shapes"});
+  });
+  const arrange=h("div",{class:"actions"},duplicate,group,ungroup,moveLayer(1),moveLayer(-1));
+  const groupTransform=(label:string,scale:number,rotation_deg:number):HTMLButtonElement=>
+    operation(label,async()=>{
+      const seed=shapeOf(ctx.ed.model.block(id));
+      const items=seed?.group_id?ctx.ed.model.list().flatMap(block=>{
+        const value=shapeOf(block);return value?.group_id===seed.group_id?[{id:block.id,shape:value}]:[];
+      }):selected();
+      if(items.length<2){toast("Select or group at least two shapes first.",{kind:"info"});return;}
+      const pages=new Set(items.map(item=>ctx.ed.els.get(item.id)?.closest(".sheet")));
+      if(pages.size>1){toast("Rotate or scale group members on the same page only.",{kind:"info"});return;}
+      try{
+        const result=transformShapeGroup(items,{scale,rotation_deg});
+        await ctx.ed.op({op:"batch",ops:result.map(item=>({op:"shape_set",block:item.id,shape:item.shape})),
+          label:"transform shape group"});
+      }catch(error){toast(errorText(error),{kind:"error"});}
+    });
+  const groupActions=h("div",{class:"actions"},
+    groupTransform("Rotate group 90°",1,90),
+    groupTransform("Scale group 110%",1.1,0),
+    groupTransform("Scale group 90%",.9,0));
+
+
   const body=h("div",{class:"shape-format-form stack"},
     h("h3",{text:"Geometry"}),kind.root,h("div",{class:"grid-2"},row("Width (mm)",width),row("Height (mm)",height)),
     row("Rotation (degrees)",rotation),
@@ -83,7 +214,13 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
     borderStyle.root,row("Outline opacity %",borderOpacity),row("Overall opacity %",opacity),
     h("h3",{text:"Corners (rectangles)"}),...cornerInputs.map((v,i)=>row(["Top left","Top right","Bottom right","Bottom left"][i]??"Corner",v)),
     h("h3",{text:"Text"}),row("Content",text),row("Text color",textColor),row("Font size (pt)",textSize),
-    textBold.root,textItalic.root,textAlign.root,row("Text padding (mm)",padding),
+    textBold.root,textItalic.root,textAlign.root,row("Text padding (mm)",padding),fit.root,
+    h("p",{class:"muted",text:"Select characters inside the text field, then apply a character format."}),
+    formatSelected,h("div",{class:"actions"},formatColor,colorSelected,formatSize,sizeSelected,clearRuns),
+    h("h3",{text:"Position and arrangement"}),layout.root,floatingControls,
+    h("p",{class:"muted",text:"Shift-click other shapes to select several. Grouping preserves editable individual shapes."}),
+    arrange,h("p",{class:"muted",text:"Compound scale and rotation operate on floating groups using a shared centre; individual shapes remain editable."}),
+    groupActions,
     h("h3",{text:"Shadow layers"}),shadowList,add);
   const dialog=openDialog<true>({title:"Shape Format",body,
     actions:[{label:"Apply changes",kind:"primary",run:async()=>{
@@ -96,8 +233,17 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
       s.corners_mm=s.kind==="rectangle"?cornerInputs.map(x=>Number(x.value)):[0,0,0,0];
       s.text={content:text.value,color:textColor.value,font_size_pt:Number(textSize.value),
         bold:textBold.input.checked,italic:textItalic.input.checked,align:textAlign.select.value as ShapeData["text"]["align"],
-        padding_mm:Number(padding.value)};
+        padding_mm:Number(padding.value),spans,fit:fit.select.value as "keep"|"shrink"};
       s.shadows=shadows;
+      s.z_index=Number(zIndex.value);
+      if(layout.select.value==="inline")s.layout={mode:"inline"};
+      else{
+        const anchor=ctx.ed.model.order.find(x=>x!==id)??null;
+        s.layout={mode:"floating",anchor:anchor?"block":"page",
+          ...(anchor?{target:anchor}:{}),x_mm:Number(posX.value),y_mm:Number(posY.value),
+          wrap:wrap.select.value as "none"|"top_bottom",
+          layer:wrap.select.value!=="none"?"content":layer.select.value as "content"|"behind_text"|"in_front_of_text"};
+      }
       try{await ctx.ed.op({op:"shape_set",block:id,shape:s,label:"format shape"});return true;}
       catch(e){toast(errorText(e),{kind:"error"});return undefined;}
     }}]});

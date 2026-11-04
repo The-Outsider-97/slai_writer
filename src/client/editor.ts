@@ -61,6 +61,8 @@ export class Editor {
   readonly dirty = new Set<string>();
   composing = false;
   selectedBlock: string | null = null;
+  /** Multi-object selection for vector illustrations; current selectedBlock remains the focus. */
+  readonly selectedShapes = new Set<string>();
   private sigs = new Map<string, string>();
   private deferred = new Set<string>();
   private ctxCache: RenderContext | null = null;
@@ -199,7 +201,8 @@ export class Editor {
     });
     // A margin, header or footer line (or its ruler handle) that has the focus keeps it: putting the caret back would take it away.
     if (!onLine) this.restoreSelection(saved);
-    if (this.selectedBlock) this.els.get(this.selectedBlock)?.setAttribute("data-selected", "");   // the block was drawn again: keep showing that it is selected
+    if (this.selectedBlock) this.els.get(this.selectedBlock)?.setAttribute("data-selected", "");
+    for (const selected of this.selectedShapes) this.els.get(selected)?.setAttribute("data-shape-multi", "");
     this.decor.refresh();
     this.paintTocNumbers();
     this.events.emit({ type: "layout" });
