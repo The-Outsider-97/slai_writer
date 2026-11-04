@@ -249,7 +249,7 @@ export function installInput(ed: Editor): () => void {
     const wrap = wrapperAt(ed, target);
     const type = wrap?.dataset["type"];
     const inField = !!target.closest("[data-edit]");
-    if (wrap && !inField && (wrap.querySelector(".writer-shape") || type === "figure" || type === "equation" || type === "embed" || type === "table")) { A.selectBlock(ed, wrap.dataset["id"] as string); if (type === "embed") ed.events.emit({ type: "open-object", kind: "embed", block: wrap.dataset["id"] as string }); return; }
+    if (wrap && !inField && (wrap.querySelector(".writer-shape") || type === "figure" || type === "equation" || type === "embed" || type === "table")) { A.selectBlock(ed, wrap.dataset["id"] as string, e.shiftKey && !!wrap.querySelector(".writer-shape")); if (type === "embed") ed.events.emit({ type: "open-object", kind: "embed", block: wrap.dataset["id"] as string }); return; }
     if (ed.selectedBlock) A.clearBlockSelection(ed);
   });
 
