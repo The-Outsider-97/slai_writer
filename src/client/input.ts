@@ -6,8 +6,8 @@ import * as A from "./actions.js";
 import { blockIdOf, editableOf } from "./domtext.js";
 import type { Editor } from "./editor.js";
 import { highlightsSupported } from "./decor.js";
-import { objectKind } from "./object_kind.js";
 import { parseMarkdownTable } from "./textops.js";
+import { objectKind } from "./object_kind.js";
 
 interface DropPoint { node: Node; offset: number }
 
@@ -222,11 +222,7 @@ export function installInput(ed: Editor): () => void {
     }
     if (ed.selectedBlock) {
       if (e.key === "Delete" || e.key === "Backspace") return run(() => A.deleteBlocks(ed, [ed.selectedBlock as string]));
-      if (e.key === "Enter") return run(() => {
-        const b = ed.model.block(ed.selectedBlock as string);
-        const kind = objectKind(b?.type, Boolean(b?.extensions?.["slai.writer.shape"]));
-        if (b && kind) ed.events.emit({ type: "open-object", kind, block: b.id });
-      });
+      if (e.key === "Enter") return run(() => { const b = ed.model.block(ed.selectedBlock as string); const kind = b ? objectKind(b.type, Boolean(b.extensions?.["slai.writer.shape"])) : null; if (b && kind) ed.events.emit({ type: "open-object", kind, block: b.id }); });
       if (e.key === "Escape") { A.clearBlockSelection(ed); return; }
     }
     if (e.key === "Escape") { const s = window.getSelection(); if (s && !s.isCollapsed) s.collapseToEnd(); }

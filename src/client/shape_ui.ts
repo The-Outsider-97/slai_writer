@@ -44,7 +44,7 @@ export async function insertShape(ctx:DocCtx):Promise<void> {
     preview.setAttribute("fill",kind==="line"?"none":"#e3c54a");
     preview.setAttribute("stroke","#202020");preview.setAttribute("stroke-width","4");
     svg.appendChild(preview);
-    btn.append(svg,h("span",{text:kind[0]?.toUpperCase()+kind.slice(1)??kind}));
+    btn.append(svg,h("span",{text:kind.charAt(0).toUpperCase()+kind.slice(1)}));
     btn.addEventListener("click",()=>{handle.close();beginShapePlacement(ctx,kind);});
     grid.appendChild(btn);
   }
@@ -195,7 +195,7 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
       const pages=new Set(items.map(item=>ctx.ed.els.get(item.id)?.closest(".sheet")));
       if(pages.size>1){toast("Rotate or scale group members on the same page only.",{kind:"info"});return;}
       try{
-        const result=transformShapeGroup(items,{scale,rotation_deg});
+        const result=transformShapeGroup(items.flatMap(item=>item.shape?[{id:item.id,shape:item.shape}]:[]),{scale,rotation_deg});
         await ctx.ed.op({op:"batch",ops:result.map(item=>({op:"shape_set",block:item.id,shape:item.shape})),
           label:"transform shape group"});
       }catch(error){toast(errorText(error),{kind:"error"});}
