@@ -153,11 +153,21 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
         lead = max([float(font.size) * 1.25 for _, font, _, _ in line] + [12.0])
         for char, font, style, extent in line:
             if current_y + lead <= y + height + 1:
-                draw.text((current_x, current_y), char, font=font, fill=_rgba(style["color"], 1))
+                inset = -font.size * .35 if style.get("superscript") else (
+                    font.size * .18 if style.get("subscript") else 0)
+                glyph_y = current_y + inset
+                if style.get("background"):
+                    draw.rectangle((current_x, current_y, current_x+extent, current_y+lead),
+                                   fill=_rgba(style["background"], 1))
+                draw.text((current_x, glyph_y), char, font=font, fill=_rgba(style["color"], 1))
                 if style.get("underline"):
-                    baseline = current_y + max(1, int(font.size * 1.04))
+                    baseline = glyph_y + max(1, int(font.size * 1.04))
                     draw.line([(current_x, baseline), (current_x + extent, baseline)],
                               fill=_rgba(style["color"], 1), width=max(1, int(font.size / 14)))
+                if style.get("strike"):
+                    strike_y = glyph_y + font.size * .5
+                    draw.line([(current_x, strike_y), (current_x+extent, strike_y)],
+                              fill=_rgba(style["color"], 1), width=max(1,int(font.size/14)))
             current_x += extent
         current_y += lead
     # Strict containment: external drawing cannot paint shape text outside
