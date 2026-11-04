@@ -12,9 +12,8 @@ import { MM_PX } from "./textops.js";
 export class ShapeTools {
   private id:string|null=null;
   private overlay:HTMLElement|null=null;
-  private groupActive:string[]=[];
   private readonly off:Array<()=>void>=[];
-  constructor(private readonly ed:Editor,private readonly edit:(id:string)=>void){
+  constructor(private readonly ed:Editor,_edit:(id:string)=>void){
     this.off.push(ed.events.on(e=>{
       if(e.type==="block-selected"){this.id=e.id;this.refresh();}
       if(e.type==="patch"||e.type==="layout")this.refresh();
@@ -74,7 +73,6 @@ export class ShapeTools {
     if(!shape||!target||!target.isConnected||this.ed.readOnly){this.overlay?.remove();this.overlay=null;return;}
     if(!this.overlay)this.build();
     const members=this.groupMembers();
-    this.groupActive=members.map(x=>x.id);
     const bounds=(members.length?members.map(entry=>this.ed.page.rectOf(entry.node)):[this.ed.page.rectOf(target)]);
     const left=Math.min(...bounds.map(r=>r.left)),top=Math.min(...bounds.map(r=>r.top));
     const right=Math.max(...bounds.map(r=>r.left+r.width)),bottom=Math.max(...bounds.map(r=>r.top+r.height));

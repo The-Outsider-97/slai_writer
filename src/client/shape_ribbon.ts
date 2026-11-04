@@ -124,7 +124,7 @@ export function buildShapeWorkspace(ctx:DocCtx):{el:HTMLElement;update():void} {
   const areaFor=(key:Panel):HTMLElement=>{
     const data=selected();if(!data)return h("div",{text:"Select a vector shape to edit."});
     const s=data.shape,group=h("div",{class:"shape-ribbon-card"});
-    const row=(...items:HTMLElement[]):void=>group.appendChild(section(...items));
+    const row=(...items:HTMLElement[]):void=>{group.appendChild(section(...items));};
     const add=(text:string,operation:()=>void):HTMLButtonElement=>button(text,operation);
     const field=(title:string,v:number,min:number,max:number,step:number,fn:(next:ShapeData,n:number)=>void,digits=2):HTMLElement=>
       addNumber(title,v,min,max,step,fn,digits);
@@ -216,7 +216,7 @@ export function buildShapeWorkspace(ctx:DocCtx):{el:HTMLElement;update():void} {
         add("Edit selected runs…",detail));
     }else if(key==="effects"){
       row(field("Overall opacity %",s.opacity*100,0,100,1,(sh,n)=>{sh.opacity=n/100;},0),
-        ...(["soft","hard","bottom","glow"] as const).map(preset=>add(preset[0].toUpperCase()+preset.slice(1)+" shadow",()=>{
+        ...(["soft","hard","bottom","glow"] as const).map(preset=>add(preset.charAt(0).toUpperCase()+preset.slice(1)+" shadow",()=>{
           change(sh=>{if(sh.shadows.length>=8)throw Error("Maximum of eight shadow layers");
             sh.shadows.push(shadowPreset(preset));},"add shadow");
         })),
