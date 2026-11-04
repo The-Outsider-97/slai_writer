@@ -105,19 +105,24 @@ def validate_shape(value: Any) -> dict[str, Any]:
     utf16_length = len(text["content"].encode("utf-16-le", errors="surrogatepass")) // 2
     for index, entry in enumerate(spans):
         span = _object(entry, f"text.spans[{index}]",
-                       {"type", "start", "end", "bold", "italic", "underline",
-                        "color", "font_family", "font_size_pt"})
+                       {"type", "start", "end", "bold", "italic", "underline", "strike",
+                        "superscript", "subscript", "color", "background",
+                        "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"})
         if span.get("type") != "format":
             raise OpError("Shape text supports format spans only")
         start, end = span.get("start"), span.get("end")
         if (type(start) is not int or type(end) is not int
                 or not 0 <= start < end <= utf16_length):
             raise OpError("Shape text formatting span has invalid offsets")
-        for key in ("bold", "italic", "underline"):
+        for key in ("bold", "italic", "underline", "strike", "superscript", "subscript"):
             if key in span:
                 _bool(span[key], f"text.spans[{index}].{key}")
+        if span.get("superscript") and span.get("subscript"):
+            raise OpError("Shape text cannot be both superscript and subscript")
         if "color" in span:
             _color(span["color"], "span color")
+        if "background" in span:
+            _color(span["background"], "span highlight")
         if "font_family" in span:
             family = span["font_family"]
             if not isinstance(family, str) or not 1 <= len(family) <= 100 or any(
@@ -125,6 +130,9 @@ def validate_shape(value: Any) -> dict[str, Any]:
                 raise OpError("Invalid shape text font family")
         if "font_size_pt" in span:
             _num(span["font_size_pt"], "span font size", 5, 144)
+        for key in ("letter_spacing_pt", "word_spacing_pt"):
+            if key in span:
+                _num(span[key], f"span {key}", -10, 100)
 
     layout = shape.get("layout")
     if layout is not None:
