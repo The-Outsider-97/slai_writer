@@ -79,13 +79,25 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
     text.focus();text.setSelectionRange(start,end);
   };
   const formatSelected=h("div",{class:"actions"},
-    ...([["Bold","bold"],["Italic","italic"],["Underline","underline"]] as const).map(([label,key])=>{
+    ...([["Bold","bold"],["Italic","italic"],["Underline","underline"],
+      ["Strikethrough","strike"],["Superscript","superscript"],["Subscript","subscript"]] as const).map(([label,key])=>{
       const button=h("button",{type:"button",text:label,attrs:{"aria-label":`${label} selected shape text`}});
       button.addEventListener("mousedown",e=>e.preventDefault());
       button.addEventListener("click",()=>addRun({[key]:true}));
       return button;
     }));
   const formatColor=color("#222222"),formatSize=number(s.text.font_size_pt,5,144,.5);
+  const highlightColor=color("#ffff00");
+  const highlightSelected=h("button",{type:"button",text:"Highlight selection"});
+  highlightSelected.addEventListener("mousedown",e=>e.preventDefault());
+  highlightSelected.addEventListener("click",()=>addRun({background:highlightColor.value}));
+  const letter=number(0,-10,100,.1),word=number(0,-10,100,.1);
+  const applySpacing=h("button",{type:"button",text:"Apply tracking"});
+  applySpacing.addEventListener("mousedown",e=>e.preventDefault());
+  applySpacing.addEventListener("click",()=>{
+    try{addRun({letter_spacing_pt:readShapeNumber(letter,-10,100),
+      word_spacing_pt:readShapeNumber(word,-10,100)});}catch(error){toast(errorText(error),{kind:"error"});}
+  });
   const colorSelected=h("button",{type:"button",text:"Color selection"});
   colorSelected.addEventListener("mousedown",e=>e.preventDefault());
   colorSelected.addEventListener("click",()=>addRun({color:formatColor.value}));
@@ -220,7 +232,8 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
       h("h3",{text:"Shape text"}),row("Content",text),row("Text color",textColor),row("Font size (pt)",textSize),
       textBold.root,textItalic.root,textAlign.root,row("Text padding (mm)",padding),fit.root,
       h("p",{class:"muted",text:"Select a range of text to format only those characters."}),
-      formatSelected,h("div",{class:"actions"},formatColor,colorSelected,formatSize,sizeSelected,clearRuns))],
+      formatSelected,h("div",{class:"actions"},formatColor,colorSelected,highlightColor,highlightSelected,
+        formatSize,sizeSelected,letter,word,applySpacing,clearRuns))],
     ["Effects",h("section",{class:"shape-properties-pane stack",attrs:{"aria-label":"Effects and shadows"}},
       h("h3",{text:"Independent shadow layers"}),shadowList,add)],
     ["Position",h("section",{class:"shape-properties-pane stack",attrs:{"aria-label":"Position and wrapping"}},
