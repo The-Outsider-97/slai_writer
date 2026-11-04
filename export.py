@@ -171,6 +171,25 @@ class Exchange:
         ids = {b["id"] for b in doc["blocks"]}
         for block in doc["blocks"]:
             kind = block["type"]
+            shape = (block.get("extensions") or {}).get(SHAPE_KEY)
+            if isinstance(shape, dict):
+                text = (shape.get("text") or {}).get("content", "")
+                if text and shape.get("kind") == "line":
+                    add("warn", "shape_line_text", "Line labels currently have limited support in visual exports.", block["id"])
+                layout = shape.get("layout") or {}
+                if layout.get("wrap") == "square":
+                    add("warn", "shape_square_wrap", "The Writer page layout cannot perform true square wrapping around this shape. Verify foreign-format layout.", block["id"])
+                if text and shape.get("text", {}).get("fit", "keep") == "keep":
+                    t = shape["text"]
+                    # Conservative estimate: actual font metrics and character
+                    # widths vary. This reports risk, not verified overflow.
+                    capacity = max(1, (float(shape["width_mm"]) - 2 * float(t.get("padding_mm", 0)))
+                                   * (float(shape["height_mm"]) - 2 * float(t.get("padding_mm", 0)))
+                                   / max(12.0, float(t.get("font_size_pt", 12)) ** 2 * 0.9))
+                    if len(text) > capacity * 2:
+                        add("info", "shape_text_fit", "Shape text may overflow; use the editor's visible overflow cue or enable shrink-to-fit.", block["id"])
+                if target in ("pdf", "docx", "odt", "rtf", "html"):
+                    add("info", "shape_export", "Vector shape export uses the installed Documaster capability; unsupported drawing features are converted to PNG with explicit loss reporting.", block["id"])
             if kind == "figure":
                 fig = block.get("figure", {})
                 if not fig.get("decorative") and not (fig.get("alt") or "").strip():
