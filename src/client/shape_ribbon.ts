@@ -215,8 +215,8 @@ export function buildShapeWorkspace(ctx:DocCtx):{el:HTMLElement;update():void} {
         const enabled=check("Shadow visible",sh.enabled),ink=color("Shadow color",sh.color);
         const applyShadow=(modify:(value:ShapeData["shadows"][number])=>void,name:string):void=>
           change(data=>{if(data.shadows[activeShadowIndex])modify(data.shadows[activeShadowIndex]!);},name);
-        bind(enabled,()=>applyShadow(value=>{value.enabled=enabled.checked;},"shadow visibility"),"shadow visibility");
-        bind(ink,()=>applyShadow(value=>{value.color=ink.value;},"shadow color"),"shadow color");
+        enabled.addEventListener("change",()=>applyShadow(value=>{value.enabled=enabled.checked;},"shadow visibility"));
+        ink.addEventListener("change",()=>applyShadow(value=>{value.color=ink.value;},"shadow color"));
         row(label("Layer",pick),label("Enabled",enabled),label("Color",ink),
           field("Opacity %",sh.opacity*100,0,100,1,(_s,n)=>{_s.shadows[activeShadowIndex]!.opacity=n/100;},0),
           field("X offset (mm)",sh.offset_x_mm,-100,100,.5,(_s,n)=>{_s.shadows[activeShadowIndex]!.offset_x_mm=n;}),
