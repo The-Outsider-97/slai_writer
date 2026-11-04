@@ -32,7 +32,7 @@ export function shapeNumberInput(label:string,value:number,min:number,max:number
     if(event.key!=="ArrowUp"&&event.key!=="ArrowDown")return;
     event.preventDefault();
     const now=parseShapeNumber(node.value,min,max)??value;
-    const amount=step*(event.shiftKey?10:event.altKey?.1:1);
+    const amount=step*(event.shiftKey?10:event.altKey?0.1:1);
     node.value=showShapeNumber(Math.max(min,Math.min(max,now+(event.key==="ArrowUp"?amount:-amount))),digits);
     node.dispatchEvent(new Event("change",{bubbles:true}));
   });
@@ -65,10 +65,6 @@ export function resizeShape(shape:ShapeData,width:number,height:number,lockRatio
 }
 export function changeShapeKind(shape:ShapeData,kind:ShapeKind):ShapeData {
   return {...shape,kind,corners_mm:kind==="rectangle"?normalizeShapeCorners(shape.corners_mm,shape.width_mm,shape.height_mm):[0,0,0,0]};
-}
-export function shapeMembers(ctx:{ed:{selectedShapes:Set<string>;selectedBlock:string|null;model:{block(id:string):unknown;list():Array<{id:string}>}}}):string[]{
-  const active=ctx.ed.selectedBlock;
-  return active?[active]:[];
 }
 export const shadowPreset=(kind:"soft"|"hard"|"bottom"|"glow"):Shadow=>{
   switch(kind){
