@@ -606,6 +606,17 @@ def op_move(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     rest = [i for i in ids if i not in moving]
     at = 0 if after is None else rest.index(after) + 1
     tr.reorder(rest[:at] + [m for m in ids if m in moving] + rest[at:])
+    # A shape moved into another section must acquire the destination's
+    # section identity. Its physical geometry stays in millimetres; the
+    # destination page's own margin and orientation control presentation.
+    # Ordinary paragraphs preserve the historical Writer move semantics.
+    destination = tr.index.get(after) if after is not None else None
+    if destination and destination.get("section"):
+        from .shape_validation import SHAPE_KEY
+        for ident in moving:
+            candidate = tr.peek(ident)
+            if SHAPE_KEY in (candidate.get("extensions") or {}):
+                tr.get(ident)["section"] = destination["section"]
     repair_sections(tr)
     return {}
 
