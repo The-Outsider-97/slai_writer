@@ -100,8 +100,15 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
   const posX=number(s.layout?.x_mm??0,-5000,5000,.5),posY=number(s.layout?.y_mm??0,-5000,5000,.5);
   const layer=selectField("Object layer",[["content","Content"],["behind_text","Behind text"],["in_front_of_text","In front of text"]],s.layout?.layer??"in_front_of_text");
   const zIndex=number(s.z_index??0,-1000,1000,1);
+  const wrap=selectField("Text wrapping",[["none","No wrap / overlay"],["top_bottom","Above and below (flow-aware)"]],
+    s.layout?.wrap==="top_bottom"?"top_bottom":"none");
+  const syncWrap=():void=>{
+    if(wrap.select.value!=="none")layer.select.value="content";
+    layer.select.disabled=wrap.select.value!=="none";
+  };
+  wrap.select.addEventListener("change",syncWrap);syncWrap();
   const floatingControls=h("div",{class:"stack"},row("Horizontal position (mm)",posX),
-    row("Vertical position (mm)",posY),layer.root,row("Stacking order",zIndex));
+    row("Vertical position (mm)",posY),wrap.root,layer.root,row("Stacking order",zIndex));
   const updateFloat=():void=>{floatingControls.hidden=layout.select.value!=="floating";};
   layout.select.addEventListener("change",updateFloat);updateFloat();
   const textColor=color(s.text.color),textSize=number(s.text.font_size_pt,5,144,.5);
@@ -212,7 +219,8 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
         const anchor=ctx.ed.model.order.find(x=>x!==id)??null;
         s.layout={mode:"floating",anchor:anchor?"block":"page",
           ...(anchor?{target:anchor}:{}),x_mm:Number(posX.value),y_mm:Number(posY.value),
-          wrap:"none",layer:layer.select.value as "content"|"behind_text"|"in_front_of_text"};
+          wrap:wrap.select.value as "none"|"top_bottom",
+          layer:wrap.select.value!=="none"?"content":layer.select.value as "content"|"behind_text"|"in_front_of_text"};
       }
       try{await ctx.ed.op({op:"shape_set",block:id,shape:s,label:"format shape"});return true;}
       catch(e){toast(errorText(e),{kind:"error"});return undefined;}
