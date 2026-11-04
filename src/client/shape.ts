@@ -108,12 +108,14 @@ function paintRuns(shape:ShapeData):HTMLElement {
   };
   const measure=(piece:string,offset:number,scale:number):number=>{
     const seg=decorated(offset);
-    const size=(seg?.font_size_pt??shape.text.font_size_pt)*scale;
+    const size=(seg?.font_size_pt??shape.text.font_size_pt)*scale*
+      (seg?.flags.superscript||seg?.flags.subscript?.75:1);
     const bold=Boolean(seg?.flags.bold||shape.text.bold),italic=Boolean(seg?.flags.italic||shape.text.italic);
     const family=seg?.font_family??"Arial";
     if(metrics){
       metrics.font=`${italic?"italic ":""}${bold?"bold ":""}${size*96/72}px "${family.replace(/"/g,"")}"`;
-      return metrics.measureText(piece).width*25.4/96;
+      const spacing=(seg?.letter_spacing_pt??0)+(piece===" "?(seg?.word_spacing_pt??0):0);
+      return metrics.measureText(piece).width*25.4/96+spacing*25.4/72;
     }
     return piece.length*size*25.4/72*.53;
   };
@@ -140,10 +142,16 @@ function paintRuns(shape:ShapeData):HTMLElement {
       part.textContent=shape.text.content.slice(left,right);
       if(seg.flags.bold)part.style.fontWeight="700";
       if(seg.flags.italic)part.style.fontStyle="italic";
-      if(seg.flags.underline)part.style.textDecoration="underline";
+      if(seg.flags.underline||seg.flags.strike)part.style.textDecoration=[
+        seg.flags.underline?"underline":"",seg.flags.strike?"line-through":""].filter(Boolean).join(" ");
+      if(seg.flags.superscript){part.style.verticalAlign="super";part.style.fontSize="75%";}
+      if(seg.flags.subscript){part.style.verticalAlign="sub";part.style.fontSize="75%";}
+      if(seg.background)part.style.backgroundColor=seg.background;
       if(seg.color)part.style.color=seg.color;
       if(seg.font_family)part.style.fontFamily=seg.font_family;
       if(seg.font_size_pt)part.style.fontSize=`${seg.font_size_pt*scale}pt`;
+      if(seg.letter_spacing_pt!==undefined)part.style.letterSpacing=`${seg.letter_spacing_pt}pt`;
+      if(seg.word_spacing_pt!==undefined)part.style.wordSpacing=`${seg.word_spacing_pt}pt`;
       lineEl.appendChild(part);
     }
     root.appendChild(lineEl);
