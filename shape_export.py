@@ -92,10 +92,14 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
     for char in chars:
         style = {"bold": text.get("bold", False), "italic": text.get("italic", False),
                  "color": text.get("color", "#101010"),
-                 "font_size_pt": text.get("font_size_pt", 12), "underline": False}
+                 "font_size_pt": text.get("font_size_pt", 12), "underline": False,
+                 "strike": False, "superscript": False, "subscript": False,
+                 "background": None, "letter_spacing_pt": 0, "word_spacing_pt": 0}
         for span in spans:
             if span["start"] <= offset < span["end"]:
-                for key in ("bold", "italic", "color", "font_size_pt", "underline"):
+                for key in ("bold", "italic", "color", "font_size_pt", "underline",
+                            "strike", "superscript", "subscript", "background",
+                            "letter_spacing_pt", "word_spacing_pt"):
                     if key in span:
                         style[key] = span[key]
         styles.append((char, style))
@@ -117,9 +121,13 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
                 lines.append([])
                 current = 0
                 continue
-            pixel_size = max(5, round(float(style["font_size_pt"]) * scale * 25.4 / 72 * factor))
+            modifier = .75 if style.get("superscript") or style.get("subscript") else 1
+            pixel_size = max(5, round(float(style["font_size_pt"]) * modifier * scale * 25.4 / 72 * factor))
             font = font_for(pixel_size, bool(style["bold"]), bool(style["italic"]))
-            advance = float(draw.textlength(char, font=font))
+            advance = (float(draw.textlength(char, font=font))
+                       + (float(style.get("letter_spacing_pt", 0))
+                          + (float(style.get("word_spacing_pt", 0)) if char == " " else 0))
+                          * scale * 25.4 / 72)
             if current > 0 and current + advance > width:
                 lines.append([])
                 current = 0.0
@@ -145,11 +153,21 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
         lead = max([float(font.size) * 1.25 for _, font, _, _ in line] + [12.0])
         for char, font, style, extent in line:
             if current_y + lead <= y + height + 1:
-                draw.text((current_x, current_y), char, font=font, fill=_rgba(style["color"], 1))
+                inset = -font.size * .35 if style.get("superscript") else (
+                    font.size * .18 if style.get("subscript") else 0)
+                glyph_y = current_y + inset
+                if style.get("background"):
+                    draw.rectangle((current_x, current_y, current_x+extent, current_y+lead),
+                                   fill=_rgba(style["background"], 1))
+                draw.text((current_x, glyph_y), char, font=font, fill=_rgba(style["color"], 1))
                 if style.get("underline"):
-                    baseline = current_y + max(1, int(font.size * 1.04))
+                    baseline = glyph_y + max(1, int(font.size * 1.04))
                     draw.line([(current_x, baseline), (current_x + extent, baseline)],
                               fill=_rgba(style["color"], 1), width=max(1, int(font.size / 14)))
+                if style.get("strike"):
+                    strike_y = glyph_y + font.size * .5
+                    draw.line([(current_x, strike_y), (current_x+extent, strike_y)],
+                              fill=_rgba(style["color"], 1), width=max(1,int(font.size/14)))
             current_x += extent
         current_y += lead
     # Strict containment: external drawing cannot paint shape text outside
@@ -266,6 +284,15 @@ def render_shape_png(value: dict[str, Any]) -> tuple[bytes, float]:
         layer = Image.new("RGBA", canvas.size, _rgba(outline["color"], 1))
         layer.putalpha(edge)
         canvas.alpha_composite(layer)
+
+    # Mirror the vector silhouette and shadow layers before painting text;
+    # ordinary Word shape text must remain legible, not rendered backwards.
+    if shape.get("flip_horizontal") or shape.get("flip_vertical"):
+        from PIL import ImageOps
+        if shape.get("flip_horizontal"):
+            canvas = ImageOps.mirror(canvas)
+        if shape.get("flip_vertical"):
+            canvas = ImageOps.flip(canvas)
 
     text = shape["text"]
     if text["content"] and kind != "line":

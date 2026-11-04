@@ -405,3 +405,15 @@ table.tbl .cell { height: 7mm; }
    measured block height and therefore pushes text onto subsequent pages. */
 .blk[data-shape-wrap="top_bottom"] { display:block; width:100%; max-width:100%; margin:2mm 0; }
 .blk[data-shape-wrap="top_bottom"] > .writer-shape { display:block; margin-left:0; }
+
+
+/* Text is laid into contour-constrained scanline bands, not a single inset box.
+   The polygon mask handles glyph overhang around concave/rounded silhouettes. */
+.writer-shape .writer-shape-text { position:absolute; inset:0; display:block; width:100%; height:100%;
+  padding:0; pointer-events:none; overflow:hidden; white-space:pre; }
+.writer-shape-line { position:absolute; display:block; box-sizing:border-box; white-space:pre;
+  overflow:hidden; text-overflow:clip; line-height:1.3; }
+.writer-shape[data-text-overflow="true"]::after { content:"Text overflow"; position:absolute;
+  right:-2px; bottom:-12px; padding:1px 3px; background:#9c2222; color:white;
+  border-radius:3px; font:9px system-ui,sans-serif; pointer-events:none; }
+@media print { .writer-shape[data-text-overflow="true"]::after { display:none; } }

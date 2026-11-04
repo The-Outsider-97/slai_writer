@@ -19,7 +19,7 @@ SHAPE_KINDS = frozenset({"rectangle", "ellipse", "line", "triangle", "diamond",
                          "pentagon", "hexagon", "star", "arrow", "plus"})
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 _ALLOWED = frozenset({"version", "kind", "width_mm", "height_mm", "rotation_deg", "fill",
-                       "outline", "opacity", "corners_mm", "text", "shadows", "layout", "z_index", "group_id"})
+                       "outline", "opacity", "corners_mm", "text", "shadows", "layout", "z_index", "group_id", "flip_horizontal", "flip_vertical"})
 
 
 def _object(value: Any, name: str, keys: set[str] | frozenset[str]) -> dict[str, Any]:
@@ -60,6 +60,9 @@ def validate_shape(value: Any) -> dict[str, Any]:
     h = _num(shape.get("height_mm"), "height_mm", 2, 1000)
     _num(shape.get("rotation_deg"), "rotation_deg", -360, 360)
     _num(shape.get("opacity"), "opacity", 0, 1)
+    for key in ("flip_horizontal", "flip_vertical"):
+        if key in shape:
+            _bool(shape[key], key)
 
     fill = _object(shape.get("fill"), "fill", {"color", "opacity", "enabled"})
     _color(fill.get("color"), "fill.color")
@@ -105,19 +108,24 @@ def validate_shape(value: Any) -> dict[str, Any]:
     utf16_length = len(text["content"].encode("utf-16-le", errors="surrogatepass")) // 2
     for index, entry in enumerate(spans):
         span = _object(entry, f"text.spans[{index}]",
-                       {"type", "start", "end", "bold", "italic", "underline",
-                        "color", "font_family", "font_size_pt"})
+                       {"type", "start", "end", "bold", "italic", "underline", "strike",
+                        "superscript", "subscript", "color", "background",
+                        "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"})
         if span.get("type") != "format":
             raise OpError("Shape text supports format spans only")
         start, end = span.get("start"), span.get("end")
         if (type(start) is not int or type(end) is not int
                 or not 0 <= start < end <= utf16_length):
             raise OpError("Shape text formatting span has invalid offsets")
-        for key in ("bold", "italic", "underline"):
+        for key in ("bold", "italic", "underline", "strike", "superscript", "subscript"):
             if key in span:
                 _bool(span[key], f"text.spans[{index}].{key}")
+        if span.get("superscript") and span.get("subscript"):
+            raise OpError("Shape text cannot be both superscript and subscript")
         if "color" in span:
             _color(span["color"], "span color")
+        if "background" in span:
+            _color(span["background"], "span highlight")
         if "font_family" in span:
             family = span["font_family"]
             if not isinstance(family, str) or not 1 <= len(family) <= 100 or any(
@@ -125,6 +133,9 @@ def validate_shape(value: Any) -> dict[str, Any]:
                 raise OpError("Invalid shape text font family")
         if "font_size_pt" in span:
             _num(span["font_size_pt"], "span font size", 5, 144)
+        for key in ("letter_spacing_pt", "word_spacing_pt"):
+            if key in span:
+                _num(span[key], f"span {key}", -10, 100)
 
     layout = shape.get("layout")
     if layout is not None:

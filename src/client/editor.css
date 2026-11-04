@@ -416,3 +416,105 @@
 .shape-insert-preview { position:absolute; z-index:8; min-width:2mm; min-height:2mm;
   pointer-events:none; border:1px dashed #276dc5; outline:1px solid #fff;
   background:rgba(51,119,210,.09); box-sizing:border-box; }
+
+
+/* Shape Format v2.4: one contextual workspace with short categories and controls,
+   rather than a single horizontally scrolling ribbon. Existing theme tokens stay. */
+.shape-workspace { display:flex; flex-direction:column; flex:0 0 auto; min-height:71px;
+  border-bottom:1px solid #d2d2d2; background:#fefefe; color:#303030; }
+.shape-workspace[hidden], .shape-workspace :is([hidden]) { display:none!important; }
+.shape-workspace-nav { display:flex; gap:2px; align-items:center; overflow-x:auto;
+  padding:3px 7px 0; scrollbar-width:thin; border-bottom:1px solid #e7e7e7; }
+.shape-category { flex:0 0 auto; border:0; background:transparent; border-radius:5px 5px 0 0;
+  padding:6px 9px; min-height:29px; font-size:11px; color:#555; box-shadow:none; }
+.shape-category:hover, .shape-category:focus-visible { background:#f3f3f3; }
+.shape-category[aria-selected=true] { color:#1e1e1e; font-weight:600; background:#f5f5f5;
+  box-shadow:inset 0 -2px #b99c00; }
+.shape-full-properties { margin-left:auto; flex:0 0 auto; background:#fafafa; color:#444;
+  min-height:27px; padding:2px 9px; font-size:11px; border:1px solid #dedede; border-radius:5px; }
+.shape-workspace-surface { padding:5px 10px 7px; overflow-x:auto; min-height:43px;
+  max-width:100%; scrollbar-width:thin; }
+.shape-ribbon-card { display:flex; align-items:center; min-width:0; }
+.shape-ribbon-row { display:flex; flex-wrap:wrap; align-items:center; gap:5px 8px; width:100%; }
+.shape-ribbon-field { display:inline-flex; align-items:center; gap:5px; min-width:0;
+  font-size:10px; color:#666; white-space:nowrap; }
+.shape-ribbon-field input[type=text] { width:75px; min-width:45px; }
+.shape-ribbon-field input[aria-label="Shape text"] { width:min(240px,30vw); }
+.shape-ribbon-field select { max-width:140px; }
+.shape-ribbon-field input[type=color] { width:31px; min-width:31px; padding:2px; }
+.shape-ribbon-field input[type=checkbox] { width:15px; min-width:15px; min-height:15px; height:15px; }
+.shape-ribbon-field :is(input,select) { height:28px; min-height:28px;
+  color:#292929; border:1px solid #d7d7d7; border-radius:5px; padding:3px 5px;
+  background:white; font-size:11px; font-variant-numeric:tabular-nums; }
+.shape-ribbon-field :is(input,select):focus-visible { outline:2px solid #286ac1; outline-offset:1px; }
+.shape-command { min-height:28px; padding:3px 9px; font-size:11px; border:1px solid #ddd;
+  background:#fff; border-radius:5px; white-space:nowrap; color:#303030; box-shadow:none; }
+.shape-command:hover { background:#f0f1f4; }
+.shape-command:focus-visible { outline:2px solid #286ac1; outline-offset:1px; }
+.shape-ribbon-gallery { display:flex; align-items:center; gap:3px; padding:0 5px; }
+.shape-gallery-small { width:29px; height:29px; padding:3px; flex:0 0 auto; border:1px solid #ddd;
+  background:white; border-radius:4px; }
+.shape-gallery-small[aria-pressed=true] { border-color:#b89b00; background:#fff9db; }
+.shape-gallery-small svg { display:block; width:100%; height:100%; }
+.shape-ribbon-note { font-size:12px; color:#777; padding:9px; }
+/* Dialog repair: no horizontal scrolling; predictable two-column layout. */
+.shape-format-form { width:min(740px,calc(100vw - 64px)); min-width:0; max-width:100%;
+  max-height:min(70vh,680px); overflow-y:auto; overflow-x:hidden; box-sizing:border-box;
+  overscroll-behavior:contain; scrollbar-gutter:stable; }
+.shape-format-form :is(input,textarea,select) { box-sizing:border-box; min-width:0; max-width:100%; }
+.shape-format-form .grid-2 { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.shape-format-form label, .shape-format-form .field { min-width:0; max-width:100%; }
+.shape-format-form .shape-shadow-list { min-width:0; }
+.shape-format-form .shape-shadow { min-width:0; max-width:100%; box-sizing:border-box; }
+.shape-format-form .actions { flex-wrap:wrap; min-width:0; }
+@media (max-width:740px) {
+  .shape-ribbon-field { gap:3px; } .shape-category { padding:6px 7px; }
+  .shape-ribbon-field input[type=text] { width:65px; }
+  .shape-format-form .grid-2 { grid-template-columns:minmax(0,1fr); }
+}
+
+
+/* Scroll only the active properties body; the category tabs remain available. */
+.shape-format-tabbed { display:grid; grid-template-columns:150px minmax(0,1fr);
+  width:min(740px,calc(100vw - 64px)); overflow:hidden; max-height:min(70vh,680px); }
+.shape-properties-tabs { display:flex; flex-direction:column; gap:4px; min-width:0;
+  border-right:1px solid var(--e-line,#444); padding:5px 9px 5px 0; overflow-y:auto; }
+.shape-properties-tab { display:flex; justify-content:flex-start; border:0; border-radius:6px;
+  padding:9px 11px; font-size:12px; text-align:left; background:transparent;
+  color:inherit; box-shadow:none; }
+.shape-properties-tab:hover { background:var(--surface-2,#3a3d43); }
+.shape-properties-tab[aria-selected=true] { background:var(--accent-soft,rgba(218,184,0,.12));
+  border-inline-start:3px solid var(--accent,#d8b800); font-weight:600; }
+.shape-properties-content { min-width:0; min-height:0; overflow-x:hidden; overflow-y:auto;
+  scrollbar-gutter:stable; padding:5px 10px 10px 15px; }
+.shape-properties-pane[hidden] { display:none!important; }
+.shape-properties-pane { display:flex; flex-direction:column; gap:8px; min-width:0; max-width:100%; }
+.shape-properties-pane > label, .shape-properties-pane > .field { width:100%; max-width:100%; }
+.shape-properties-pane input[type="text"] { font-variant-numeric:tabular-nums; }
+.shape-properties-pane textarea { width:100%; max-width:100%; min-height:82px; resize:vertical; }
+@media(max-width:600px) {
+  .shape-format-tabbed { grid-template-columns:minmax(0,1fr); width:min(95vw,540px); }
+  .shape-properties-tabs { flex-direction:row; border-right:0; border-bottom:1px solid var(--e-line,#444);
+    padding:0 0 6px; white-space:nowrap; overflow-x:auto; overflow-y:hidden; }
+  .shape-properties-tab { flex:0 0 auto; padding:6px 8px; }
+  .shape-properties-content { padding:9px 5px 9px; }
+}
+
+
+/* Direct, content-aware shape text editor. Explicitly non-document editable:
+   all edits are submitted via one validated shape_set transaction. */
+.shape-direct-editor { position:absolute; z-index:120; pointer-events:auto; display:flex;
+  flex-direction:column; box-sizing:border-box; min-width:28px; min-height:25px;
+  border:2px solid var(--focus,#387dd9); border-radius:4px; background:var(--paper,#fff);
+  box-shadow:0 5px 17px rgba(0,0,0,.2); transform:translateZ(0); }
+.shape-direct-textarea { display:block; flex:1 1 auto; min-height:24px; width:100%; max-width:100%;
+  box-sizing:border-box; border:0; outline:0; resize:none; white-space:pre-wrap; overflow-wrap:anywhere;
+  color:inherit; background:transparent; font:inherit; line-height:1.2; cursor:text; }
+.shape-direct-toolbar { position:absolute; display:flex; gap:3px; left:0; top:100%;
+  margin-top:4px; width:max-content; max-width:min(500px,90vw); padding:4px 5px;
+  border:1px solid #bbb; background:#fdfdfd; color:#303030; border-radius:7px;
+  box-shadow:0 4px 12px rgba(0,0,0,.24); z-index:125; }
+.shape-direct-tool { border:1px solid #d9d9d9; border-radius:5px; padding:4px 7px;
+  background:#fff; min-height:27px; font-size:11px; white-space:nowrap; color:#333; }
+.shape-direct-tool:hover { background:#f0f0f0; }
+.shape-direct-tool:focus-visible { outline:2px solid #286ac1; }

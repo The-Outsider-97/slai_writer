@@ -88,3 +88,74 @@ class ShapeTransactions(Workbench):
             session.apply({"op": "shape_set", "block": ident,
                            "shape": {**changed, "opacity": float("nan")}}, None)
         self.assertEqual(session.doc["blocks"][-1]["extensions"][SHAPE_KEY], changed)
+
+
+class ShapeAdvancedFormat(unittest.TestCase):
+    def test_writer_character_style_fields_are_validated(self):
+        shape = sample("hexagon")
+        shape["text"]["content"] = "Position😀"
+        shape["text"]["spans"] = [{
+            "type": "format", "start": 0, "end": 8,
+            "strike": True, "superscript": False, "subscript": True,
+            "background": "#fedcba", "letter_spacing_pt": .4,
+            "word_spacing_pt": 1.25,
+        }]
+        self.assertEqual(validate_shape(shape), shape)
+        wrong = copy.deepcopy(shape)
+        wrong["text"]["spans"][0]["background"] = "<script>"
+        with self.assertRaises(Exception):
+            validate_shape(wrong)
+        wrong = copy.deepcopy(shape)
+        wrong["text"]["spans"][0]["superscript"] = True
+        with self.assertRaises(Exception):
+            validate_shape(wrong)
+        wrong = copy.deepcopy(shape)
+        wrong["text"]["spans"][0]["start"] = 100
+        with self.assertRaises(Exception):
+            validate_shape(wrong)
+
+    def test_utf16_span_indices_with_non_bmp_unicode(self):
+        shape = sample()
+        shape["text"]["content"] = "🧠text"
+        shape["text"]["spans"] = [{
+            "type": "format", "start": 2, "end": 6,
+            "italic": True, "color": "#001122"
+        }]
+        self.assertEqual(validate_shape(shape)["text"]["spans"][0]["start"], 2)
+
+
+class ShapeSectionTransactions(unittest.TestCase):
+    def test_move_shape_to_different_section_updates_section_identity(self):
+        from applications.slai_writer.ops import apply_operation
+        shape = sample("pentagon")
+        shape["layout"] = {"mode": "floating", "anchor": "block",
+                           "target": "b", "x_mm": 15, "y_mm": 25,
+                           "wrap": "none", "layer": "content"}
+        doc = {
+            "title": "Section test", "sections": [{"id": "s1"}, {"id": "s2"}],
+            "blocks": [
+                {"id": "a", "type": "paragraph", "text": "A", "section": "s1"},
+                {"id": "s", "type": "paragraph", "text": "", "section": "s1",
+                 "extensions": {SHAPE_KEY: shape}},
+                {"id": "b", "type": "paragraph", "text": "B", "section": "s2"}
+            ]
+        }
+        apply_operation(doc, {"op": "move", "blocks": ["s"], "after": "b"})
+        self.assertEqual([b["id"] for b in doc["blocks"]], ["a", "b", "s"])
+        self.assertEqual(doc["blocks"][-1]["section"], "s2")
+        self.assertEqual(doc["blocks"][-1]["extensions"][SHAPE_KEY]["layout"]["x_mm"], 15)
+
+    def test_deleting_anchor_does_not_silently_attach_shape_to_unrelated_text(self):
+        from applications.slai_writer.ops import apply_operation
+        shape = sample()
+        shape["layout"] = {"mode": "floating", "anchor": "block",
+                           "target": "anchor", "x_mm": 0, "y_mm": 0,
+                           "wrap": "none", "layer": "content"}
+        doc = {"blocks": [
+            {"id": "anchor", "type": "paragraph", "text": "Anchor"},
+            {"id": "shape", "type": "paragraph", "text": "", "extensions": {SHAPE_KEY: shape}},
+        ]}
+        before = copy.deepcopy(doc)
+        with self.assertRaises(Exception):
+            apply_operation(doc, {"op": "block_delete", "block": "anchor"})
+        self.assertEqual(doc, before)

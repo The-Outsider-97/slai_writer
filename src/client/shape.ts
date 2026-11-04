@@ -1,6 +1,7 @@
 /** Declarative Writer vector geometry. No untrusted SVG or HTML is ever interpreted. */
 import type { Block, Span } from "./types.js";
 import { segments } from "./textops.js";
+import { layoutContourText, shapeContourClip } from "./shape_contour.js";
 
 export const SHAPE_KEY = "slai.writer.shape";
 export const SHAPE_KINDS = ["rectangle","ellipse","line","triangle","diamond","pentagon","hexagon","star","arrow","plus"] as const;
@@ -21,6 +22,7 @@ export interface ShapeData {
   version:1; kind:ShapeKind; width_mm:number; height_mm:number; rotation_deg:number;
   fill:Paint; outline:Outline; opacity:number; corners_mm:number[];
   text:ShapeText; shadows:Shadow[]; layout?:ShapeLayout; z_index?:number; group_id?:string|null;
+  flip_horizontal?:boolean; flip_vertical?:boolean;
 }
 export function shapeOf(block:Block|undefined):ShapeData|null {
   if(block?.type!=="paragraph"||block.text!=="")return null;
@@ -34,7 +36,7 @@ export function defaultShape(kind:ShapeKind):ShapeData {
     corners_mm:[0,0,0,0],
     text:{content:"",color:"#171717",font_size_pt:12,bold:false,italic:false,
       align:"center",padding_mm:2,spans:[],fit:"keep"},
-    shadows:[],layout:{mode:"inline"},z_index:0};
+    shadows:[],layout:{mode:"inline"},z_index:0,flip_horizontal:false,flip_vertical:false};
 }
 const ns="http://www.w3.org/2000/svg";
 let seq=0;
@@ -80,32 +82,83 @@ export function textRegion(kind:ShapeKind,corners:number[]=[0,0,0,0]):{x:number;
   const inset=Math.min(.2,radius/100);
   return {x:Math.max(x,inset),y:Math.max(y,inset),w:Math.min(w,1-2*inset),h:Math.min(h,1-2*inset)};
 }
+/** Physical corner radii: preserve a round mm radius on non-square shapes.
+ * A square SVG viewBox is stretched to physical width/height, so separate X/Y
+ * normalized radii must be used instead of scaling both by min(width,height).
+ */
+export function roundedRectPhysical(corners:readonly number[],w:number,h:number):string{
+  const [tl,tr,br,bl]=corners.map(r=>Math.max(0,r)) as [number,number,number,number];
+  const x=(r:number)=>Math.max(0,Math.min(50,r*100/w));
+  const y=(r:number)=>Math.max(0,Math.min(50,r*100/h));
+  return `M${x(tl)} 0 H${100-x(tr)} Q100 0 100 ${y(tr)} V${100-y(br)} Q100 100 ${100-x(br)} 100 H${x(bl)} Q0 100 0 ${100-y(bl)} V${y(tl)} Q0 0 ${x(tl)} 0 Z`;
+}
 function primitive(shape:ShapeData):SVGElement {
   if(shape.kind==="ellipse")return el("ellipse",{cx:50,cy:50,rx:50,ry:50});
-  if(shape.kind==="rectangle")return el("path",{d:roundedRect(shape.corners_mm.map(v=>v*100/Math.min(shape.width_mm,shape.height_mm)))});
+  if(shape.kind==="rectangle")return el("path",{d:roundedRectPhysical(shape.corners_mm,shape.width_mm,shape.height_mm)});
   return el("path",{d:pathFor(shape.kind)});
 }
-function paintRuns(shape:ShapeData):HTMLElement{
-  const text=document.createElement("div");text.className="writer-shape-text";
-  const region=textRegion(shape.kind,shape.corners_mm.map(v=>v*100/Math.min(shape.width_mm,shape.height_mm)));
-  text.style.left=`${region.x*100}%`;text.style.top=`${region.y*100}%`;
-  text.style.width=`${region.w*100}%`;text.style.height=`${region.h*100}%`;
-  text.style.color=shape.text.color;text.style.fontSize=`${shape.text.font_size_pt}pt`;
-  text.style.fontWeight=shape.text.bold?"700":"400";text.style.fontStyle=shape.text.italic?"italic":"normal";
-  text.style.textAlign=shape.text.align;text.style.padding=`${shape.text.padding_mm}mm`;
-  const inner=document.createElement("div");inner.className="writer-shape-text-runs";
-  for(const seg of segments({text:shape.text.content,spans:shape.text.spans??[]})){
-    const part=document.createElement("span");part.textContent=seg.text;
-    if(seg.flags.bold)part.style.fontWeight="700";
-    if(seg.flags.italic)part.style.fontStyle="italic";
-    if(seg.flags.underline)part.style.textDecoration="underline";
-    if(seg.color)part.style.color=seg.color;
-    if(seg.font_family)part.style.fontFamily=seg.font_family;
-    if(seg.font_size_pt)part.style.fontSize=`${seg.font_size_pt}pt`;
-    inner.appendChild(part);
+function paintRuns(shape:ShapeData):HTMLElement {
+  const root=document.createElement("div");root.className="writer-shape-text";
+  root.style.left="0";root.style.top="0";root.style.width="100%";root.style.height="100%";
+  root.style.overflow="hidden";root.style.clipPath=shapeContourClip(shape);
+  root.setAttribute("aria-hidden","true");
+  const all=segments({text:shape.text.content,spans:shape.text.spans??[]});
+  const metrics=document.createElement("canvas").getContext("2d");
+  const decorated=(offset:number)=>{
+    return all.find(s=>offset>=s.start&&offset<s.end);
+  };
+  const measure=(piece:string,offset:number,scale:number):number=>{
+    const seg=decorated(offset);
+    const size=(seg?.font_size_pt??shape.text.font_size_pt)*scale*
+      (seg?.flags.superscript||seg?.flags.subscript ? 0.75 : 1);
+    const bold=Boolean(seg?.flags.bold||shape.text.bold),italic=Boolean(seg?.flags.italic||shape.text.italic);
+    const family=seg?.font_family??"Arial";
+    if(metrics){
+      metrics.font=`${italic?"italic ":""}${bold?"bold ":""}${size*96/72}px "${family.replace(/"/g,"")}"`;
+      const spacing=(seg?.letter_spacing_pt??0)+(piece===" "?(seg?.word_spacing_pt??0):0);
+      return metrics.measureText(piece).width*25.4/96+spacing*25.4/72;
+    }
+    return piece.length*size*25.4/72*.53;
+  };
+  let scale=1;
+  let layout=layoutContourText(shape,measure,scale);
+  if(shape.text.fit==="shrink"&&layout.overflow){
+    for(let i=0;i<22&&layout.overflow&&scale>.38;i++){
+      scale*=.95;
+      layout=layoutContourText(shape,measure,scale);
+    }
   }
-  text.appendChild(inner);
-  return text;
+  for(const line of layout.lines){
+    const lineEl=document.createElement("div");lineEl.className="writer-shape-line";
+    lineEl.style.left=`${line.x}mm`;lineEl.style.top=`${line.y}mm`;
+    lineEl.style.width=`${line.width}mm`;
+    lineEl.style.fontSize=`${shape.text.font_size_pt*scale}pt`;
+    lineEl.style.fontWeight=shape.text.bold?"700":"400";
+    lineEl.style.fontStyle=shape.text.italic?"italic":"normal";
+    lineEl.style.color=shape.text.color;lineEl.style.textAlign=shape.text.align;
+    for(const seg of all){
+      const left=Math.max(line.start,seg.start),right=Math.min(line.end,seg.end);
+      if(right<=left)continue;
+      const part=document.createElement("span");
+      part.textContent=shape.text.content.slice(left,right);
+      if(seg.flags.bold)part.style.fontWeight="700";
+      if(seg.flags.italic)part.style.fontStyle="italic";
+      if(seg.flags.underline||seg.flags.strike)part.style.textDecoration=[
+        seg.flags.underline?"underline":"",seg.flags.strike?"line-through":""].filter(Boolean).join(" ");
+      if(seg.flags.superscript){part.style.verticalAlign="super";part.style.fontSize="75%";}
+      if(seg.flags.subscript){part.style.verticalAlign="sub";part.style.fontSize="75%";}
+      if(seg.background)part.style.backgroundColor=seg.background;
+      if(seg.color)part.style.color=seg.color;
+      if(seg.font_family)part.style.fontFamily=seg.font_family;
+      if(seg.font_size_pt)part.style.fontSize=`${seg.font_size_pt*scale}pt`;
+      if(seg.letter_spacing_pt!==undefined)part.style.letterSpacing=`${seg.letter_spacing_pt}pt`;
+      if(seg.word_spacing_pt!==undefined)part.style.wordSpacing=`${seg.word_spacing_pt}pt`;
+      lineEl.appendChild(part);
+    }
+    root.appendChild(lineEl);
+  }
+  if(layout.overflow)root.dataset["overflow"]="true";
+  return root;
 }
 export function paintShape(shape:ShapeData):HTMLElement {
   const host=document.createElement("div");host.className="writer-shape";
@@ -117,7 +170,9 @@ export function paintShape(shape:ShapeData):HTMLElement {
   const svg=el("svg",{viewBox:"0 0 100 100",width:"100%",height:"100%",preserveAspectRatio:"none","aria-hidden":"true"});
   svg.style.overflow="visible";
   const defs=el("defs");svg.appendChild(defs);
-  const group=el("g");const unitStroke=100*25.4/(shape.width_mm*72);
+  const group=el("g");const physicalStrokePx=96/72;
+  if(shape.flip_horizontal||shape.flip_vertical)
+    group.setAttribute("transform",`translate(50 50) scale(${shape.flip_horizontal?-1:1} ${shape.flip_vertical?-1:1}) translate(-50 -50)`);
   [...shape.shadows].reverse().forEach((shadow,i)=>{
     if(!shadow.enabled)return;
     const node=primitive(shape);
@@ -138,33 +193,17 @@ export function paintShape(shape:ShapeData):HTMLElement {
   body.setAttribute("fill-opacity",String(shape.fill.opacity));
   body.setAttribute("stroke",shape.outline.enabled?shape.outline.color:"none");
   body.setAttribute("stroke-opacity",String(shape.outline.opacity));
-  body.setAttribute("stroke-width",String(shape.outline.width_pt*unitStroke));
+  body.setAttribute("stroke-width",String(shape.outline.width_pt*physicalStrokePx));
   body.setAttribute("vector-effect","non-scaling-stroke");
   if(shape.outline.style!=="solid")body.setAttribute("stroke-dasharray",shape.outline.style==="dotted"?"1 3":"5 3");
   group.appendChild(body);svg.appendChild(group);host.appendChild(svg);
   if(shape.text.content&&shape.kind!=="line"){
-    const t=paintRuns(shape);host.appendChild(t);
-    // Width and height are measured after placement. In keep mode preserve the
-    // text size and display an overflow cue; shrink never mutates stored sizes.
-    window.requestAnimationFrame(()=>{
-      if(!t.isConnected)return;
-      const inner=t.firstElementChild as HTMLElement|null;
-      if(!inner)return;
-      if(shape.text.fit==="shrink"){
-        let scale=1;
-        for(let pass=0;pass<22&&scale>.38&&(inner.scrollHeight>t.clientHeight||inner.scrollWidth>t.clientWidth);pass++){
-          scale*=.94;inner.style.fontSize=`${shape.text.font_size_pt*scale}pt`;
-          inner.querySelectorAll<HTMLElement>("span").forEach((s,i)=>{
-            const seg=segments({text:shape.text.content,spans:shape.text.spans??[]})[i];
-            if(seg?.font_size_pt)s.style.fontSize=`${seg.font_size_pt*scale}pt`;
-          });
-        }
-      }
-      if(inner.scrollHeight>t.clientHeight+1||inner.scrollWidth>t.clientWidth+1){
-        host.setAttribute("data-text-overflow","true");
-        host.title="Text does not fit in this shape. Open Shape Format to increase the shape or use Shrink text.";
-      }
-    });
+    const text=paintRuns(shape);
+    host.appendChild(text);
+    if(text.dataset["overflow"]==="true"){
+      host.setAttribute("data-text-overflow","true");
+      host.title="Shape text overflows its geometric containment region. Resize, edit or shrink text.";
+    }
   }
   return host;
 }

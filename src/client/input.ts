@@ -8,6 +8,7 @@ import type { Editor } from "./editor.js";
 import { highlightsSupported } from "./decor.js";
 import { parseMarkdownTable } from "./textops.js";
 import { objectKind } from "./object_kind.js";
+import { openShapeTextEditor } from "./shape_text_edit.js";
 
 interface DropPoint { node: Node; offset: number }
 
@@ -231,6 +232,7 @@ export function installInput(ed: Editor): () => void {
   /* ------------------------------------------------------------------------------------------ pointer */
   on("click", (e) => {
     const target = e.target as Element;
+    if(target.closest(".shape-direct-editor"))return;
     const add = target.closest<HTMLElement>("[data-table-add]");
     if (add) {
       e.preventDefault();
@@ -256,6 +258,12 @@ export function installInput(ed: Editor): () => void {
 
   on("dblclick", (e) => {
     const target = e.target as Element;
+    if(target.closest(".shape-direct-editor"))return;
+    const shapeWrap=wrapperAt(ed,target);
+    const shapeId=shapeWrap?.dataset["id"];
+    if(shapeId&&shapeWrap?.querySelector(".writer-shape")&&!ed.readOnly){
+      e.preventDefault();e.stopPropagation();openShapeTextEditor(ed,shapeId);return;
+    }
     const wrap = wrapperAt(ed, target);
     const type = wrap?.dataset["type"];
     if (target.closest(".i-eq")) { const id = blockIdOf(target); if (id) ed.events.emit({ type: "open-object", kind: "equation", block: id }); return; }
