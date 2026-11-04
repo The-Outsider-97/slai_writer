@@ -93,6 +93,20 @@ class ShapeConversion(Workbench):
                 with self.subTest(kind=kind):
                     report = exchange.export(session, kind, self.root / "out", stem="shape-" + kind)
                     self.assertTrue(Path(report["path"]).is_file())
-                    self.assertTrue(any("editable vector shape" in w for w in report["warnings"]))
+                    raster = any("editable vector shape" in w for w in report["warnings"])
+                    if not raster:
+                        # Once the companion Documaster PR is installed,
+                        # verify the actual native representation instead of
+                        # continuing to require a raster-fallback warning.
+                        if kind == "pdf":
+                            from pypdf import PdfReader
+                            reader = PdfReader(report["path"])
+                            self.assertIn("hello", "\\n".join(p.extract_text() or "" for p in reader.pages))
+                        else:
+                            import zipfile
+                            with zipfile.ZipFile(report["path"]) as archive:
+                                xml = archive.read("word/document.xml").decode("utf-8")
+                            self.assertIn("wsp", xml)
+                            self.assertIn("hello shadow", xml)
                     self.assertTrue(report["verification"]["ok"])
             self.assertTrue(exchange.print_pdf(session).startswith(b"%PDF"))
