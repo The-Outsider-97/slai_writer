@@ -276,12 +276,36 @@ export function installInput(ed: Editor): () => void {
   on("contextmenu", (e) => { e.preventDefault(); ed.events.emit({ type: "context", x: e.clientX, y: e.clientY }); });
 
   /* ------------------------------------------------------------------------------------------ clipboard */
+  const SHAPE_CLIP = "application/x-slai-writer-shape+json";
+  const selectedShape = (): {id:string;shape:unknown}|null => {
+    const id=ed.selectedBlock;
+    const item=id?ed.model.block(id):undefined;
+    const shape=item?.extensions?.["slai.writer.shape"];
+    return id&&shape&&item?.type==="paragraph"?{id,shape}:null;
+  };
+  const pasteShape = (raw:string):void => {
+    if(raw.length>50_000){toast("Copied shape is too large.",{kind:"error"});return;}
+    try{
+      const shape=JSON.parse(raw) as Record<string,unknown>;
+      if(shape.version!==1||typeof shape.kind!=="string")throw Error("Not a Writer shape");
+      const clone=structuredClone(shape);
+      delete clone.group_id;
+      void A.insertBlock(ed,{type:"paragraph",text:"",extensions:{"slai.writer.shape":clone}})
+        .then(id=>{if(id)A.selectBlock(ed,id);})
+        .catch(error=>ed.failed(error));
+    }catch(_error){toast("The clipboard does not contain a valid Writer shape.",{kind:"error"});}
+  };
+
   /** A picture on the clipboard (a screenshot, "Copy image" in a browser, a file copied in the file manager) is brought in as a picture. Text that comes with it
    *  (a spreadsheet cell copies both) wins: then the text is pasted as usual. A picture that only exists as a web address is not fetched. */
   on("paste", (e) => {
     const data = (e as ClipboardEvent).clipboardData;
     if (ed.readOnly) { e.preventDefault(); return; }
     if (!data) return;
+    if(data.types.includes(SHAPE_CLIP)){
+      e.preventDefault();e.stopPropagation();
+      pasteShape(data.getData(SHAPE_CLIP));return;
+    }
     const pictures = Array.from(data.files).filter((f) => f.type.startsWith("image/"));
     const text = data.getData("text/plain");
     const hasText = text.length > 0;
@@ -302,12 +326,27 @@ export function installInput(ed: Editor): () => void {
     }
   });
   on("copy", (e) => {
+    const selected=selectedShape();
+    if(selected&&e.clipboardData){
+      e.preventDefault();
+      e.clipboardData.setData(SHAPE_CLIP,JSON.stringify(selected.shape));
+      e.clipboardData.setData("text/plain",`Writer ${(selected.shape as {kind:string}).kind} vector shape`);
+      return;
+    }
     const text = ed.selectionText();
     if (!text) return;
     e.preventDefault();
     e.clipboardData?.setData("text/plain", text);
   });
   on("cut", (e) => {
+    const selected=selectedShape();
+    if(selected&&e.clipboardData&&!ed.readOnly){
+      e.preventDefault();
+      e.clipboardData.setData(SHAPE_CLIP,JSON.stringify(selected.shape));
+      e.clipboardData.setData("text/plain",`Writer ${(selected.shape as {kind:string}).kind} vector shape`);
+      void A.deleteBlocks(ed,[selected.id]);
+      return;
+    }
     const sel = ed.readSelection();
     const text = ed.selectionText(sel);
     if (!sel || !text || ed.readOnly || !e.clipboardData) return;
