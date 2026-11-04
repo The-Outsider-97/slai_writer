@@ -192,6 +192,8 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
         const value=shapeOf(block);return value?.group_id===seed.group_id?[{id:block.id,shape:value}]:[];
       }):selected();
       if(items.length<2){toast("Select or group at least two shapes first.",{kind:"info"});return;}
+      const pages=new Set(items.map(item=>ctx.ed.els.get(item.id)?.closest(".sheet")));
+      if(pages.size>1){toast("Rotate or scale group members on the same page only.",{kind:"info"});return;}
       try{
         const result=transformShapeGroup(items,{scale,rotation_deg});
         await ctx.ed.op({op:"batch",ops:result.map(item=>({op:"shape_set",block:item.id,shape:item.shape})),
