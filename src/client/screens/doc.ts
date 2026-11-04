@@ -10,6 +10,8 @@ import { PageAttachments, type PanelKind } from "../attach.js";
 import { createNavMenu, type NavMenu } from "../navmenu.js";
 import { createLeftSide, createRightSide } from "../sidepanels.js";
 import { ImageTools } from "../imageedit.js";
+import { editShape } from "../shape_ui.js";
+import { shapeOf } from "../shape.js";
 import type { Dock, DocCtx, DocUi, Panel, ZoomRequest } from "../docctx.js";
 import { externalDialog, saveAsDialog, saveDocument } from "../docsave.js";
 import { Editor } from "../editor.js";
@@ -256,6 +258,7 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
       case "open-object": {
         const block = ed.model.block(e.block);
         if (!block) break;
+        if (shapeOf(block)) { void editShape(ctx, block.id); break; }
         if (e.kind === "embed") ui.showEmbed(e.block);
         else if (e.kind === "equation") void equationDialog(ctx, block);
         else if (e.kind === "figure") void figureDialog(ctx, block);
