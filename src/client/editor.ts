@@ -530,7 +530,7 @@ export class Editor {
       if (!wrapper) { this.els.set(id, renderBlock(block, ctx)); this.sigs.set(id, SIG(block)); this.sent.set(id, block.text); relayout = true; continue; }
       const sig = SIG(block);
       if (wrapper.hasAttribute("data-break") !== (block.attributes?.["page_break_before"] === true)) relayout = true;   // a page break was added or removed: the pages are laid out again
-      const textBlock = TEXT_TYPES.includes(block.type) && wrapper.dataset["type"] === block.type;
+      const textBlock = TEXT_TYPES.includes(block.type) && !block.extensions?.["slai.writer.shape"] && wrapper.dataset["type"] === block.type;
       if (textBlock) {
         const el = this.textEl(id);
         const domText = el ? serialise(el) : block.text;
