@@ -10,7 +10,7 @@ import type { DocCtx } from "./docctx.js";
 import * as A from "./actions.js";
 import { SHAPE_KEY, SHAPE_KINDS, shapeOf, pathFor, roundedRect, type ShapeData, type ShapeKind } from "./shape.js";
 import { changeShapeKind, normalizeShapeCorners, resizeShape, shadowPreset,
-  shapeNumberInput, readShapeNumber, showShapeNumber } from "./shape_format.js";
+  shapeNumberInput, readShapeNumber } from "./shape_format.js";
 import { transformShapeGroup } from "./shapegroup.js";
 
 type Pair = { id:string; shape:ShapeData };
