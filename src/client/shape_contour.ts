@@ -72,11 +72,26 @@ export function textBand(shape:ShapeData,top:number,height:number):Interval[]{
   if(!poly.length)return[];
   const padding=shape.text.padding_mm+
     (shape.outline.enabled?shape.outline.width_pt*25.4/72/2:0);
-  // Inset on each side conservatively; fill holes are never fabricated.
-  const samples=[.02,.25,.5,.75,.98];
+  // Critical points of polygon cross-sections occur at vertices. The
+  // intersection interval endpoints vary linearly between successive vertex
+  // heights; sampling the endpoints of each such interval, not just five
+  // arbitrary scanlines, conservatively contains an entire glyph-height band.
+  // Ellipse and rounded corners use a bounded polygonal approximation.
+  const bottom=top+height;
+  const breakpoints=[top,bottom,...poly.map(p=>p.y).filter(y=>y>top&&y<bottom)]
+    .sort((a,b)=>a-b);
+  const unique=breakpoints.filter((y,i)=>i===0||y-breakpoints[i-1]!>1e-9);
+  const epsilon=Math.min(height*1e-5,1e-5);
+  const sampleY:number[]=[];
+  for(let i=0;i<unique.length-1;i++){
+    const a=unique[i]!,b=unique[i+1]!;
+    if(b-a<1e-8)continue;
+    const delta=Math.min(epsilon,(b-a)*.1);
+    sampleY.push(a+delta,(a+b)/2,b-delta);
+  }
   let bands:Interval[]=[{start:0,end:w}];
-  for(const factor of samples){
-    const cross=contourAtY(poly,top+height*factor).map(region=>({
+  for(const y of sampleY){
+    const cross=contourAtY(poly,y).map(region=>({
       start:Math.max(0,region.start+padding),end:Math.min(w,region.end-padding)
     })).filter(region=>region.end-region.start>1e-6);
     bands=intersectIntervals(bands,cross);
