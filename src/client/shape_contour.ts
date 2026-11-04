@@ -68,7 +68,10 @@ export function intersectIntervals(a:readonly Interval[],b:readonly Interval[]):
 export function textBand(shape:ShapeData,top:number,height:number):Interval[]{
   const w=shape.width_mm,h=shape.height_mm;
   if(height<=0||top<0||top+height>h)return[];
-  const poly=polygonForShape(shape.kind,w,h,shape.corners_mm);
+  let poly=polygonForShape(shape.kind,w,h,shape.corners_mm);
+  if(shape.flip_horizontal||shape.flip_vertical)poly=poly.map(p=>({
+    x:shape.flip_horizontal?w-p.x:p.x,y:shape.flip_vertical?h-p.y:p.y
+  }));
   if(!poly.length)return[];
   const padding=shape.text.padding_mm+
     (shape.outline.enabled?shape.outline.width_pt*25.4/72/2:0);
@@ -152,7 +155,11 @@ export function layoutContourText(shape:ShapeData,measure:(piece:string,offset:n
   return {lines,overflow:oversizedGlyph||offset<content.length,nextOffset:offset};
 }
 export function shapeContourClip(shape:ShapeData):string {
-  const points=polygonForShape(shape.kind,shape.width_mm,shape.height_mm,shape.corners_mm);
+  let points=polygonForShape(shape.kind,shape.width_mm,shape.height_mm,shape.corners_mm);
+  if(shape.flip_horizontal||shape.flip_vertical)points=points.map(p=>({
+    x:shape.flip_horizontal?shape.width_mm-p.x:p.x,
+    y:shape.flip_vertical?shape.height_mm-p.y:p.y
+  }));
   if(!points.length)return "none";
   return "polygon("+points.map(p=>`${(p.x/shape.width_mm*100).toFixed(4)}% ${(p.y/shape.height_mm*100).toFixed(4)}%`).join(",")+")";
 }
