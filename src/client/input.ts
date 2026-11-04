@@ -273,7 +273,12 @@ export function installInput(ed: Editor): () => void {
     }
   });
 
-  on("contextmenu", (e) => { e.preventDefault(); ed.events.emit({ type: "context", x: e.clientX, y: e.clientY }); });
+  on("contextmenu", (e) => {
+    const target=e.target;
+    const wrap=target instanceof Element?wrapperAt(ed,target):null;
+    if(wrap?.querySelector(".writer-shape")&&wrap.dataset["id"]) A.selectBlock(ed,wrap.dataset["id"]);
+    e.preventDefault(); ed.events.emit({ type: "context", x: e.clientX, y: e.clientY });
+  });
 
   /* ------------------------------------------------------------------------------------------ clipboard */
   const SHAPE_CLIP = "application/x-slai-writer-shape+json";
