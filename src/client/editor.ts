@@ -45,7 +45,7 @@ export interface EditorHooks { prefs(): Prefs }
 
 const NEW_ID = (): string => `b${uid().slice(0, 16)}`;
 
-const SIG = (b: Block): string => JSON.stringify([b.type, b.style, b.attributes, b.spans, b.table, b.figure, b.equation, b.embed, b.type === "table" || b.type === "figure" ? b.text : 0]);
+const SIG = (b: Block): string => JSON.stringify([b.type, b.style, b.attributes, b.spans, b.table, b.figure, b.equation, b.embed, b.extensions, b.type === "table" || b.type === "figure" ? b.text : 0]);
 
 export class Editor {
   /** Measured PDF layout, never the editor's approximate block-granular sheet positions. */
@@ -530,7 +530,7 @@ export class Editor {
       if (!wrapper) { this.els.set(id, renderBlock(block, ctx)); this.sigs.set(id, SIG(block)); this.sent.set(id, block.text); relayout = true; continue; }
       const sig = SIG(block);
       if (wrapper.hasAttribute("data-break") !== (block.attributes?.["page_break_before"] === true)) relayout = true;   // a page break was added or removed: the pages are laid out again
-      const textBlock = TEXT_TYPES.includes(block.type) && wrapper.dataset["type"] === block.type;
+      const textBlock = TEXT_TYPES.includes(block.type) && !block.extensions?.["slai.writer.shape"] && wrapper.dataset["type"] === block.type;
       if (textBlock) {
         const el = this.textEl(id);
         const domText = el ? serialise(el) : block.text;

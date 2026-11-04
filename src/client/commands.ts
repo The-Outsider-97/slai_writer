@@ -11,6 +11,7 @@ import { addNoteAtSelection } from "./notesapi.js";
 import { citeDialog, footnoteDialog, xrefDialog } from "./panels/sources.js";
 import { pickFile } from "./widgets.js";
 import { paragraphFontDialog } from "./typography.js";
+import { insertShape } from "./shape_ui.js";
 
 export interface Command {
   id: string; label: string; group: "Text" | "Paragraph" | "Insert" | "Document" | "View" | "Review" | "Sign and share";
@@ -77,6 +78,7 @@ export const COMMANDS: Command[] = [
   /* insert */
   { id: "table", label: "Table…", group: "Insert", icon: "table", keywords: "grid rows columns", unavailable: EDITING, run: (c) => tableDialog(c) },
   { id: "table-tools", label: "Table tools: rows, columns, header rows…", group: "Insert", icon: "table", keywords: "add delete row column", unavailable: (c) => EDITING(c) ?? (tableAtCaret(c) ? null : "Place the cursor in a table first."), run: (c) => { const id = tableAtCaret(c); return id ? tableToolsDialog(c, id) : undefined; } },
+  { id: "shape", label: "Insert Shape…", group: "Insert", icon: "layers", keywords: "vector rectangle ellipse line star arrow triangle diamond pentagon hexagon cross", unavailable: EDITING, run: (c) => insertShape(c) },
   { id: "picture", label: "Add illustration (picture)…", group: "Insert", icon: "image", keywords: "image photo figure illustration place", shortcut: "Ctrl+D", unavailable: EDITING, run: (c) => pickPicture(c) },
   { id: "equation", label: "Equation (block)…", group: "Insert", icon: "sigma", keywords: "math formula latex", unavailable: EDITING, run: (c) => equationDialog(c) },
   { id: "equation-inline", label: "Equation (inline)…", group: "Insert", icon: "sigma", keywords: "math formula latex", unavailable: needsCaret, run: (c) => equationDialog(c, undefined, true) },

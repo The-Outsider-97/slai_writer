@@ -221,7 +221,7 @@ export function installInput(ed: Editor): () => void {
     }
     if (ed.selectedBlock) {
       if (e.key === "Delete" || e.key === "Backspace") return run(() => A.deleteBlocks(ed, [ed.selectedBlock as string]));
-      if (e.key === "Enter") return run(() => { const b = ed.model.block(ed.selectedBlock as string); if (b && (b.type === "figure" || b.type === "equation" || b.type === "embed" || b.type === "table")) ed.events.emit({ type: "open-object", kind: b.type, block: b.id }); });
+      if (e.key === "Enter") return run(() => { const b = ed.model.block(ed.selectedBlock as string); if (b && (b.type === "figure" || b.type === "equation" || b.type === "embed" || b.type === "table" || Boolean(b.extensions?.["slai.writer.shape"]))) ed.events.emit({ type: "open-object", kind: b.type === "paragraph" ? "figure" : b.type, block: b.id }); });
       if (e.key === "Escape") { A.clearBlockSelection(ed); return; }
     }
     if (e.key === "Escape") { const s = window.getSelection(); if (s && !s.isCollapsed) s.collapseToEnd(); }
@@ -249,7 +249,7 @@ export function installInput(ed: Editor): () => void {
     const wrap = wrapperAt(ed, target);
     const type = wrap?.dataset["type"];
     const inField = !!target.closest("[data-edit]");
-    if (wrap && !inField && (type === "figure" || type === "equation" || type === "embed" || type === "table")) { A.selectBlock(ed, wrap.dataset["id"] as string); if (type === "embed") ed.events.emit({ type: "open-object", kind: "embed", block: wrap.dataset["id"] as string }); return; }
+    if (wrap && !inField && (wrap.querySelector(".writer-shape") || type === "figure" || type === "equation" || type === "embed" || type === "table")) { A.selectBlock(ed, wrap.dataset["id"] as string); if (type === "embed") ed.events.emit({ type: "open-object", kind: "embed", block: wrap.dataset["id"] as string }); return; }
     if (ed.selectedBlock) A.clearBlockSelection(ed);
   });
 
@@ -258,7 +258,7 @@ export function installInput(ed: Editor): () => void {
     const wrap = wrapperAt(ed, target);
     const type = wrap?.dataset["type"];
     if (target.closest(".i-eq")) { const id = blockIdOf(target); if (id) ed.events.emit({ type: "open-object", kind: "equation", block: id }); return; }
-    if (wrap && (type === "figure" || type === "equation" || type === "embed") && !target.closest("[data-edit]")) { ed.events.emit({ type: "open-object", kind: type, block: wrap.dataset["id"] as string }); return; }
+    if (wrap && (wrap.querySelector(".writer-shape") || type === "figure" || type === "equation" || type === "embed") && !target.closest("[data-edit]")) { ed.events.emit({ type: "open-object", kind: type === "paragraph" ? "figure" : type, block: wrap.dataset["id"] as string }); return; }
     // double-click on a search result turns it into a note
     const at = pointFromXY(e.clientX, e.clientY);
     const id = at ? blockIdOf(at.node) : null;
