@@ -1,6 +1,7 @@
 /** Declarative Writer vector geometry. No untrusted SVG or HTML is ever interpreted. */
 import type { Block, Span } from "./types.js";
 import { segments } from "./textops.js";
+import { layoutContourText, shapeContourClip } from "./shape_contour.js";
 
 export const SHAPE_KEY = "slai.writer.shape";
 export const SHAPE_KINDS = ["rectangle","ellipse","line","triangle","diamond","pentagon","hexagon","star","arrow","plus"] as const;
@@ -85,27 +86,60 @@ function primitive(shape:ShapeData):SVGElement {
   if(shape.kind==="rectangle")return el("path",{d:roundedRect(shape.corners_mm.map(v=>v*100/Math.min(shape.width_mm,shape.height_mm)))});
   return el("path",{d:pathFor(shape.kind)});
 }
-function paintRuns(shape:ShapeData):HTMLElement{
-  const text=document.createElement("div");text.className="writer-shape-text";
-  const region=textRegion(shape.kind,shape.corners_mm.map(v=>v*100/Math.min(shape.width_mm,shape.height_mm)));
-  text.style.left=`${region.x*100}%`;text.style.top=`${region.y*100}%`;
-  text.style.width=`${region.w*100}%`;text.style.height=`${region.h*100}%`;
-  text.style.color=shape.text.color;text.style.fontSize=`${shape.text.font_size_pt}pt`;
-  text.style.fontWeight=shape.text.bold?"700":"400";text.style.fontStyle=shape.text.italic?"italic":"normal";
-  text.style.textAlign=shape.text.align;text.style.padding=`${shape.text.padding_mm}mm`;
-  const inner=document.createElement("div");inner.className="writer-shape-text-runs";
-  for(const seg of segments({text:shape.text.content,spans:shape.text.spans??[]})){
-    const part=document.createElement("span");part.textContent=seg.text;
-    if(seg.flags.bold)part.style.fontWeight="700";
-    if(seg.flags.italic)part.style.fontStyle="italic";
-    if(seg.flags.underline)part.style.textDecoration="underline";
-    if(seg.color)part.style.color=seg.color;
-    if(seg.font_family)part.style.fontFamily=seg.font_family;
-    if(seg.font_size_pt)part.style.fontSize=`${seg.font_size_pt}pt`;
-    inner.appendChild(part);
+function paintRuns(shape:ShapeData):HTMLElement {
+  const root=document.createElement("div");root.className="writer-shape-text";
+  root.style.left="0";root.style.top="0";root.style.width="100%";root.style.height="100%";
+  root.style.overflow="hidden";root.style.clipPath=shapeContourClip(shape);
+  root.setAttribute("aria-hidden","true");
+  const all=segments({text:shape.text.content,spans:shape.text.spans??[]});
+  const metrics=document.createElement("canvas").getContext("2d");
+  const decorated=(offset:number)=>{
+    return all.find(s=>offset>=s.start&&offset<s.end);
+  };
+  const measure=(piece:string,offset:number,scale:number):number=>{
+    const seg=decorated(offset);
+    const size=(seg?.font_size_pt??shape.text.font_size_pt)*scale;
+    const bold=Boolean(seg?.flags.bold||shape.text.bold),italic=Boolean(seg?.flags.italic||shape.text.italic);
+    const family=seg?.font_family??"Arial";
+    if(metrics){
+      metrics.font=`${italic?"italic ":""}${bold?"bold ":""}${size*96/72}px "${family.replace(/"/g,"")}"`;
+      return metrics.measureText(piece).width*25.4/96;
+    }
+    return piece.length*size*25.4/72*.53;
+  };
+  let scale=1;
+  let layout=layoutContourText(shape,measure,scale);
+  if(shape.text.fit==="shrink"&&layout.overflow){
+    for(let i=0;i<22&&layout.overflow&&scale>.38;i++){
+      scale*=.95;
+      layout=layoutContourText(shape,measure,scale);
+    }
   }
-  text.appendChild(inner);
-  return text;
+  for(const line of layout.lines){
+    const lineEl=document.createElement("div");lineEl.className="writer-shape-line";
+    lineEl.style.left=`${line.x}mm`;lineEl.style.top=`${line.y}mm`;
+    lineEl.style.width=`${line.width}mm`;
+    lineEl.style.fontSize=`${shape.text.font_size_pt*scale}pt`;
+    lineEl.style.fontWeight=shape.text.bold?"700":"400";
+    lineEl.style.fontStyle=shape.text.italic?"italic":"normal";
+    lineEl.style.color=shape.text.color;lineEl.style.textAlign=shape.text.align;
+    for(const seg of all){
+      const left=Math.max(line.start,seg.start),right=Math.min(line.end,seg.end);
+      if(right<=left)continue;
+      const part=document.createElement("span");
+      part.textContent=shape.text.content.slice(left,right);
+      if(seg.flags.bold)part.style.fontWeight="700";
+      if(seg.flags.italic)part.style.fontStyle="italic";
+      if(seg.flags.underline)part.style.textDecoration="underline";
+      if(seg.color)part.style.color=seg.color;
+      if(seg.font_family)part.style.fontFamily=seg.font_family;
+      if(seg.font_size_pt)part.style.fontSize=`${seg.font_size_pt*scale}pt`;
+      lineEl.appendChild(part);
+    }
+    root.appendChild(lineEl);
+  }
+  if(layout.overflow)root.dataset["overflow"]="true";
+  return root;
 }
 export function paintShape(shape:ShapeData):HTMLElement {
   const host=document.createElement("div");host.className="writer-shape";
@@ -143,28 +177,12 @@ export function paintShape(shape:ShapeData):HTMLElement {
   if(shape.outline.style!=="solid")body.setAttribute("stroke-dasharray",shape.outline.style==="dotted"?"1 3":"5 3");
   group.appendChild(body);svg.appendChild(group);host.appendChild(svg);
   if(shape.text.content&&shape.kind!=="line"){
-    const t=paintRuns(shape);host.appendChild(t);
-    // Width and height are measured after placement. In keep mode preserve the
-    // text size and display an overflow cue; shrink never mutates stored sizes.
-    window.requestAnimationFrame(()=>{
-      if(!t.isConnected)return;
-      const inner=t.firstElementChild as HTMLElement|null;
-      if(!inner)return;
-      if(shape.text.fit==="shrink"){
-        let scale=1;
-        for(let pass=0;pass<22&&scale>.38&&(inner.scrollHeight>t.clientHeight||inner.scrollWidth>t.clientWidth);pass++){
-          scale*=.94;inner.style.fontSize=`${shape.text.font_size_pt*scale}pt`;
-          inner.querySelectorAll<HTMLElement>("span").forEach((s,i)=>{
-            const seg=segments({text:shape.text.content,spans:shape.text.spans??[]})[i];
-            if(seg?.font_size_pt)s.style.fontSize=`${seg.font_size_pt*scale}pt`;
-          });
-        }
-      }
-      if(inner.scrollHeight>t.clientHeight+1||inner.scrollWidth>t.clientWidth+1){
-        host.setAttribute("data-text-overflow","true");
-        host.title="Text does not fit in this shape. Open Shape Format to increase the shape or use Shrink text.";
-      }
-    });
+    const text=paintRuns(shape);
+    host.appendChild(text);
+    if(text.dataset["overflow"]==="true"){
+      host.setAttribute("data-text-overflow","true");
+      host.title="Shape text overflows its geometric containment region. Resize, edit or shrink text.";
+    }
   }
   return host;
 }
