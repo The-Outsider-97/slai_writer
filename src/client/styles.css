@@ -400,3 +400,8 @@ table.tbl .cell { height: 7mm; }
 .blk[data-shape-multi] > .writer-shape { outline: 2px dashed var(--focus, #3b82f6); outline-offset: 3px; }
 .blk[data-selected][data-shape-multi] > .writer-shape { outline-style: solid; }
 @media print { .blk[data-shape-multi] > .writer-shape { outline: none; } }
+
+/* Flow-aware top/bottom wrapping: unlike absolute overlay shapes, this occupies
+   measured block height and therefore pushes text onto subsequent pages. */
+.blk[data-shape-wrap="top_bottom"] { display:block; width:100%; max-width:100%; margin:2mm 0; }
+.blk[data-shape-wrap="top_bottom"] > .writer-shape { display:block; margin-left:0; }
