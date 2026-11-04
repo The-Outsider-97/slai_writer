@@ -6,7 +6,7 @@ import { diffText } from "./textops.js";
 import type { Span } from "./types.js";
 import * as A from "./actions.js";
 import type { DocCtx } from "./docctx.js";
-import { SHAPE_KEY, SHAPE_KINDS, defaultShape, shapeOf, type ShapeData, type ShapeKind, type Shadow } from "./shape.js";
+import { SHAPE_KEY, SHAPE_KINDS, defaultShape, shapeOf, pathFor, roundedRect, type ShapeData, type ShapeKind, type Shadow } from "./shape.js";
 
 const number = (value:number,min:number,max:number,step=1):HTMLInputElement =>
   h("input",{type:"number",value:String(value),min,max,step,attrs:{inputmode:"decimal"}});
@@ -31,8 +31,18 @@ export async function insertShape(ctx:DocCtx):Promise<void> {
   const grid=h("div",{class:"shape-gallery",attrs:{role:"group","aria-label":"Choose a vector shape"}});
   const handle=openDialog<true>({title:"Insert Shape",body:grid,cancelLabel:"Cancel"});
   for(const kind of SHAPE_KINDS){
-    const btn=h("button",{type:"button",class:"shape-gallery-item",text:kind[0]?.toUpperCase()+kind.slice(1),
+    const btn=h("button",{type:"button",class:"shape-gallery-item",
       attrs:{"aria-label":`Insert ${kind}`}});
+    const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+    svg.setAttribute("viewBox","0 0 100 100");svg.setAttribute("width","38");svg.setAttribute("height","38");
+    svg.setAttribute("aria-hidden","true");
+    const preview=document.createElementNS("http://www.w3.org/2000/svg",kind==="ellipse"?"ellipse":"path");
+    if(kind==="ellipse"){preview.setAttribute("cx","50");preview.setAttribute("cy","50");preview.setAttribute("rx","47");preview.setAttribute("ry","47");}
+    else preview.setAttribute("d",kind==="rectangle"?roundedRect([0,0,0,0]):pathFor(kind));
+    preview.setAttribute("fill",kind==="line"?"none":"#e3c54a");
+    preview.setAttribute("stroke","#202020");preview.setAttribute("stroke-width","4");
+    svg.appendChild(preview);
+    btn.append(svg,h("span",{text:kind[0]?.toUpperCase()+kind.slice(1)??kind}));
     btn.addEventListener("click",()=>{void (async()=>{
       try {
         const id=await A.insertBlock(ctx.ed,{type:"paragraph",text:"",extensions:{[SHAPE_KEY]:defaultShape(kind)}});
