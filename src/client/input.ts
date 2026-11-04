@@ -8,6 +8,7 @@ import type { Editor } from "./editor.js";
 import { highlightsSupported } from "./decor.js";
 import { parseMarkdownTable } from "./textops.js";
 import { objectKind } from "./object_kind.js";
+import { openShapeTextEditor } from "./shape_text_edit.js";
 
 interface DropPoint { node: Node; offset: number }
 
