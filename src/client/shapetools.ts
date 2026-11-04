@@ -21,9 +21,14 @@ export class ShapeTools {
       const b=this.id?ed.model.block(this.id):undefined;
       const shape=shapeOf(b);
       if(!shape||ed.readOnly||!this.id)return;
-      if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key) && !e.ctrlKey && !e.metaKey){
-        // Inline shapes cannot be nudged independently of their paragraph anchor.
-        return;
+      if(["ArrowLeft","ArrowRight","ArrowUp","ArrowDown"].includes(e.key) && !e.ctrlKey && !e.metaKey && shape.layout?.mode==="floating"){
+        e.preventDefault();e.stopImmediatePropagation();
+        const move=e.shiftKey?5:.5;
+        const deltaX=e.key==="ArrowLeft"?-move:e.key==="ArrowRight"?move:0;
+        const deltaY=e.key==="ArrowUp"?-move:e.key==="ArrowDown"?move:0;
+        const placement={...shape.layout,x_mm:Math.max(-5000,Math.min(5000,(shape.layout.x_mm??0)+deltaX)),
+          y_mm:Math.max(-5000,Math.min(5000,(shape.layout.y_mm??0)+deltaY))};
+        void ed.op({op:"shape_set",block:this.id,shape:{...shape,layout:placement},label:"nudge shape"}).catch(err=>ed.failed(err));
       }
     };
     ed.host.addEventListener("keydown",key);
@@ -117,31 +122,78 @@ export class ShapeTools {
   }
   private move(e:PointerEvent,handle:HTMLElement):void{
     const id=this.id,node=id?this.ed.els.get(id)?.querySelector<HTMLElement>(".writer-shape"):null;
-    if(!id||!node)return;
+    const shape=shapeOf(id?this.ed.model.block(id):undefined);
+    if(!id||!node||!shape)return;
     const sx=e.clientX,sy=e.clientY,z=this.ed.page.zoom;
+    const startRect=node.getBoundingClientRect();
+    const holdX=sx-startRect.left,holdY=sy-startRect.top;
+    const scroller=this.ed.page.scroller;
+    let lastX=sx,lastY=sy,auto=0;
     let target:{id:string;before:boolean}|null=null;
-    let moved=false;
+    let destination:HTMLElement|null=null,moved=false;
     const clear=()=>this.ed.host.querySelectorAll(".drop-before,.drop-after").forEach(n=>n.classList.remove("drop-before","drop-after"));
-    this.gesture(e,handle,ev=>{
-      const dx=ev.clientX-sx,dy=ev.clientY-sy;
-      if(Math.hypot(dx,dy)<4)return;
-      moved=true;
-      node.style.translate=`${dx/z}px ${dy/z}px`;
+    const locate=(x:number,y:number):void=>{
       clear();
-      const hit=document.elementsFromPoint(ev.clientX,ev.clientY).find((n):n is HTMLElement=>
-        n instanceof HTMLElement&&n.classList.contains("blk")&&n.dataset["id"]!==id&&!n.hasAttribute("data-floating"));
+      const elements=document.elementsFromPoint(x,y);
+      const sheet=elements.find((n):n is HTMLElement=>n instanceof HTMLElement&&n.classList.contains("sheet"))
+        ??this.ed.page.sheets.find(s=>{
+          const r=s.el.getBoundingClientRect();return x>=r.left&&x<=r.right&&y>=r.top&&y<=r.bottom;
+        })?.el??null;
+      destination=sheet?.querySelector<HTMLElement>(".body")??null;
+      let hit=elements.find((n):n is HTMLElement=>n instanceof HTMLElement&&n.classList.contains("blk")
+        &&n.dataset["id"]!==id&&!n.hasAttribute("data-floating"));
+      if(!hit&&destination){
+        const rows=[...destination.querySelectorAll<HTMLElement>(".blk[data-id]:not([data-floating])")]
+          .filter(n=>n.dataset["id"]!==id);
+        hit=rows.find(n=>y<n.getBoundingClientRect().top+n.getBoundingClientRect().height/2)
+          ??rows[rows.length-1];
+      }
       target=null;
       if(hit){
-        const r=hit.getBoundingClientRect(),before=ev.clientY<r.top+r.height/2;
+        const r=hit.getBoundingClientRect();
+        const before=y<r.top+r.height/2;
         hit.classList.add(before?"drop-before":"drop-after");
         target={id:hit.dataset["id"] as string,before};
       }
+    };
+    const scroll=():void=>{
+      if(!auto)return;
+      const box=scroller.getBoundingClientRect();
+      const edge=42;
+      const delta=lastY<box.top+edge?-15:lastY>box.bottom-edge?15:0;
+      if(delta){scroller.scrollTop+=delta;locate(lastX,lastY);}
+      auto=window.requestAnimationFrame(scroll);
+    };
+    auto=window.requestAnimationFrame(scroll);
+    this.gesture(e,handle,ev=>{
+      lastX=ev.clientX;lastY=ev.clientY;
+      const dx=lastX-sx,dy=lastY-sy;
+      if(Math.hypot(dx,dy)<4)return;
+      moved=true;
+      node.style.translate=`${dx/z}px ${dy/z}px`;
+      locate(lastX,lastY);
+      this.refresh();
     },(_ev,ok)=>{
-      clear();node.style.translate="";
-      if(ok&&moved&&target){
-        const dest=target as {id:string;before:boolean};
-        const at=this.ed.model.order.indexOf(dest.id);
-        const after=dest.before?(at>0?this.ed.model.order[at-1]??null:null):dest.id;
+      window.cancelAnimationFrame(auto);clear();node.style.translate="";
+      if(!ok||!moved){this.refresh();return;}
+      const endTarget=target,endBody=destination;
+      if(shape.layout?.mode==="floating"&&endBody){
+        const rect=endBody.getBoundingClientRect();
+        const x=Math.max(-5000,Math.min(5000,(lastX-holdX-rect.left)/z/MM_PX));
+        const y=Math.max(-5000,Math.min(5000,(lastY-holdY-rect.top)/z/MM_PX));
+        const next={...shape,layout:{...shape.layout,x_mm:Math.round(x*2)/2,y_mm:Math.round(y*2)/2}} as ShapeData;
+        const ops:Array<Record<string,unknown>>=[];
+        if(endTarget){
+          const at=this.ed.model.order.indexOf(endTarget.id);
+          const after=endTarget.before?(at>0?this.ed.model.order[at-1]??null:null):endTarget.id;
+          ops.push({op:"move",blocks:[id],after});
+          next.layout={...next.layout,anchor:"block",target:endTarget.id};
+        }
+        ops.push({op:"shape_set",block:id,shape:next});
+        void this.ed.op({op:"batch",ops,label:"move shape across pages"}).catch(err=>this.ed.failed(err));
+      }else if(endTarget){
+        const at=this.ed.model.order.indexOf(endTarget.id);
+        const after=endTarget.before?(at>0?this.ed.model.order[at-1]??null:null):endTarget.id;
         void A.moveBlocksTo(this.ed,[id],after);
       }else this.refresh();
     });
