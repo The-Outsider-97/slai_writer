@@ -5,13 +5,14 @@ import { checkbox, selectField } from "./widgets.js";
 import { diffText } from "./textops.js";
 import { beginShapePlacement } from "./shape_placement.js";
 import { transformShapeGroup } from "./shapegroup.js";
+import { shapeNumberInput, readShapeNumber } from "./shape_format.js";
 import type { Span } from "./types.js";
 import * as A from "./actions.js";
 import type { DocCtx } from "./docctx.js";
 import { SHAPE_KEY, SHAPE_KINDS, shapeOf, pathFor, roundedRect, type ShapeData, type ShapeKind, type Shadow } from "./shape.js";
 
 const number = (value:number,min:number,max:number,step=1):HTMLInputElement =>
-  h("input",{type:"number",value:String(value),min,max,step,attrs:{inputmode:"decimal"}});
+  shapeNumberInput("Numeric shape property",value,min,max,step,step<1?2:2);
 const color=(value:string):HTMLInputElement=>h("input",{type:"color",value});
 const row=(name:string,node:HTMLElement):HTMLElement=>labelled(name,node);
 const percent=(value:number):HTMLInputElement=>number(Math.round(value*100),0,100);
@@ -206,46 +207,89 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
     groupTransform("Scale group 90%",.9,0));
 
 
-  const body=h("div",{class:"shape-format-form stack"},
-    h("h3",{text:"Geometry"}),kind.root,h("div",{class:"grid-2"},row("Width (mm)",width),row("Height (mm)",height)),
-    row("Rotation (degrees)",rotation),
-    h("h3",{text:"Fill and outline"}),fillEnabled.root,row("Fill color",fillColor),row("Fill opacity %",fillOpacity),
-    borderEnabled.root,row("Outline color",borderColor),row("Outline width (pt)",borderWidth),
-    borderStyle.root,row("Outline opacity %",borderOpacity),row("Overall opacity %",opacity),
-    h("h3",{text:"Corners (rectangles)"}),...cornerInputs.map((v,i)=>row(["Top left","Top right","Bottom right","Bottom left"][i]??"Corner",v)),
-    h("h3",{text:"Text"}),row("Content",text),row("Text color",textColor),row("Font size (pt)",textSize),
-    textBold.root,textItalic.root,textAlign.root,row("Text padding (mm)",padding),fit.root,
-    h("p",{class:"muted",text:"Select characters inside the text field, then apply a character format."}),
-    formatSelected,h("div",{class:"actions"},formatColor,colorSelected,formatSize,sizeSelected,clearRuns),
-    h("h3",{text:"Position and arrangement"}),layout.root,floatingControls,
-    h("p",{class:"muted",text:"Shift-click other shapes to select several. Grouping preserves editable individual shapes."}),
-    arrange,h("p",{class:"muted",text:"Compound scale and rotation operate on floating groups using a shared centre; individual shapes remain editable."}),
-    groupActions,
-    h("h3",{text:"Shadow layers"}),shadowList,add);
+  const panes: Array<[string, HTMLElement]> = [
+    ["Geometry",h("section",{class:"shape-properties-pane stack",attrs:{"aria-label":"Geometry properties"}},
+      h("h3",{text:"Shape geometry"}),kind.root,
+      h("div",{class:"grid-2"},row("Width (mm)",width),row("Height (mm)",height)),row("Rotation (degrees)",rotation),
+      h("h3",{text:"Rectangle corners"}),...cornerInputs.map((v,i)=>row(["Top left","Top right","Bottom right","Bottom left"][i]??"Corner",v)))],
+    ["Fill & Outline",h("section",{class:"shape-properties-pane stack",attrs:{"aria-label":"Fill and outline properties"}},
+      h("h3",{text:"Fill"}),fillEnabled.root,row("Fill color",fillColor),row("Fill opacity %",fillOpacity),
+      h("h3",{text:"Outline"}),borderEnabled.root,row("Outline color",borderColor),row("Width (pt)",borderWidth),
+      borderStyle.root,row("Outline opacity %",borderOpacity),row("Overall opacity %",opacity))],
+    ["Text",h("section",{class:"shape-properties-pane stack",attrs:{"aria-label":"Shape text properties"}},
+      h("h3",{text:"Shape text"}),row("Content",text),row("Text color",textColor),row("Font size (pt)",textSize),
+      textBold.root,textItalic.root,textAlign.root,row("Text padding (mm)",padding),fit.root,
+      h("p",{class:"muted",text:"Select a range of text to format only those characters."}),
+      formatSelected,h("div",{class:"actions"},formatColor,colorSelected,formatSize,sizeSelected,clearRuns))],
+    ["Effects",h("section",{class:"shape-properties-pane stack",attrs:{"aria-label":"Effects and shadows"}},
+      h("h3",{text:"Independent shadow layers"}),shadowList,add)],
+    ["Position",h("section",{class:"shape-properties-pane stack",attrs:{"aria-label":"Position and wrapping"}},
+      h("h3",{text:"Position and wrapping"}),layout.root,floatingControls,
+      h("p",{class:"muted",text:"For square and contour wrapping, use only verified modes; top/bottom uses block flow."}))],
+    ["Arrange",h("section",{class:"shape-properties-pane stack",attrs:{"aria-label":"Arrangement and grouping"}},
+      h("h3",{text:"Arrangement"}),arrange,
+      h("p",{class:"muted",text:"Shift-click other shapes to select a group. Compound transforms require floating shapes on one page."}),
+      groupActions)]
+  ];
+  const tablist=h("div",{class:"shape-properties-tabs",attrs:{role:"tablist","aria-label":"Shape property categories"}});
+  const view=h("div",{class:"shape-properties-content"});
+  const tabs:HTMLButtonElement[]=[];
+  const showPane=(n:number):void=>{
+    panes.forEach(([name,node],i)=>{
+      node.hidden=i!==n;
+      tabs[i]?.setAttribute("aria-selected",String(i===n));
+      tabs[i]?.setAttribute("tabindex",i===n?"0":"-1");
+      void name;
+    });
+    view.scrollTop=0;
+  };
+  for(const [name,node] of panes){
+    const i=tabs.length;
+    const tab=h("button",{type:"button",class:"shape-properties-tab",text:name,
+      attrs:{role:"tab",tabindex:i===0?"0":"-1","aria-selected":i===0?"true":"false"}});
+    tab.addEventListener("click",()=>showPane(i));
+    tab.addEventListener("keydown",e=>{
+      if(e.key!=="ArrowRight"&&e.key!=="ArrowLeft")return;
+      e.preventDefault();
+      const next=(i+(e.key==="ArrowRight"?1:-1)+panes.length)%panes.length;
+      showPane(next);tabs[next]?.focus();
+    });
+    tablist.append(tab);tabs.push(tab);view.append(node);
+  }
+  showPane(0);
+  const body=h("div",{class:"shape-format-form shape-format-tabbed"},tablist,view);
+  // Corners have meaning for rectangular geometry only.
+  const updateCorners=():void=>{
+    const visible=kind.select.value==="rectangle";
+    cornerInputs.forEach(input=>{input.disabled=!visible;});
+  };
+  kind.select.addEventListener("change",updateCorners);updateCorners();
   const dialog=openDialog<true>({title:"Shape Format",body,
     actions:[{label:"Apply changes",kind:"primary",run:async()=>{
+      try {
       s.kind=kind.select.value as ShapeKind;
-      s.width_mm=Number(width.value);s.height_mm=Number(height.value);s.rotation_deg=Number(rotation.value);
-      s.fill={enabled:fillEnabled.input.checked,color:fillColor.value,opacity:Number(fillOpacity.value)/100};
-      s.outline={enabled:borderEnabled.input.checked,color:borderColor.value,opacity:Number(borderOpacity.value)/100,
-        width_pt:Number(borderWidth.value),style:borderStyle.select.value as ShapeData["outline"]["style"]};
-      s.opacity=Number(opacity.value)/100;
-      s.corners_mm=s.kind==="rectangle"?cornerInputs.map(x=>Number(x.value)):[0,0,0,0];
-      s.text={content:text.value,color:textColor.value,font_size_pt:Number(textSize.value),
+      s.width_mm=readShapeNumber(width,2,1000);s.height_mm=readShapeNumber(height,2,1000);
+      s.rotation_deg=readShapeNumber(rotation,-360,360);
+      s.fill={enabled:fillEnabled.input.checked,color:fillColor.value,opacity:readShapeNumber(fillOpacity,0,100)/100};
+      s.outline={enabled:borderEnabled.input.checked,color:borderColor.value,opacity:readShapeNumber(borderOpacity,0,100)/100,
+        width_pt:readShapeNumber(borderWidth,.1,72),style:borderStyle.select.value as ShapeData["outline"]["style"]};
+      s.opacity=readShapeNumber(opacity,0,100)/100;
+      s.corners_mm=s.kind==="rectangle"?cornerInputs.map(x=>readShapeNumber(x,0,500)):[0,0,0,0];
+      s.text={content:text.value,color:textColor.value,font_size_pt:readShapeNumber(textSize,5,144),
         bold:textBold.input.checked,italic:textItalic.input.checked,align:textAlign.select.value as ShapeData["text"]["align"],
-        padding_mm:Number(padding.value),spans,fit:fit.select.value as "keep"|"shrink"};
+        padding_mm:readShapeNumber(padding,0,50),spans,fit:fit.select.value as "keep"|"shrink"};
       s.shadows=shadows;
-      s.z_index=Number(zIndex.value);
+      s.z_index=Math.round(readShapeNumber(zIndex,-1000,1000));
       if(layout.select.value==="inline")s.layout={mode:"inline"};
       else{
         const anchor=ctx.ed.model.order.find(x=>x!==id)??null;
         s.layout={mode:"floating",anchor:anchor?"block":"page",
-          ...(anchor?{target:anchor}:{}),x_mm:Number(posX.value),y_mm:Number(posY.value),
+          ...(anchor?{target:anchor}:{}),x_mm:readShapeNumber(posX,-5000,5000),y_mm:readShapeNumber(posY,-5000,5000),
           wrap:wrap.select.value as "none"|"top_bottom",
           layer:wrap.select.value!=="none"?"content":layer.select.value as "content"|"behind_text"|"in_front_of_text"};
       }
-      try{await ctx.ed.op({op:"shape_set",block:id,shape:s,label:"format shape"});return true;}
-      catch(e){toast(errorText(e),{kind:"error"});return undefined;}
+      await ctx.ed.op({op:"shape_set",block:id,shape:s,label:"format shape"});return true;
+      }catch(e){toast(errorText(e),{kind:"error"});return undefined;}
     }}]});
   await dialog.result;
 }
