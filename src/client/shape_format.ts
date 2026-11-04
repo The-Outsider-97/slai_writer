@@ -6,10 +6,11 @@
  */
 import type { ShapeData, ShapeKind, Shadow } from "./shape.js";
 
-export function showShapeNumber(value:number, digits=2):string {
+export function showShapeNumber(value:number, digits=2, locale="en-US"):string {
   if(!Number.isFinite(value))return "";
   const n=Number(value.toFixed(Math.max(0,Math.min(5,digits))));
-  return Object.is(n,-0)?"0":String(n);
+  const result=Object.is(n,-0)?"0":String(n);
+  return /^nl(?:-|$)/i.test(locale)?result.replace(".",","):result;
 }
 export function parseShapeNumber(text:string,min:number,max:number):number|null {
   const normalized=text.trim().replace(/\u00a0/g," ").replace(",",".");
@@ -25,7 +26,8 @@ export function readShapeNumber(input:HTMLInputElement,min:number,max:number):nu
 }
 export function shapeNumberInput(label:string,value:number,min:number,max:number,step=.5,digits=2):HTMLInputElement {
   const node=document.createElement("input");
-  node.type="text";node.inputMode="decimal";node.value=showShapeNumber(value,digits);
+  const locale=typeof navigator!=="undefined"?navigator.language:"en-US";
+  node.type="text";node.inputMode="decimal";node.value=showShapeNumber(value,digits,locale);
   node.setAttribute("aria-label",label);node.setAttribute("title",`${label} (${min}–${max})`);
   node.dataset["min"]=String(min);node.dataset["max"]=String(max);node.dataset["step"]=String(step);
   node.addEventListener("keydown",(event)=>{
@@ -33,12 +35,12 @@ export function shapeNumberInput(label:string,value:number,min:number,max:number
     event.preventDefault();
     const now=parseShapeNumber(node.value,min,max)??value;
     const amount=step*(event.shiftKey?10:event.altKey?0.1:1);
-    node.value=showShapeNumber(Math.max(min,Math.min(max,now+(event.key==="ArrowUp"?amount:-amount))),digits);
+    node.value=showShapeNumber(Math.max(min,Math.min(max,now+(event.key==="ArrowUp"?amount:-amount))),digits,locale);
     node.dispatchEvent(new Event("change",{bubbles:true}));
   });
   node.addEventListener("blur",()=>{
     const n=parseShapeNumber(node.value,min,max);
-    if(n!==null)node.value=showShapeNumber(n,digits);
+    if(n!==null)node.value=showShapeNumber(n,digits,locale);
   });
   return node;
 }
