@@ -402,3 +402,11 @@
   text-align: right;
   pointer-events: none;
 }
+
+/* Shape formatting uses the same compact dialog and ribbon components as pictures. */
+.shape-gallery { display: grid; grid-template-columns: repeat(5, minmax(90px, 1fr)); gap: 8px; }
+.shape-gallery-item { min-height: 56px; padding: 8px; border: 1px solid var(--e-line, #ddd); border-radius: 7px; cursor: pointer; }
+.shape-gallery-item:hover, .shape-gallery-item:focus-visible { outline: 2px solid var(--focus, #3b82f6); }
+.shape-format-form { max-height: min(65vh, 700px); overflow: auto; min-width: min(540px, 80vw); }
+.shape-format-form h3 { margin: 12px 0 4px; font-size: 13px; }
+.shape-shadow { border: 1px solid var(--e-line, #ddd); padding: 10px; margin: 8px 0; }
