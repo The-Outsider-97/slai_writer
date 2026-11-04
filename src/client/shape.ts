@@ -77,7 +77,7 @@ export function paintShape(shape:ShapeData):HTMLElement {
   };
   const primitive=():SVGElement=>{
     if(shape.kind==="ellipse")return el("ellipse",{cx:50,cy:50,rx:50,ry:50});
-    if(shape.kind==="rectangle")return el("path",{d:roundedRect(shape.corners_mm.map((x,i)=>x*100/(i%2?shape.height_mm:shape.width_mm)))});
+    if(shape.kind==="rectangle")return el("path",{d:roundedRect(shape.corners_mm.map(x=>x*100/Math.min(shape.width_mm,shape.height_mm)))});
     return el("path",{d:pathFor(shape.kind)});
   };
   // Shadow layers are painted behind the same silhouette, in reverse stack order.
