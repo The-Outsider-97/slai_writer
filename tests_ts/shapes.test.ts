@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { SHAPE_KINDS, defaultShape, pathFor, roundedRect, shapeOf, textRegion } from "../src/client/shape.js";
+import { SHAPE_KINDS, defaultShape, pathFor, roundedRect, roundedRectPhysical, shapeOf, textRegion } from "../src/client/shape.js";
 import { transformShapeGroup } from "../src/client/shapegroup.js";
 
 describe("Writer's declarative vector shape geometry",()=>{
@@ -72,5 +72,14 @@ describe("group geometry",()=>{
     assert.equal(result[0]?.shape.corners_mm[0],2.4);
     assert.equal(x.width_mm,originalWidth);
     assert.throws(()=>transformShapeGroup([{id:"x",shape:x}],{scale:100,rotation_deg:0}));
+  });
+});
+
+describe("physical vector path fidelity",()=>{
+  test("rounded corners use independent X/Y normalized dimensions",()=>{
+    const path=roundedRectPhysical([10,10,10,10],200,50);
+    assert.ok(path.includes("M5 0"),path);
+    assert.ok(path.includes("100 20"),path);
+    assert.equal(roundedRectPhysical([0,0,0,0],200,50).includes("M0 0"),true);
   });
 });
