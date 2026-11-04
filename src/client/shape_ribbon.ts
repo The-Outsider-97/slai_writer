@@ -227,26 +227,27 @@ export function buildShapeWorkspace(ctx:DocCtx):{el:HTMLElement;update():void} {
         const pick=selectionField(s.shadows.map((_,i)=>[String(i),`Shadow ${i+1}`] as const),
           String(activeShadowIndex),"Choose shadow layer");
         pick.addEventListener("change",()=>{activeShadowIndex=Number(pick.value);show("effects");});
-        const sh=s.shadows[activeShadowIndex]!;
+        const index=activeShadowIndex;
+        const sh=s.shadows[index]!;
         const enabled=check("Shadow visible",sh.enabled),ink=color("Shadow color",sh.color);
         const applyShadow=(modify:(value:ShapeData["shadows"][number])=>void,name:string):void=>
-          change(data=>{if(data.shadows[activeShadowIndex])modify(data.shadows[activeShadowIndex]!);},name);
+          change(data=>{if(data.shadows[index])modify(data.shadows[index]!);},name);
         enabled.addEventListener("change",()=>applyShadow(value=>{value.enabled=enabled.checked;},"shadow visibility"));
         ink.addEventListener("change",()=>applyShadow(value=>{value.color=ink.value;},"shadow color"));
         row(label("Layer",pick),label("Enabled",enabled),label("Color",ink),
-          field("Opacity %",sh.opacity*100,0,100,1,(_s,n)=>{_s.shadows[activeShadowIndex]!.opacity=n/100;},0),
-          field("X offset (mm)",sh.offset_x_mm,-100,100,.5,(_s,n)=>{_s.shadows[activeShadowIndex]!.offset_x_mm=n;}),
-          field("Y offset (mm)",sh.offset_y_mm,-100,100,.5,(_s,n)=>{_s.shadows[activeShadowIndex]!.offset_y_mm=n;}),
-          field("Blur (mm)",sh.blur_mm,0,30,.5,(_s,n)=>{_s.shadows[activeShadowIndex]!.blur_mm=n;}),
-          field("Spread (mm)",sh.spread_mm,-20,30,.5,(_s,n)=>{_s.shadows[activeShadowIndex]!.spread_mm=n;}),
+          field("Opacity %",sh.opacity*100,0,100,1,(_s,n)=>{_s.shadows[index]!.opacity=n/100;},0),
+          field("X offset (mm)",sh.offset_x_mm,-100,100,.5,(_s,n)=>{_s.shadows[index]!.offset_x_mm=n;}),
+          field("Y offset (mm)",sh.offset_y_mm,-100,100,.5,(_s,n)=>{_s.shadows[index]!.offset_y_mm=n;}),
+          field("Blur (mm)",sh.blur_mm,0,30,.5,(_s,n)=>{_s.shadows[index]!.blur_mm=n;}),
+          field("Spread (mm)",sh.spread_mm,-20,30,.5,(_s,n)=>{_s.shadows[index]!.spread_mm=n;}),
           add("Move up",()=>change(_s=>{
-            if(activeShadowIndex>0)[_s.shadows[activeShadowIndex-1],_s.shadows[activeShadowIndex]]=
-              [_s.shadows[activeShadowIndex]!,_s.shadows[activeShadowIndex-1]!];
+            if(activeShadowIndex>0)[_s.shadows[index-1],_s.shadows[index]]=
+              [_s.shadows[index]!,_s.shadows[index-1]!];
             activeShadowIndex=Math.max(0,activeShadowIndex-1);
           },"reorder shadow layers")),
           add("Move down",()=>change(_s=>{
-            if(activeShadowIndex+1<_s.shadows.length)[_s.shadows[activeShadowIndex+1],_s.shadows[activeShadowIndex]]=
-              [_s.shadows[activeShadowIndex]!,_s.shadows[activeShadowIndex+1]!];
+            if(activeShadowIndex+1<_s.shadows.length)[_s.shadows[index+1],_s.shadows[index]]=
+              [_s.shadows[index]!,_s.shadows[index+1]!];
             activeShadowIndex=Math.min(_s.shadows.length-1,activeShadowIndex+1);
           },"reorder shadow layers")));
       }
