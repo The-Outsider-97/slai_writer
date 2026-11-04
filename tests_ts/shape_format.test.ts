@@ -9,6 +9,7 @@ describe("Shape numeric display does not mutate document precision",()=>{
   test("large decimals use short UI strings",()=>{
     const original=48.83661048689139;
     assert.equal(showShapeNumber(original), "48.84");
+    assert.equal(showShapeNumber(original,2,"nl-NL"),"48,84");
     assert.equal(original,48.83661048689139);
     assert.equal(showShapeNumber(-0.06492272022910583),"\u22120.06".replace("−","-"));
     assert.equal(showShapeNumber(-0.00000002),"0");
