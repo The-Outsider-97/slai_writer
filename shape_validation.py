@@ -19,7 +19,7 @@ SHAPE_KINDS = frozenset({"rectangle", "ellipse", "line", "triangle", "diamond",
                          "pentagon", "hexagon", "star", "arrow", "plus"})
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 _ALLOWED = frozenset({"version", "kind", "width_mm", "height_mm", "rotation_deg", "fill",
-                       "outline", "opacity", "corners_mm", "text", "shadows", "layout", "z_index", "group_id"})
+                       "outline", "opacity", "corners_mm", "text", "shadows", "layout", "z_index", "group_id", "flip_horizontal", "flip_vertical"})
 
 
 def _object(value: Any, name: str, keys: set[str] | frozenset[str]) -> dict[str, Any]:
@@ -60,6 +60,9 @@ def validate_shape(value: Any) -> dict[str, Any]:
     h = _num(shape.get("height_mm"), "height_mm", 2, 1000)
     _num(shape.get("rotation_deg"), "rotation_deg", -360, 360)
     _num(shape.get("opacity"), "opacity", 0, 1)
+    for key in ("flip_horizontal", "flip_vertical"):
+        if key in shape:
+            _bool(shape[key], key)
 
     fill = _object(shape.get("fill"), "fill", {"color", "opacity", "enabled"})
     _color(fill.get("color"), "fill.color")
