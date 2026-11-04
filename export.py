@@ -23,6 +23,8 @@ from typing import Any
 
 from ..tools.errors import BadRequest, DependencyMissing, Forbidden, LimitExceeded, NotFound, Unauthorized
 from .session import DocumentSession, load_bytes, sldc
+from .shape_export import prepare_shapes
+from .shape_validation import SHAPE_KEY
 
 EXPORT_FORMATS = ("sldc", "pdf", "docx", "odt", "rtf", "html", "md", "txt", "xml")
 IMPORT_FORMATS = ("sldc", "docx", "doc", "odt", "rtf", "html", "md", "txt", "xml", "csv", "pdf")
@@ -212,6 +214,7 @@ class Exchange:
         if fmt == "sldc":
             return self._export_sldc(session, package, out_dir, stem, password, pre)
         dm = self._dm()
+        converted, shape_warnings = prepare_shapes(package, fmt, sldc())
         files = dm.module("files")
         writers = dm.module("docmodel.writers")
         verify = dm.module("docmodel.verify")
@@ -225,8 +228,8 @@ class Exchange:
         try:
             with files.atomic_output(out_dir, stem, formats.ext_for(fmt)) as out:
                 wopts.stem = out.destination.stem
-                written = writers.get_writer(fmt)(package, out.temp, wopts)
-                check = verify.verify_written(out.temp, fmt, package, dm.services)
+                written = writers.get_writer(fmt)(converted, out.temp, wopts)
+                check = verify.verify_written(out.temp, fmt, converted, dm.services)
                 if not check["ok"]:
                     failed = "; ".join(f"{c['name']} ({c['detail']})" for c in check["checks"] if c["ok"] is False)
                     raise BadRequest("The exported file failed its own check and was discarded: " + failed,
@@ -249,7 +252,8 @@ class Exchange:
             target.write_bytes(data)
             extras.append(str(target))
         report = {"path": str(final), "name": final.name, "format": fmt, "bytes": final.stat().st_size, "sha256": files.sha256_file(final),
-                  "pages": written.pages, "kept": written.kept, "lost": sorted(set([*LOSSY[fmt], *written.lost])), "warnings": written.warnings,
+                  "pages": written.pages, "kept": written.kept,
+                   "lost": sorted(set([*LOSSY[fmt], *written.lost, *shape_warnings])), "warnings": [*written.warnings, *shape_warnings],
                   "extras": extras, "backend": written.backend, "preflight": pre,
                   "verification": {"ok": check["ok"], "checks": check["checks"]}}
         if fmt == "pdf":
@@ -319,6 +323,7 @@ class Exchange:
         dm = self._dm()
         writers, files, errors = dm.module("docmodel.writers"), dm.module("files"), dm.module("errors")
         package = self._settled(session)
+        package, _shape_warnings = prepare_shapes(package, "pdf", sldc())
         with tempfile.TemporaryDirectory(prefix="wr-pdf-", dir=self._tmp()) as tmp:
             target = Path(tmp) / "preview.pdf"
             try:
