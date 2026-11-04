@@ -107,7 +107,7 @@ export function layoutContourText(shape:ShapeData,measure:(piece:string,offset:n
   const fs=shape.text.font_size_pt*25.4/72*scale;
   const lineH=Math.max(1.2,fs*1.30);
   const max=shape.height_mm-shape.text.padding_mm;
-  let y=shape.text.padding_mm,offset=0,iterations=0;
+  let y=shape.text.padding_mm,offset=0,iterations=0,oversizedGlyph=false;
   const lines:ShapeLine[]=[];
   while(offset<content.length&&y+lineH<=max+1e-7&&iterations++<500){
     const options=textBand(shape,y,lineH);
@@ -122,7 +122,7 @@ export function layoutContourText(shape:ShapeData,measure:(piece:string,offset:n
       if(!Number.isFinite(advance)||advance<0)throw Error("Invalid glyph measure");
       if(used+advance>cap+1e-7){
         if(lastSpace>offset)j=lastSpace;
-        else if(j===offset)j+=piece.length; // Long glyph cannot produce infinite loop.
+        else if(j===offset){j+=piece.length;oversizedGlyph=true;} // Never loop forever on an oversized glyph.
         break;
       }
       used+=advance;j+=piece.length;
@@ -134,7 +134,7 @@ export function layoutContourText(shape:ShapeData,measure:(piece:string,offset:n
     offset=j;
     y+=lineH;
   }
-  return {lines,overflow:offset<content.length,nextOffset:offset};
+  return {lines,overflow:oversizedGlyph||offset<content.length,nextOffset:offset};
 }
 export function shapeContourClip(shape:ShapeData):string {
   const points=polygonForShape(shape.kind,shape.width_mm,shape.height_mm,shape.corners_mm);
