@@ -124,6 +124,33 @@ class Exchange:
         with session.lock:
             return session._settled(session.pkg.copy())                         # noqa: SLF001
 
+    def _shape_export_package(self, package: Any, fmt: str, dm: Any) -> tuple[Any, list[str]]:
+        """Prefer Documaster's native vector adapter; retain a truthful legacy fallback."""
+        if fmt in ("pdf", "docx"):
+            try:
+                module = dm.module(f"docmodel.writers.write_{fmt}")
+                native = bool(getattr(module, "SLDC_WRITER_SHAPES", False))
+            except (ImportError, AttributeError):
+                native = False
+            if native and fmt == "docx":
+                # Word DrawingML has a single shadow and one preset corner
+                # geometry. Keep complex cases visually intact as PNG.
+                for block in package.document["blocks"]:
+                    shape = (block.get("extensions") or {}).get(SHAPE_KEY)
+                    if shape is None:
+                        continue
+                    corners = shape.get("corners_mm") or []
+                    if (len(shape.get("shadows") or []) > 1
+                            or any(float(x) > 0 for x in corners)
+                            or float(shape.get("opacity", 1)) != 1
+                            or shape.get("text", {}).get("fit") == "shrink"
+                            or any(float(s.get("spread_mm", 0)) != 0 for s in shape.get("shadows", []))):
+                        native = False
+                        break
+            if native:
+                return package, []
+        return prepare_shapes(package, fmt, sldc())
+
     # ---------------------------------------------------------------------------------------------------- preflight
     def preflight(self, session: DocumentSession, target: str | None = None) -> dict[str, Any]:
         """Problems worth fixing before the document leaves Writer. Findings never block an export; they say what to check."""
@@ -214,7 +241,7 @@ class Exchange:
         if fmt == "sldc":
             return self._export_sldc(session, package, out_dir, stem, password, pre)
         dm = self._dm()
-        converted, shape_warnings = prepare_shapes(package, fmt, sldc())
+        converted, shape_warnings = self._shape_export_package(package, fmt, dm)
         files = dm.module("files")
         writers = dm.module("docmodel.writers")
         verify = dm.module("docmodel.verify")
@@ -323,7 +350,7 @@ class Exchange:
         dm = self._dm()
         writers, files, errors = dm.module("docmodel.writers"), dm.module("files"), dm.module("errors")
         package = self._settled(session)
-        package, _shape_warnings = prepare_shapes(package, "pdf", sldc())
+        package, _shape_warnings = self._shape_export_package(package, "pdf", dm)
         with tempfile.TemporaryDirectory(prefix="wr-pdf-", dir=self._tmp()) as tmp:
             target = Path(tmp) / "preview.pdf"
             try:
