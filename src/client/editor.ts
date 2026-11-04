@@ -45,7 +45,7 @@ export interface EditorHooks { prefs(): Prefs }
 
 const NEW_ID = (): string => `b${uid().slice(0, 16)}`;
 
-const SIG = (b: Block): string => JSON.stringify([b.type, b.style, b.attributes, b.spans, b.table, b.figure, b.equation, b.embed, b.type === "table" || b.type === "figure" ? b.text : 0]);
+const SIG = (b: Block): string => JSON.stringify([b.type, b.style, b.attributes, b.spans, b.table, b.figure, b.equation, b.embed, b.extensions, b.type === "table" || b.type === "figure" ? b.text : 0]);
 
 export class Editor {
   /** Measured PDF layout, never the editor's approximate block-granular sheet positions. */
