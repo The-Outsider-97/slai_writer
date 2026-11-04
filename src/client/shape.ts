@@ -81,9 +81,19 @@ export function textRegion(kind:ShapeKind,corners:number[]=[0,0,0,0]):{x:number;
   const inset=Math.min(.2,radius/100);
   return {x:Math.max(x,inset),y:Math.max(y,inset),w:Math.min(w,1-2*inset),h:Math.min(h,1-2*inset)};
 }
+/** Physical corner radii: preserve a round mm radius on non-square shapes.
+ * A square SVG viewBox is stretched to physical width/height, so separate X/Y
+ * normalized radii must be used instead of scaling both by min(width,height).
+ */
+export function roundedRectPhysical(corners:readonly number[],w:number,h:number):string{
+  const [tl,tr,br,bl]=corners.map(r=>Math.max(0,r)) as [number,number,number,number];
+  const x=(r:number)=>Math.max(0,Math.min(50,r*100/w));
+  const y=(r:number)=>Math.max(0,Math.min(50,r*100/h));
+  return `M${x(tl)} 0 H${100-x(tr)} Q100 0 100 ${y(tr)} V${100-y(br)} Q100 100 ${100-x(br)} 100 H${x(bl)} Q0 100 0 ${100-y(bl)} V${y(tl)} Q0 0 ${x(tl)} 0 Z`;
+}
 function primitive(shape:ShapeData):SVGElement {
   if(shape.kind==="ellipse")return el("ellipse",{cx:50,cy:50,rx:50,ry:50});
-  if(shape.kind==="rectangle")return el("path",{d:roundedRect(shape.corners_mm.map(v=>v*100/Math.min(shape.width_mm,shape.height_mm)))});
+  if(shape.kind==="rectangle")return el("path",{d:roundedRectPhysical(shape.corners_mm,shape.width_mm,shape.height_mm)});
   return el("path",{d:pathFor(shape.kind)});
 }
 function paintRuns(shape:ShapeData):HTMLElement {
@@ -151,7 +161,7 @@ export function paintShape(shape:ShapeData):HTMLElement {
   const svg=el("svg",{viewBox:"0 0 100 100",width:"100%",height:"100%",preserveAspectRatio:"none","aria-hidden":"true"});
   svg.style.overflow="visible";
   const defs=el("defs");svg.appendChild(defs);
-  const group=el("g");const unitStroke=100*25.4/(shape.width_mm*72);
+  const group=el("g");const physicalStrokePx=96/72;
   [...shape.shadows].reverse().forEach((shadow,i)=>{
     if(!shadow.enabled)return;
     const node=primitive(shape);
@@ -172,7 +182,7 @@ export function paintShape(shape:ShapeData):HTMLElement {
   body.setAttribute("fill-opacity",String(shape.fill.opacity));
   body.setAttribute("stroke",shape.outline.enabled?shape.outline.color:"none");
   body.setAttribute("stroke-opacity",String(shape.outline.opacity));
-  body.setAttribute("stroke-width",String(shape.outline.width_pt*unitStroke));
+  body.setAttribute("stroke-width",String(shape.outline.width_pt*physicalStrokePx));
   body.setAttribute("vector-effect","non-scaling-stroke");
   if(shape.outline.style!=="solid")body.setAttribute("stroke-dasharray",shape.outline.style==="dotted"?"1 3":"5 3");
   group.appendChild(body);svg.appendChild(group);host.appendChild(svg);
