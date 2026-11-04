@@ -376,3 +376,13 @@ table.tbl .cell { height: 7mm; }
 /* the way back from Profile, Settings, Plans and Support to the open document */
 .return-doc { display: inline-flex; align-items: center; gap: .4rem; margin-left: .8rem; padding: .25rem .8rem .25rem .55rem; border-radius: 999px; font-size: .85rem; min-height: 0; white-space: nowrap; }
 .return-doc .chev { width: 14px; height: 14px; }
+
+/* Writer's native vector shape blocks are non-text content, despite using an SLDC
+   paragraph carrier to preserve backward-compatible inert extension data. */
+.blk:has(> .writer-shape) { width: max-content; max-width: 100%; margin: 2mm auto; }
+.writer-shape { position: relative; flex: none; transform-origin: center; overflow: visible; cursor: pointer; }
+.writer-shape svg { display: block; overflow: visible; }
+.writer-shape-text { position: absolute; inset: 17% 17%; display: flex; align-items: center; justify-content: center;
+  white-space: pre-wrap; overflow-wrap: anywhere; overflow: hidden; pointer-events: none; line-height: 1.2; }
+.blk[data-selected] > .writer-shape { outline: 2px solid var(--focus, #3b82f6); outline-offset: 2px; }
+@media print { .blk[data-selected] > .writer-shape { outline: none; } }
