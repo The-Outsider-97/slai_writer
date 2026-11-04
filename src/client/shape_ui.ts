@@ -2,6 +2,8 @@
 import { h, labelled, openDialog, toast } from "./kit.js";
 import { errorText } from "./net.js";
 import { checkbox, selectField } from "./widgets.js";
+import { diffText } from "./textops.js";
+import type { Span } from "./types.js";
 import * as A from "./actions.js";
 import type { DocCtx } from "./docctx.js";
 import { SHAPE_KEY, SHAPE_KINDS, defaultShape, shapeOf, type ShapeData, type ShapeKind, type Shadow } from "./shape.js";
@@ -11,6 +13,17 @@ const number = (value:number,min:number,max:number,step=1):HTMLInputElement =>
 const color=(value:string):HTMLInputElement=>h("input",{type:"color",value});
 const row=(name:string,node:HTMLElement):HTMLElement=>labelled(name,node);
 const percent=(value:number):HTMLInputElement=>number(Math.round(value*100),0,100);
+/** Shift unaffected rich-text runs across edits; split runs when replacing text. */
+export function rebaseShapeSpans(spans:Span[],start:number,end:number,insertSize:number):Span[]{
+  const diff=insertSize-(end-start),next:Span[]=[];
+  for(const span of spans){
+    if(span.end<=start){next.push({...span});continue;}
+    if(span.start>=end){next.push({...span,start:span.start+diff,end:span.end+diff});continue;}
+    if(span.start<start)next.push({...span,end:start});
+    if(span.end>end)next.push({...span,start:start+insertSize,end:span.end+diff});
+  }
+  return next.filter(s=>s.start<s.end);
+}
 const shadowDefault=():Shadow=>({enabled:true,color:"#555555",opacity:.55,offset_x_mm:3,offset_y_mm:3,blur_mm:2,spread_mm:0});
 
 export async function insertShape(ctx:DocCtx):Promise<void> {
@@ -42,7 +55,49 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
   const borderWidth=number(s.outline.width_pt,.1,72,.5),borderOpacity=percent(s.outline.opacity);
   const borderStyle=selectField("Outline style",[["solid","Solid"],["dashed","Dashed"],["dotted","Dotted"]],s.outline.style);
   const opacity=percent(s.opacity);
-  const text=h("textarea",{rows:3,maxLength:4000,value:s.text.content,attrs:{"aria-label":"Text inside shape"}});
+  const text=h("textarea",{rows:3,maxLength:4000,value:s.text.content,attrs:{"aria-label":"Text inside shape"}}); 
+  let lastText=text.value;
+  let spans:Span[]=(s.text.spans??[]).map(x=>({...x}));
+  text.addEventListener("input",()=>{
+    const diff=diffText(lastText,text.value,text.selectionStart);
+    if(diff)spans=rebaseShapeSpans(spans,diff.start,diff.end,diff.insert.length);
+    lastText=text.value;
+  });
+  const addRun=(props:Partial<Span>):void=>{
+    const start=text.selectionStart,end=text.selectionEnd;
+    if(end<=start){toast("Select the characters to format first.",{kind:"info"});text.focus();return;}
+    spans.push({type:"format",start,end,...props});
+    if(spans.length>300)spans=spans.slice(-300);
+    text.focus();text.setSelectionRange(start,end);
+  };
+  const formatSelected=h("div",{class:"actions"},
+    ...([["Bold","bold"],["Italic","italic"],["Underline","underline"]] as const).map(([label,key])=>{
+      const button=h("button",{type:"button",text:label,attrs:{"aria-label":`${label} selected shape text`}});
+      button.addEventListener("mousedown",e=>e.preventDefault());
+      button.addEventListener("click",()=>addRun({[key]:true}));
+      return button;
+    }));
+  const formatColor=color("#222222"),formatSize=number(s.text.font_size_pt,5,144,.5);
+  const colorSelected=h("button",{type:"button",text:"Color selection"});
+  colorSelected.addEventListener("mousedown",e=>e.preventDefault());
+  colorSelected.addEventListener("click",()=>addRun({color:formatColor.value}));
+  const sizeSelected=h("button",{type:"button",text:"Size selection"});
+  sizeSelected.addEventListener("mousedown",e=>e.preventDefault());
+  sizeSelected.addEventListener("click",()=>addRun({font_size_pt:Number(formatSize.value)}));
+  const clearRuns=h("button",{type:"button",text:"Clear selected formatting"});
+  clearRuns.addEventListener("click",()=>{const a=text.selectionStart,b=text.selectionEnd;
+    spans=spans.flatMap(run=>a<b&&run.start<b&&run.end>a?
+      [{...run,end:a},{...run,start:b}].filter(x=>x.start<x.end):[run]);});
+  const fit=selectField("Text fitting",[["keep","Keep text size; warn if overflow"],["shrink","Shrink display text to fit"]],s.text.fit??"keep");
+  const layout=selectField("Positioning",[["inline","Inline with text"],["floating","Floating relative to page content"]],
+    s.layout?.mode??"inline");
+  const posX=number(s.layout?.x_mm??0,-5000,5000,.5),posY=number(s.layout?.y_mm??0,-5000,5000,.5);
+  const layer=selectField("Object layer",[["content","Content"],["behind_text","Behind text"],["in_front_of_text","In front of text"]],s.layout?.layer??"in_front_of_text");
+  const zIndex=number(s.z_index??0,-1000,1000,1);
+  const floatingControls=h("div",{class:"stack"},row("Horizontal position (mm)",posX),
+    row("Vertical position (mm)",posY),layer.root,row("Stacking order",zIndex));
+  const updateFloat=():void=>{floatingControls.hidden=layout.select.value!=="floating";};
+  layout.select.addEventListener("change",updateFloat);updateFloat();
   const textColor=color(s.text.color),textSize=number(s.text.font_size_pt,5,144,.5);
   const textBold=checkbox("Bold",s.text.bold),textItalic=checkbox("Italic",s.text.italic);
   const textAlign=selectField("Text alignment",[["left","Left"],["center","Center"],["right","Right"]],s.text.align);
@@ -83,7 +138,10 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
     borderStyle.root,row("Outline opacity %",borderOpacity),row("Overall opacity %",opacity),
     h("h3",{text:"Corners (rectangles)"}),...cornerInputs.map((v,i)=>row(["Top left","Top right","Bottom right","Bottom left"][i]??"Corner",v)),
     h("h3",{text:"Text"}),row("Content",text),row("Text color",textColor),row("Font size (pt)",textSize),
-    textBold.root,textItalic.root,textAlign.root,row("Text padding (mm)",padding),
+    textBold.root,textItalic.root,textAlign.root,row("Text padding (mm)",padding),fit.root,
+    h("p",{class:"muted",text:"Select characters inside the text field, then apply a character format."}),
+    formatSelected,h("div",{class:"actions"},formatColor,colorSelected,formatSize,sizeSelected,clearRuns),
+    h("h3",{text:"Position and arrangement"}),layout.root,floatingControls,
     h("h3",{text:"Shadow layers"}),shadowList,add);
   const dialog=openDialog<true>({title:"Shape Format",body,
     actions:[{label:"Apply changes",kind:"primary",run:async()=>{
@@ -96,8 +154,16 @@ export async function editShape(ctx:DocCtx,id:string):Promise<void>{
       s.corners_mm=s.kind==="rectangle"?cornerInputs.map(x=>Number(x.value)):[0,0,0,0];
       s.text={content:text.value,color:textColor.value,font_size_pt:Number(textSize.value),
         bold:textBold.input.checked,italic:textItalic.input.checked,align:textAlign.select.value as ShapeData["text"]["align"],
-        padding_mm:Number(padding.value)};
+        padding_mm:Number(padding.value),spans,fit:fit.select.value as "keep"|"shrink"};
       s.shadows=shadows;
+      s.z_index=Number(zIndex.value);
+      if(layout.select.value==="inline")s.layout={mode:"inline"};
+      else{
+        const anchor=ctx.ed.model.order.find(x=>x!==id)??null;
+        s.layout={mode:"floating",anchor:anchor?"block":"page",
+          ...(anchor?{target:anchor}:{}),x_mm:Number(posX.value),y_mm:Number(posY.value),
+          wrap:"none",layer:layer.select.value as "content"|"behind_text"|"in_front_of_text"};
+      }
       try{await ctx.ed.op({op:"shape_set",block:id,shape:s,label:"format shape"});return true;}
       catch(e){toast(errorText(e),{kind:"error"});return undefined;}
     }}]});
