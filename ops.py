@@ -1157,7 +1157,9 @@ def apply_operation(doc: dict[str, Any], op: dict[str, Any]) -> tuple[Undo, dict
         # Shape-bearing paragraph blocks are inert SLDC carriers, not editable
         # text paragraphs. Reject any mutation that would hide or corrupt them.
         from .shape_validation import SHAPE_KEY, validate_shape
-        for item in doc["blocks"]:
+        candidate_shapes = (doc["blocks"] if tracker.structural else
+                            (tracker.index[ident] for ident in tracker.touched if ident in tracker.index))
+        for item in candidate_shapes:
             if SHAPE_KEY not in item.get("extensions", {}):
                 continue
             if item["type"] != "paragraph" or item["text"]:
