@@ -1,0 +1,53 @@
+name: Writer shape integration
+on:
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  shape-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout SLAI v2.4 shared runtime
+        uses: actions/checkout@v4
+        with:
+          repository: The-Outsider-97/SLAI
+          ref: SLAI-v.2.4
+          path: slai
+      - name: Checkout Writer changes
+        uses: actions/checkout@v4
+        with:
+          path: slai/applications/slai_writer
+      - name: Checkout Documaster
+        uses: actions/checkout@v4
+        with:
+          repository: The-Outsider-97/Documaster
+          ref: main
+          path: slai/applications/Documaster
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install TypeScript test dependencies
+        working-directory: slai/applications/slai_writer
+        run: npm install --no-audit --no-fund
+      - name: TypeScript typecheck
+        working-directory: slai/applications/slai_writer
+        run: npm run typecheck
+      - name: Compile and test TypeScript
+        working-directory: slai/applications/slai_writer
+        run: npm run test:compiled
+      - name: Build browser client
+        working-directory: slai/applications/slai_writer
+        run: npm run build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        working-directory: slai
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r applications/slai_writer/requirements.txt pytest python-docx lxml
+      - name: Shape and export regression tests
+        working-directory: slai
+        run: python -m pytest applications/slai_writer/tests/test_shapes.py applications/slai_writer/tests/test_shape_export.py -q
