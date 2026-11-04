@@ -381,18 +381,23 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     referenceGroup("Bibliography", ribbonButton("Insert / Update References", () => run(() => bibliographyDialog(ctx)), "book"),
       ribbonButton("Remove References", () => run(() => removeBibliography(ctx)), "close")),
     referenceGroup("Citation style", h("span", { class: "ribbon-style-label", text: "APA-style author–date" })));
+  const illustrations = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Insert illustrations" } },
+    referenceGroup("Illustrations", ribbonButton("Insert Picture", fire("picture"), "image"), ribbonButton("Insert Shape", fire("shape"), "layers")));
   const home = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Home formatting ribbon" } }, fontGroup, paragraphGroup);
   const homeTab = h("button", { type: "button", class: "ribbon-tab", text: "Home", attrs: { role: "tab", "aria-selected": "true" } });
+  const insertTab = h("button", { type: "button", class: "ribbon-tab", text: "Insert", attrs: { role: "tab", "aria-selected": "false" } });
   const refsTab = h("button", { type: "button", class: "ribbon-tab", text: "References", attrs: { role: "tab", "aria-selected": "false" } });
-  const showTab = (which: "home" | "references"): void => {
-    home.hidden = which !== "home"; refs.hidden = which !== "references";
+  const showTab = (which: "home" | "references" | "insert"): void => {
+    home.hidden = which !== "home"; refs.hidden = which !== "references"; illustrations.hidden = which !== "insert";
     homeTab.setAttribute("aria-selected", String(which === "home"));
     refsTab.setAttribute("aria-selected", String(which === "references"));
+    insertTab.setAttribute("aria-selected", String(which === "insert"));
   };
   homeTab.addEventListener("click", () => showTab("home"));
   refsTab.addEventListener("click", () => showTab("references"));
+  insertTab.addEventListener("click", () => showTab("insert"));
   const el = h("div", { class: "bar writer-ribbon" },
-    h("div", { class: "ribbon-tabs", attrs: { role: "tablist", "aria-label": "Ribbon tabs" } }, homeTab, refsTab), home, refs);
+    h("div", { class: "ribbon-tabs", attrs: { role: "tablist", "aria-label": "Ribbon tabs" } }, homeTab, insertTab, refsTab), home, illustrations, refs);
   showTab("home");
   const GROUPS_KEY = "writer.ribbonGroups.v1";
   const groupRows = [{ id: "font", label: "Font", element: fontGroup }, { id: "paragraph", label: "Paragraph / Alignment", element: paragraphGroup }];
