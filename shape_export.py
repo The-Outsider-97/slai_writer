@@ -73,6 +73,95 @@ def _rgba(color: str, alpha: float) -> tuple[int, int, int, int]:
             int(color[5:7], 16), max(0, min(255, round(255 * alpha))))
 
 
+
+def _paint_rich_text(canvas: Any, text: dict[str, Any],
+                     x: float, y: float, width: float, height: float,
+                     scale: float) -> None:
+    """Render validated Writer text spans with bounded glyph-level layout.
+
+    UTF-16 spans align with browser offsets, including non-BMP characters.
+    All individual glyphs retain font size, style, underline and color.
+    """
+    from PIL import Image, ImageDraw
+    chars = text.get("content", "")
+    if not chars:
+        return
+    spans = [s for s in (text.get("spans") or []) if s.get("type") == "format"]
+    styles: list[tuple[str, dict[str, Any]]] = []
+    offset = 0
+    for char in chars:
+        style = {"bold": text.get("bold", False), "italic": text.get("italic", False),
+                 "color": text.get("color", "#101010"),
+                 "font_size_pt": text.get("font_size_pt", 12), "underline": False}
+        for span in spans:
+            if span["start"] <= offset < span["end"]:
+                for key in ("bold", "italic", "color", "font_size_pt", "underline"):
+                    if key in span:
+                        style[key] = span[key]
+        styles.append((char, style))
+        offset += 2 if ord(char) > 0xffff else 1
+    fonts: dict[tuple[int, bool, bool], Any] = {}
+    def font_for(size: int, bold: bool, italic: bool) -> Any:
+        key = size, bold, italic
+        if key not in fonts:
+            fonts[key] = _font(size, bold, italic)
+        return fonts[key]
+
+    layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    def layout(factor: float) -> tuple[list[list[tuple[str, Any, dict[str, Any], float]]], float]:
+        lines: list[list[tuple[str, Any, dict[str, Any], float]]] = [[]]
+        current = 0.0
+        for char, style in styles:
+            if char == "\n":
+                lines.append([])
+                current = 0
+                continue
+            pixel_size = max(5, round(float(style["font_size_pt"]) * scale * 25.4 / 72 * factor))
+            font = font_for(pixel_size, bool(style["bold"]), bool(style["italic"]))
+            advance = float(draw.textlength(char, font=font))
+            if current > 0 and current + advance > width:
+                lines.append([])
+                current = 0.0
+            lines[-1].append((char, font, style, advance))
+            current += advance
+        leading = sum(max([float(font.size) * 1.25 for _, font, _, _ in line] + [12.0])
+                      for line in lines)
+        return lines, leading
+
+    factor = 1.0
+    lines, total_height = layout(factor)
+    if text.get("fit") == "shrink":
+        for _ in range(24):
+            if total_height <= height or factor <= .38:
+                break
+            factor *= .93
+            lines, total_height = layout(factor)
+    current_y = y + max(0, (height - total_height) / 2)
+    align = text.get("align", "center")
+    for line in lines:
+        advance = sum(run[3] for run in line)
+        current_x = x if align == "left" else x + max(0, width - advance) if align == "right" else x + max(0, (width - advance) / 2)
+        lead = max([float(font.size) * 1.25 for _, font, _, _ in line] + [12.0])
+        for char, font, style, extent in line:
+            if current_y + lead <= y + height + 1:
+                draw.text((current_x, current_y), char, font=font, fill=_rgba(style["color"], 1))
+                if style.get("underline"):
+                    baseline = current_y + max(1, int(font.size * 1.04))
+                    draw.line([(current_x, baseline), (current_x + extent, baseline)],
+                              fill=_rgba(style["color"], 1), width=max(1, int(font.size / 14)))
+            current_x += extent
+        current_y += lead
+    # Strict containment: external drawing cannot paint shape text outside
+    # the conservative box. The editor signals and preflight warns of overflow.
+    left, top, right, bottom = round(x), round(y), round(x + width), round(y + height)
+    mask = Image.new("L", canvas.size)
+    md = ImageDraw.Draw(mask)
+    md.rectangle((left, top, right, bottom), fill=255)
+    from PIL import ImageChops
+    layer.putalpha(ImageChops.multiply(layer.getchannel("A"), mask))
+    canvas.alpha_composite(layer)
+
 def render_shape_png(value: dict[str, Any]) -> tuple[bytes, float]:
     """Return transparent PNG and its accurate full painted width in millimetres.
 
@@ -183,39 +272,7 @@ def render_shape_png(value: dict[str, Any]) -> tuple[bytes, float]:
         by = y0 + pxh * ry + padding
         bw = max(1, pxw * rw - 2 * padding)
         bh = max(1, pxh * rh - 2 * padding)
-        font_size = max(5, round(text["font_size_pt"] * scale * 25.4 / 72))
-        font = _font(font_size, text["bold"], text["italic"])
-        drawer = ImageDraw.Draw(canvas)
-        lines: list[str] = []
-        for paragraph in text["content"].split("\n"):
-            words = paragraph.split(" ")
-            line = ""
-            for word in words:
-                nxt = (line + " " + word).strip() if line else word
-                if line and drawer.textlength(nxt, font=font) > bw:
-                    lines.append(line)
-                    line = word
-                else:
-                    line = nxt
-            lines.append(line)
-        def height_for(f: Any) -> int:
-            return sum(drawer.textbbox((0, 0), line or "M", font=f)[3] -
-                       drawer.textbbox((0, 0), line or "M", font=f)[1] + 3
-                       for line in lines)
-        if text.get("fit") == "shrink":
-            while font_size > 5 and (height_for(font) > bh or
-                  any(drawer.textlength(line, font=font) > bw for line in lines)):
-                font_size -= 1
-                font = _font(font_size, text["bold"], text["italic"])
-        total_h = height_for(font)
-        cy = by + max(0, (bh - total_h) / 2)
-        ink = _rgba(text["color"], 1)
-        for line in lines:
-            width = drawer.textlength(line, font=font)
-            xx = bx if text["align"] == "left" else bx + bw - width if text["align"] == "right" else bx + (bw - width) / 2
-            drawer.text((xx, cy), line, font=font, fill=ink)
-            bbox = drawer.textbbox((0, 0), line or "M", font=font)
-            cy += bbox[3] - bbox[1] + 3
+        _paint_rich_text(canvas, text, bx, by, bw, bh, scale)
 
     if shape["opacity"] < 1:
         canvas.putalpha(canvas.getchannel("A").point(lambda v: round(v * shape["opacity"])))
