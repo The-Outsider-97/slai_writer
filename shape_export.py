@@ -285,6 +285,15 @@ def render_shape_png(value: dict[str, Any]) -> tuple[bytes, float]:
         layer.putalpha(edge)
         canvas.alpha_composite(layer)
 
+    # Mirror the vector silhouette and shadow layers before painting text;
+    # ordinary Word shape text must remain legible, not rendered backwards.
+    if shape.get("flip_horizontal") or shape.get("flip_vertical"):
+        from PIL import ImageOps
+        if shape.get("flip_horizontal"):
+            canvas = ImageOps.mirror(canvas)
+        if shape.get("flip_vertical"):
+            canvas = ImageOps.flip(canvas)
+
     text = shape["text"]
     if text["content"] and kind != "line":
         rx, ry, rw, rh = _region(kind)
