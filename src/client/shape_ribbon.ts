@@ -164,6 +164,8 @@ export function buildShapeWorkspace(ctx:DocCtx):{el:HTMLElement;update():void} {
         field("Height (mm)",s.height_mm,2,1000,.5,(shape,n)=>Object.assign(shape,resizeShape(shape,locked?shape.width_mm*n/shape.height_mm:shape.width_mm,n,false))),
         label("Lock ratio",lock),
         field("Rotation (°)",s.rotation_deg,-360,360,1,(shape,n)=>{shape.rotation_deg=n;}),
+        add("Flip horizontal",()=>change(shape=>{shape.flip_horizontal=!shape.flip_horizontal;},"flip shape horizontally")),
+        add("Flip vertical",()=>change(shape=>{shape.flip_vertical=!shape.flip_vertical;},"flip shape vertically")),
         add("Reset rotation",()=>change(shape=>{shape.rotation_deg=0;},"reset rotation")));
     }else if(key==="fill"){
       const enabled=check("Fill enabled",s.fill.enabled),ink=color("Fill color",s.fill.color);
