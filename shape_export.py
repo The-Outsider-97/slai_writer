@@ -178,7 +178,10 @@ def render_shape_png(value: dict[str, Any]) -> tuple[bytes, float]:
     top = spread + max([max(0, -s["offset_y_mm"]) for s in shadows] + [0])
     bottom = spread + max([max(0, s["offset_y_mm"]) for s in shadows] + [0])
     ow, oh = w + left + right, h + top + bottom
-    scale = min(300 / 25.4, 4096 / max(ow, oh), (14_000_000 / (ow * oh)) ** .5)
+    # Bounded working memory: drop resolution for expensive layered shadows
+    # instead of allocating multiple unbounded RGBA/filter intermediates.
+    pixel_budget = max(1_500_000, 6_000_000 // (1 + len(shadows) // 2))
+    scale = min(300 / 25.4, 4096 / max(ow, oh), (pixel_budget / (ow * oh)) ** .5)
     pxw, pxh = max(1, round(w * scale)), max(1, round(h * scale))
     fullw, fullh = max(1, round(ow * scale)), max(1, round(oh * scale))
     x0, y0 = round(left * scale), round(top * scale)
