@@ -124,6 +124,9 @@ export class ShapeTools {
     const id=this.id,node=id?this.ed.els.get(id)?.querySelector<HTMLElement>(".writer-shape"):null;
     const shape=shapeOf(id?this.ed.model.block(id):undefined);
     if(!id||!node||!shape)return;
+    const cohort=shape.group_id?this.ed.model.list().filter(block=>
+      shapeOf(block)?.group_id===shape.group_id).map(block=>block.id):[id];
+    const movingIds=new Set(cohort);
     const sx=e.clientX,sy=e.clientY,z=this.ed.page.zoom;
     const startRect=node.getBoundingClientRect();
     const holdX=sx-startRect.left,holdY=sy-startRect.top;
@@ -141,10 +144,10 @@ export class ShapeTools {
         })?.el??null;
       destination=sheet?.querySelector<HTMLElement>(".body")??null;
       let hit=elements.find((n):n is HTMLElement=>n instanceof HTMLElement&&n.classList.contains("blk")
-        &&n.dataset["id"]!==id&&!n.hasAttribute("data-floating"));
+        &&!movingIds.has(n.dataset["id"]??"")&&!n.hasAttribute("data-floating"));
       if(!hit&&destination){
         const rows=[...destination.querySelectorAll<HTMLElement>(".blk[data-id]:not([data-floating])")]
-          .filter(n=>n.dataset["id"]!==id);
+          .filter(n=>!movingIds.has(n.dataset["id"]??""));
         hit=rows.find(n=>y<n.getBoundingClientRect().top+n.getBoundingClientRect().height/2)
           ??rows[rows.length-1];
       }
@@ -181,20 +184,27 @@ export class ShapeTools {
         const rect=endBody.getBoundingClientRect();
         const x=Math.max(-5000,Math.min(5000,(lastX-holdX-rect.left)/z/MM_PX));
         const y=Math.max(-5000,Math.min(5000,(lastY-holdY-rect.top)/z/MM_PX));
-        const next={...shape,layout:{...shape.layout,x_mm:Math.round(x*2)/2,y_mm:Math.round(y*2)/2}} as ShapeData;
+        const newX=Math.round(x*2)/2,newY=Math.round(y*2)/2;
+        const deltaX=newX-(shape.layout.x_mm??0),deltaY=newY-(shape.layout.y_mm??0);
         const ops:Array<Record<string,unknown>>=[];
         if(endTarget){
           const at=this.ed.model.order.indexOf(endTarget.id);
           const after=endTarget.before?(at>0?this.ed.model.order[at-1]??null:null):endTarget.id;
-          ops.push({op:"move",blocks:[id],after});
-          next.layout={...next.layout,anchor:"block",target:endTarget.id};
+          ops.push({op:"move",blocks:cohort,after});
         }
-        ops.push({op:"shape_set",block:id,shape:next});
-        void this.ed.op({op:"batch",ops,label:"move shape across pages"}).catch(err=>this.ed.failed(err));
+        for(const member of cohort){
+          const old=shapeOf(this.ed.model.block(member));if(!old||old.layout?.mode!=="floating")continue;
+          const layout={...old.layout,
+            x_mm:Math.max(-5000,Math.min(5000,(old.layout.x_mm??0)+deltaX)),
+            y_mm:Math.max(-5000,Math.min(5000,(old.layout.y_mm??0)+deltaY))};
+          if(endTarget){layout.anchor="block";layout.target=endTarget.id;}
+          ops.push({op:"shape_set",block:member,shape:{...old,layout}});
+        }
+        if(ops.length)void this.ed.op({op:"batch",ops,label:"move shapes across pages"}).catch(err=>this.ed.failed(err));
       }else if(endTarget){
         const at=this.ed.model.order.indexOf(endTarget.id);
         const after=endTarget.before?(at>0?this.ed.model.order[at-1]??null:null):endTarget.id;
-        void A.moveBlocksTo(this.ed,[id],after);
+        void A.moveBlocksTo(this.ed,cohort,after);
       }else this.refresh();
     });
   }
