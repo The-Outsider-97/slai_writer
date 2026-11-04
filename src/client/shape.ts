@@ -22,6 +22,7 @@ export interface ShapeData {
   version:1; kind:ShapeKind; width_mm:number; height_mm:number; rotation_deg:number;
   fill:Paint; outline:Outline; opacity:number; corners_mm:number[];
   text:ShapeText; shadows:Shadow[]; layout?:ShapeLayout; z_index?:number; group_id?:string|null;
+  flip_horizontal?:boolean; flip_vertical?:boolean;
 }
 export function shapeOf(block:Block|undefined):ShapeData|null {
   if(block?.type!=="paragraph"||block.text!=="")return null;
@@ -35,7 +36,7 @@ export function defaultShape(kind:ShapeKind):ShapeData {
     corners_mm:[0,0,0,0],
     text:{content:"",color:"#171717",font_size_pt:12,bold:false,italic:false,
       align:"center",padding_mm:2,spans:[],fit:"keep"},
-    shadows:[],layout:{mode:"inline"},z_index:0};
+    shadows:[],layout:{mode:"inline"},z_index:0,flip_horizontal:false,flip_vertical:false};
 }
 const ns="http://www.w3.org/2000/svg";
 let seq=0;
@@ -170,6 +171,8 @@ export function paintShape(shape:ShapeData):HTMLElement {
   svg.style.overflow="visible";
   const defs=el("defs");svg.appendChild(defs);
   const group=el("g");const physicalStrokePx=96/72;
+  if(shape.flip_horizontal||shape.flip_vertical)
+    group.setAttribute("transform",`translate(50 50) scale(${shape.flip_horizontal?-1:1} ${shape.flip_vertical?-1:1}) translate(-50 -50)`);
   [...shape.shadows].reverse().forEach((shadow,i)=>{
     if(!shadow.enabled)return;
     const node=primitive(shape);
