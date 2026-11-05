@@ -309,7 +309,7 @@ def build_server(settings: Settings, token: str, *, root: Path | None, client_di
         app = WriterApp(settings, store, prefs, root, mailer=mailer, plans=plans)
         options = ServerOptions(token=token, client_dir=client_dir or HERE / "dist", host=host, port=settings.port,
                                 tools_web_dir=slai.applications_dir() / "tools" / "web",
-                                asset_dirs=(HERE / "assets", slai.shared_assets_dir()), max_body_bytes=settings.max_request_bytes)
+                                asset_dirs=(HERE / "assets", slai.shared_assets_dir(), HERE / "frontend" / "public"), max_body_bytes=settings.max_request_bytes)
         return LocalServer(app, Identity(SLUG, TITLE), router, options), app
     except BaseException:
         store.close()

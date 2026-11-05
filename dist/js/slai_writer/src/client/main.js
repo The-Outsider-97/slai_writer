@@ -42,5 +42,6 @@ window.addEventListener("beforeunload", (event) => {
     }
 });
 app.start().catch((error) => {
+    window.dispatchEvent(new CustomEvent('slai:startup-error', { detail: errorText(error) }));
     root.replaceChildren(h("main", { class: "auth", id: "main" }, h("div", { class: "auth-card" }, h("h1", { text: "SLAI Writer could not start" }), h("p", { text: errorText(error) }), h("p", { class: "muted", text: "Check that the SLAI Writer server is running on this computer, then reload this page." }), h("button", { class: "btn primary", type: "button", text: "Reload", on: { click: () => window.location.reload() } }))));
 });
