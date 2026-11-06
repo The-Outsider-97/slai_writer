@@ -6,6 +6,7 @@ converts trusted renderer markup into SLDC character spans.
 """
 from __future__ import annotations
 
+import re
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
@@ -15,6 +16,10 @@ from ..tools.errors import DependencyMissing
 APA_STYLE = Path(__file__).resolve().parent / "assets" / "csl" / "apa.csl"
 SOURCE_TYPES = frozenset({"article-journal", "book", "chapter", "webpage", "report", "thesis", "paper-conference",
                           "article", "dataset", "motion_picture", "software", "post-weblog", "document", "book-section"})
+
+
+#: Where the date starts in one parenthetical citation: the comma before a year (2020, 2020a), n.d. or in press.
+_DATE_START = re.compile(r", (?=(?:\d{4}|n\.d\.|in press))")
 
 
 def _letters(index: int) -> str:
@@ -53,13 +58,29 @@ def _year_suffixes(references: list[dict[str, Any]]) -> dict[str, str]:
     return suffixes
 
 
+#: Lower-case words that belong to a surname written without a comma ("Ludwig van Beethoven"): APA 7 files such a name under its particle.
+_PARTICLES = frozenset({"van", "von", "de", "der", "den", "del", "della", "di", "da", "du", "la", "le", "ten", "ter", "bin", "ibn", "al", "el", "dos", "das", "af", "av", "zu", "zur"})
+_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
+
+
 def _person(name: str) -> dict[str, str]:
+    """A name as CSL-JSON. "Family, Given" is read as written; "Given Family" takes the last word as the family name, together with any particle before it
+    (van, de, ...), and a trailing Jr./Sr./II/III is the suffix, not the family name."""
+    suffix = ""
     if "," in name:
         family, given = name.split(",", 1)
+        tail = [t.strip() for t in given.split(",")]                     # "King, Martin Luther, Jr."
+        if len(tail) > 1 and tail[-1].rstrip(".").casefold() in _SUFFIXES:
+            given, suffix = ", ".join(tail[:-1]), tail[-1]
     else:
         parts = name.strip().split()
-        family, given = parts[-1], " ".join(parts[:-1])
-    return {"family": family.strip(), **({"given": given.strip()} if given.strip() else {})}
+        if len(parts) > 1 and parts[-1].rstrip(".").casefold() in _SUFFIXES:
+            suffix = parts.pop()
+        start = len(parts) - 1
+        while start > 1 and parts[start - 1].casefold() in _PARTICLES:
+            start -= 1
+        family, given = " ".join(parts[start:]), " ".join(parts[:start])
+    return {"family": family.strip(), **({"given": given.strip()} if given.strip() else {}), **({"suffix": suffix} if suffix else {})}
 
 
 def csl_source(entry: dict[str, Any]) -> dict[str, Any]:
@@ -157,14 +178,29 @@ class CitationEngine:
 
     def cite(self, index: int, *, narrative: bool = False) -> str:
         mark = styled_text(str(self.bib.cite(self.groups[index], lambda _: None)))[0]
-        if narrative and mark.startswith("(") and mark.endswith(")"):
-            inner = mark[1:-1]
-            # Narrative citations are derived from the CSL result, preserving
-            # the processor's et al. and year-suffix disambiguation.
-            if ", " in inner:
-                authors, date = inner.split(", ", 1)
-                return f"{authors.replace(' & ', ' and ')} ({date})"
+        if narrative:
+            return self.narrative(mark, [str(r["organization"]) for r in self.references if r.get("organization")])
         return mark
+
+    @staticmethod
+    def narrative(mark: str, organizations: Iterable[str] = ()) -> str:
+        """The narrative form of a parenthetical APA citation, derived from the CSL result so the processor's et al. and year-suffix disambiguation are kept:
+        ``(Smith & Jones, 2020, p. 5)`` becomes ``Smith and Jones (2020, p. 5)``, and a group ``(Jones, 2021; Smith, 2020)`` becomes
+        ``Jones (2021) and Smith (2020)``. The text is returned as it came when it cannot be split reliably, so a citation is never mangled."""
+        if not (mark.startswith("(") and mark.endswith(")")):
+            return mark
+        pieces = []
+        for part in mark[1:-1].split("; "):
+            found = _DATE_START.search(part)
+            if not found:
+                return mark
+            authors, date = part[:found.start()], part[found.end():]
+            if not any(" & " in org and org in authors for org in organizations):          # "Johnson & Johnson" is one name; "Smith & Jones" is two
+                authors = authors.replace(" & ", " and ")
+            pieces.append(f"{authors} ({date})")
+        if len(pieces) <= 2:
+            return " and ".join(pieces)
+        return ", ".join(pieces[:-1]) + ", and " + pieces[-1]
 
     def bibliography(self) -> list[tuple[str, str, list[dict[str, Any]]]]:
         self.bib.sort()

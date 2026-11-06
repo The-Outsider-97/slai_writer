@@ -124,6 +124,15 @@ class AssistTests(Workbench):
         out = Assist(self.app, spell_factory=FakeSpell).spelling(session)
         self.assertFalse(out["available"])
         self.assertEqual(out["issues"], [])
+        self.assertIn("DE", out["reason"])                           # the Proofing panel shows this reason when nothing is marked
+
+    def test_grammar_wrong_language_says_why(self):
+        session = self.make("Das ist ein Test.")
+        session.apply({"op": "meta", "set": {"language": "de"}}, None)
+        out = Assist(self.app, gateway=FakeGateway(FakeAgent("x"))).grammar(session)
+        self.assertFalse(out["available"])
+        self.assertEqual(out["issues"], [])
+        self.assertIn("DE", out["reason"])
 
     def test_spelling_unavailable_is_reported_and_writing_continues(self):
         def boom():
@@ -142,9 +151,20 @@ class AssistTests(Workbench):
         a = Assist(self.app, gateway=FakeGateway(agent))
         with self.assertRaises(Forbidden):
             a.propose(self.make(), {"kind": "document"}, "shorten", None)
-        with self.assertRaises(Forbidden):
-            a.grammar(self.make())
         self.assertEqual(agent.prompts, [])
+
+    def test_local_proofing_does_not_need_the_ai_permission(self):
+        # Spelling and grammar are ordinary local editor tools; only generative rewriting is behind the AI permission.
+        self.prefs["ai_enabled"] = False
+        agent = FakeAgent("Rewritten.")
+        a = Assist(self.app, gateway=FakeGateway(agent), spell_factory=FakeSpell)
+        grammar = a.grammar(self.make("The cats was happy."))
+        self.assertTrue(grammar["available"])
+        self.assertEqual(grammar["issues"][0]["rule"], "svagree")
+        spelling = a.spelling(self.make("The cat recieve the numbers."))
+        self.assertTrue(spelling["available"])
+        self.assertEqual({i["text"] for i in spelling["issues"]}, {"recieve"})
+        self.assertEqual(agent.prompts, [])                          # nothing was sent to a language model
 
     def test_only_local_provider_exists(self):
         a = Assist(self.app, gateway=FakeGateway(FakeAgent("x")))

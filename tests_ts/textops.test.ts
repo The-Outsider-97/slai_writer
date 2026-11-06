@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { cleanInsert, countWords, diffText, mapOffset, roman, segments, splitLines, wordAt, PAGE_MM, clampNumber, parseMarkdownTable } from "../src/client/textops.js";
+import { cleanInsert, countWords, diffText, mapOffset, roman, segments, splitLines, wordAt, PAGE_MM, clampNumber, parseMarkdownTable, analyzeMarkdownTable, TABLE_LIMITS, toCodepoints, typedTableStart } from "../src/client/textops.js";
 
 describe("Markdown table recognition", () => {
   it("recognizes a complete pipe table and unescapes cell delimiters", () => {
@@ -11,6 +11,55 @@ describe("Markdown table recognition", () => {
   });
   it("does not consume prose, incomplete tables, or fenced code", () => {
     for (const source of ["A | B", "A | B\n--- | nope", "```markdown\n| A | B |\n| --- | --- |\n```"]) assert.equal(parseMarkdownTable(source), null);
+  });
+});
+
+describe("Markdown table limits and feedback", () => {
+  const pipes = (n: number, cell: string): string => `| ${Array.from({ length: n }, () => cell).join(" | ")} |`;
+  const grid = (columns: number, bodyRows = 1): string => [pipes(columns, "h"), pipes(columns, "---"), ...Array.from({ length: bodyRows }, () => pipes(columns, "x"))].join("\n");
+  const rejection = (source: string): string | null => { const found = analyzeMarkdownTable(source); return found.kind === "rejected" ? found.reason : null; };
+
+  it("accepts exactly 40 columns and says why 41 is left as text", () => {
+    assert.equal(analyzeMarkdownTable(grid(TABLE_LIMITS.columns)).kind, "table");
+    const over = analyzeMarkdownTable(grid(TABLE_LIMITS.columns + 1));
+    assert.equal(over.kind, "rejected");
+    assert.match(over.kind === "rejected" ? over.message : "", /41 columns.*up to 40/);
+    assert.equal(parseMarkdownTable(grid(41)), null);
+  });
+  it("accepts exactly 200 lines and says why 201 is left as text", () => {
+    assert.equal(analyzeMarkdownTable(grid(2, TABLE_LIMITS.lines - 2)).kind, "table");
+    const over = analyzeMarkdownTable(grid(2, TABLE_LIMITS.lines - 1));
+    assert.equal(over.kind, "rejected");
+    assert.match(over.kind === "rejected" ? over.message : "", /201 lines.*up to 200/);
+  });
+  it("names the rule an attempt broke", () => {
+    assert.equal(rejection("| A | B |\n| --- |"), "column-mismatch");
+    assert.equal(rejection("| A | B |\n| -- | --- |"), "bad-delimiter");
+    assert.equal(rejection("| A | B |\n| :-: | --- |"), "bad-delimiter");
+    assert.equal(rejection("| A | B |\n| --- | --- |\n| 1 | 2 | 3 |"), "extra-cells");
+    assert.equal(rejection("| A | B |\n| --- | --- |\n| 1 | 2 |\n\n| 3 | 4 |"), "blank-line");
+    assert.equal(rejection("| A | B |\n| --- | --- |\n```\n| 1 | 2 |"), "code-fence");
+    assert.equal(rejection("| A |\n| --- |"), "single-column");
+  });
+  it("says which line is at fault", () => {
+    const found = analyzeMarkdownTable("| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 | 5 |");
+    assert.match(found.kind === "rejected" ? found.message : "", /Line 4 has 3 cells but the header has 2/);
+  });
+  it("stays quiet about text that never tried to be a table", () => {
+    for (const source of ["just a sentence", "a | b", "a | b\nnot dashes", "a | b\n---", "one\ntwo", "```\n| A | B |\n| --- | --- |\n```", ""]) assert.equal(analyzeMarkdownTable(source).kind, "text", source);
+  });
+  it("treats an escaped pipe as part of a cell, in the header, the delimiter-free rows and at the end of a line", () => {
+    const table = parseMarkdownTable("| a \\| b | c |\n| --- | --- |\n| x \\| y | z \\|");
+    assert.deepEqual(table?.rows.map((r) => r.map((c) => c.text)), [["a | b", "c"], ["x | y", "z |"]]);
+    assert.equal(table?.columns, 2);
+  });
+  it("accepts a table without outer pipes and a header-only table", () => {
+    assert.equal(parseMarkdownTable("a | b\n--- | ---\n1 | 2")?.rows.length, 2);
+    assert.equal(parseMarkdownTable("| a | b |\n| --- | --- |")?.rows.length, 1);
+  });
+  it("is the same recognizer as before for everything it accepted", () => {
+    const cases = ["| Name | Value |\n| :--- | ---: |\n| A\\|B | 123 |\n| C |  |", "| A | B |\n| --- | --- |\n| 1 |", "A|B\n:---:|---\n1|2"];
+    for (const source of cases) assert.equal(analyzeMarkdownTable(source).kind, "table", source);
   });
 });
 
@@ -97,5 +146,30 @@ describe("segments", () => {
     const out = segments({ text, spans: [{ type: "format", start: 4, end: 9, bold: true }] } as never);
     assert.equal(out.map((s) => s.text).join(""), text);
     for (let i = 1; i < out.length; i++) assert.equal(out[i]?.start, out[i - 1]?.end);
+  });
+});
+
+describe("code-point offsets", () => {
+  it("counts an astral character once, as the server does", () => {
+    assert.equal(toCodepoints("😀ab", 2), 1);
+    assert.equal(toCodepoints("😀ab", 3), 2);
+    assert.equal(toCodepoints("plain", 3), 3);
+    assert.equal(toCodepoints("", 0), 0);
+  });
+});
+
+describe("typed Markdown table", () => {
+  it("starts from a header line and a delimiter line, with one empty row to type in", () => {
+    const table = typedTableStart("| Name | Qty |", "| :--- | ---: |");
+    assert.equal(table?.columns, 2);
+    assert.equal(table?.header_rows, 1);
+    assert.deepEqual(table?.rows.map((row) => row.map((c) => c.text)), [["Name", "Qty"], ["", ""]]);
+  });
+  it("accepts lines without outer pipes, as GFM does", () => {
+    assert.equal(typedTableStart("A | B | C", "--- | --- | ---")?.columns, 3);
+  });
+  it("rejects prose, mismatched columns, weak delimiters and inline objects", () => {
+    const cases: Array<[string, string]> = [["Just a sentence", "| --- | --- |"], ["| A | B |", "| --- |"], ["| A | B |", "| -- | -- |"], ["| A | B |", "| a | b |"], ["| A | \uFFFC |", "| --- | --- |"]];
+    for (const [header, delimiter] of cases) assert.equal(typedTableStart(header, delimiter), null, `${header} / ${delimiter}`);
   });
 });
