@@ -16,7 +16,7 @@ import { EDIT_MODE, footnoteNumbers, listMarkers, refreshBlock, renderBlock, syn
 import { cleanInsert, diffText, MM_PX, splitLines } from "./textops.js";
 import { OBJECT_CHAR, TEXT_TYPES } from "./types.js";
 const NEW_ID = () => `b${uid().slice(0, 16)}`;
-const SIG = (b) => JSON.stringify([b.type, b.style, b.attributes, b.spans, b.table, b.figure, b.equation, b.embed, b.type === "table" || b.type === "figure" ? b.text : 0]);
+const SIG = (b) => JSON.stringify([b.type, b.style, b.attributes, b.spans, b.table, b.figure, b.equation, b.embed, b.extensions, b.type === "table" || b.type === "figure" ? b.text : 0]);
 export class Editor {
     hooks;
     /** Measured PDF layout, never the editor's approximate block-granular sheet positions. */
@@ -31,6 +31,8 @@ export class Editor {
     dirty = new Set();
     composing = false;
     selectedBlock = null;
+    /** Multi-object selection for vector illustrations; current selectedBlock remains the focus. */
+    selectedShapes = new Set();
     sigs = new Map();
     deferred = new Set();
     ctxCache = null;
@@ -184,7 +186,9 @@ export class Editor {
         if (!onLine)
             this.restoreSelection(saved);
         if (this.selectedBlock)
-            this.els.get(this.selectedBlock)?.setAttribute("data-selected", ""); // the block was drawn again: keep showing that it is selected
+            this.els.get(this.selectedBlock)?.setAttribute("data-selected", "");
+        for (const selected of this.selectedShapes)
+            this.els.get(selected)?.setAttribute("data-shape-multi", "");
         this.decor.refresh();
         this.paintTocNumbers();
         this.events.emit({ type: "layout" });
@@ -562,7 +566,7 @@ export class Editor {
             const sig = SIG(block);
             if (wrapper.hasAttribute("data-break") !== (block.attributes?.["page_break_before"] === true))
                 relayout = true; // a page break was added or removed: the pages are laid out again
-            const textBlock = TEXT_TYPES.includes(block.type) && wrapper.dataset["type"] === block.type;
+            const textBlock = TEXT_TYPES.includes(block.type) && !block.extensions?.["slai.writer.shape"] && wrapper.dataset["type"] === block.type;
             if (textBlock) {
                 const el = this.textEl(id);
                 const domText = el ? serialise(el) : block.text;

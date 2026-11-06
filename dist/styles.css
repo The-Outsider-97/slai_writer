@@ -376,3 +376,44 @@ table.tbl .cell { height: 7mm; }
 /* the way back from Profile, Settings, Plans and Support to the open document */
 .return-doc { display: inline-flex; align-items: center; gap: .4rem; margin-left: .8rem; padding: .25rem .8rem .25rem .55rem; border-radius: 999px; font-size: .85rem; min-height: 0; white-space: nowrap; }
 .return-doc .chev { width: 14px; height: 14px; }
+
+/* Writer's native vector shape blocks are non-text content, despite using an SLDC
+   paragraph carrier to preserve backward-compatible inert extension data. */
+.blk:has(> .writer-shape) { width: max-content; max-width: 100%; margin: 2mm auto; }
+.writer-shape { position: relative; flex: none; transform-origin: center; overflow: visible; cursor: pointer; }
+.writer-shape svg { display: block; overflow: visible; }
+.writer-shape-text { position: absolute; display: flex; align-items: center; justify-content: center;
+  box-sizing: border-box; white-space: pre-wrap; overflow-wrap: anywhere; overflow: hidden;
+  pointer-events: none; line-height: 1.2; }
+.writer-shape-text-runs { max-width: 100%; max-height: 100%; white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
+.writer-shape[data-text-overflow="true"] .writer-shape-text::after {
+  content: "Text overflow"; position: absolute; right: 0; bottom: 0;
+  background: #9d1c1c; color: #fff; font: 8px system-ui, sans-serif;
+  padding: 1px 3px; border-radius: 2px; }
+.blk[data-floating] > .writer-shape { position: absolute; margin: 0; z-index: 2; }
+.blk[data-floating="behind_text"] > .writer-shape { z-index: 0; }
+.blk[data-floating="in_front_of_text"] > .writer-shape { z-index: 3; }
+@media print { .writer-shape[data-text-overflow="true"] .writer-shape-text::after { display: none; } }
+.blk[data-selected] > .writer-shape { outline: 2px solid var(--focus, #3b82f6); outline-offset: 2px; }
+@media print { .blk[data-selected] > .writer-shape { outline: none; } }
+
+.blk[data-shape-multi] > .writer-shape { outline: 2px dashed var(--focus, #3b82f6); outline-offset: 3px; }
+.blk[data-selected][data-shape-multi] > .writer-shape { outline-style: solid; }
+@media print { .blk[data-shape-multi] > .writer-shape { outline: none; } }
+
+/* Flow-aware top/bottom wrapping: unlike absolute overlay shapes, this occupies
+   measured block height and therefore pushes text onto subsequent pages. */
+.blk[data-shape-wrap="top_bottom"] { display:block; width:100%; max-width:100%; margin:2mm 0; }
+.blk[data-shape-wrap="top_bottom"] > .writer-shape { display:block; margin-left:0; }
+
+
+/* Text is laid into contour-constrained scanline bands, not a single inset box.
+   The polygon mask handles glyph overhang around concave/rounded silhouettes. */
+.writer-shape .writer-shape-text { position:absolute; inset:0; display:block; width:100%; height:100%;
+  padding:0; pointer-events:none; overflow:hidden; white-space:pre; }
+.writer-shape-line { position:absolute; display:block; box-sizing:border-box; white-space:pre;
+  overflow:hidden; text-overflow:clip; line-height:1.3; }
+.writer-shape[data-text-overflow="true"]::after { content:"Text overflow"; position:absolute;
+  right:-2px; bottom:-12px; padding:1px 3px; background:#9c2222; color:white;
+  border-radius:3px; font:9px system-ui,sans-serif; pointer-events:none; }
+@media print { .writer-shape[data-text-overflow="true"]::after { display:none; } }

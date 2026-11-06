@@ -4,6 +4,7 @@ import { assetUrl } from "./net.js";
 import { plaintextOnlySupported } from "./domtext.js";
 import { segments, MM_PX } from "./textops.js";
 import { paintFigure } from "./figlayout.js";
+import { shapeOf, paintShape } from "./shape.js";
 export const EDIT_MODE = plaintextOnlySupported() ? "plaintext-only" : "true";
 /** A style with its `based_on` chain folded in (parent first). */
 export function resolveStyle(meta, kind, name) {
@@ -286,7 +287,32 @@ export function renderBlock(block, ctx) {
         case "embed":
             wrap.appendChild(embedElement(block, ctx));
             break;
-        default: wrap.appendChild(textElement(block, ctx));
+        default: {
+            const shape = shapeOf(block);
+            if (shape) {
+                const node = paintShape(shape);
+                if (shape.layout?.mode === "floating") {
+                    if (shape.layout.wrap === "top_bottom") {
+                        // A top-and-bottom shape consumes normal block-flow space,
+                        // so the existing pagination engine measures its actual height.
+                        wrap.setAttribute("data-shape-wrap", "top_bottom");
+                        node.style.position = "relative";
+                        node.style.left = `${shape.layout.x_mm ?? 0}mm`;
+                        node.style.marginTop = `${Math.max(0, shape.layout.y_mm ?? 0)}mm`;
+                        node.style.marginBottom = "2mm";
+                    }
+                    else {
+                        node.style.left = `${shape.layout.x_mm ?? 0}mm`;
+                        node.style.top = `${shape.layout.y_mm ?? 0}mm`;
+                        node.style.zIndex = String(shape.z_index ?? 0);
+                        wrap.setAttribute("data-floating", shape.layout.layer ?? "content");
+                    }
+                }
+                wrap.appendChild(node);
+            }
+            else
+                wrap.appendChild(textElement(block, ctx));
+        }
     }
     if (block.type === "figure" && block.figure?.placement)
         wrap.setAttribute("data-floating", block.figure.placement.layer ?? "content");

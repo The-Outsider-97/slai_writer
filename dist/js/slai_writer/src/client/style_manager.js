@@ -1,0 +1,194 @@
+/** One named-style editor. Style semantics, inheritance and validation live in SLDC. */
+import { h, labelled, openDialog, toast } from "./kit.js";
+import { errorText } from "./net.js";
+import { FRONT_MATTER_STYLES } from "./named_styles.js";
+import { ensureBundledFont } from "./font_catalog.js";
+import { applyStyle, resolveStyle } from "./render.js";
+import { checkbox, selectField } from "./widgets.js";
+const fields = [
+    ["font_size_pt", "Font size (pt)", "0.5", 4, 400],
+    ["line_height", "Line spacing", "0.05", 0.5, 5],
+    ["space_before_pt", "Paragraph space before (pt)", "0.5", 0, 1000],
+    ["space_after_pt", "Paragraph space after (pt)", "0.5", 0, 1000],
+    ["letter_spacing_pt", "Letter spacing (pt)", "0.1", -5, 50],
+    ["word_spacing_pt", "Word spacing (pt)", "0.1", -20, 100],
+    ["indent_mm", "Left indent (mm)", "0.5", 0, 1000],
+    ["first_line_indent_mm", "First-line indent (mm)", "0.5", -100, 1000],
+];
+/** Create, duplicate, rename, inherit, edit, reset and delete styles in existing document transactions. */
+export async function manageStyles(ctx, initialStyle) {
+    const { ed } = ctx;
+    if (ed.readOnly)
+        return;
+    const kinds = selectField("Style category", [["paragraph", "Paragraph styles"], ["character", "Character styles"]], "paragraph");
+    const existing = selectField("Edit style", [["", "Create new style"]], "");
+    const name = h("input", { type: "text", maxLength: 64, attrs: { "aria-label": "Style name" } });
+    const parent = selectField("Based on", [["", "Document defaults"]], "");
+    const font = h("input", { type: "text", maxLength: 100, attrs: { "aria-label": "Font family", placeholder: "Inherit font family" } });
+    const color = h("input", { type: "text", maxLength: 7, attrs: { "aria-label": "Font colour", placeholder: "Inherit colour or #rrggbb" } });
+    const bold = selectField("Bold", [["", "Inherit"], ["true", "On"], ["false", "Off"]], "");
+    const italic = selectField("Italic", [["", "Inherit"], ["true", "On"], ["false", "Off"]], "");
+    const underline = selectField("Underline", [["", "Inherit"], ["true", "On"], ["false", "Off"]], "");
+    const strike = selectField("Strikethrough", [["", "Inherit"], ["true", "On"], ["false", "Off"]], "");
+    const keepNext = selectField("Keep with next", [["", "Inherit"], ["true", "On"], ["false", "Off"]], "");
+    const highlight = h("input", { type: "text", maxLength: 7, attrs: { "aria-label": "Highlight colour", placeholder: "Inherit or #rrggbb" } });
+    const alignment = selectField("Alignment", [["", "Inherit"], ["left", "Left"], ["center", "Centre"], ["right", "Right"], ["justify", "Justified"]], "");
+    const numbers = new Map();
+    const numeric = fields.map(([key, label, step, min, max]) => {
+        const input = h("input", { type: "number", step, min, max, attrs: { "aria-label": label, placeholder: "Inherit" } });
+        numbers.set(key, input);
+        return labelled(label, input);
+    });
+    const includeOriginal = checkbox("Duplicate the current properties when creating a copy", true);
+    const preview = h("p", { class: "style-live-preview", text: "The quick brown fox jumps over the lazy dog. 0123456789" });
+    const group = () => ed.model.meta.styles?.[kinds.select.value] ?? {};
+    const inherited = () => group()[existing.select.value] ?? {};
+    const populate = () => {
+        const props = inherited();
+        name.value = existing.select.value;
+        parent.select.replaceChildren(...[["", "Document defaults"], ...Object.keys(group()).filter((x) => x !== existing.select.value).sort().map((x) => [x, x])]
+            .map(([value, text]) => h("option", { value, text })));
+        parent.select.value = String(props["based_on"] ?? "");
+        font.value = String(props["font_family"] ?? "");
+        color.value = String(props["color"] ?? "");
+        highlight.value = String(props["background"] ?? "");
+        bold.select.value = props["bold"] === undefined ? "" : String(props["bold"]);
+        italic.select.value = props["italic"] === undefined ? "" : String(props["italic"]);
+        underline.select.value = props["underline"] === undefined ? "" : String(props["underline"]);
+        strike.select.value = props["strike"] === undefined ? "" : String(props["strike"]);
+        keepNext.select.value = props["keep_with_next"] === undefined ? "" : String(props["keep_with_next"]);
+        alignment.select.value = String(props["align"] ?? "");
+        for (const [key, input] of numbers)
+            input.value = props[key] === undefined ? "" : String(props[key]);
+        const character = kinds.select.value === "character";
+        alignment.root.hidden = character;
+        keepNext.root.hidden = character;
+        for (const key of ["line_height", "space_before_pt", "space_after_pt", "indent_mm", "first_line_indent_mm"]) {
+            const input = numbers.get(key);
+            if (input)
+                input.parentElement.hidden = character;
+        }
+    };
+    const syncOptions = () => {
+        const last = existing.select.value;
+        existing.select.replaceChildren(h("option", { value: "", text: "Create new style" }), ...Object.keys(group()).sort().map((value) => h("option", { value, text: value })));
+        existing.select.value = last && group()[last] ? last : "";
+        populate();
+    };
+    kinds.select.addEventListener("change", syncOptions);
+    existing.select.addEventListener("change", populate);
+    syncOptions();
+    if (initialStyle) {
+        if (group()[initialStyle]) {
+            existing.select.value = initialStyle;
+            populate();
+        }
+        else {
+            existing.select.value = "";
+            populate();
+            name.value = initialStyle;
+        }
+    }
+    const collect = () => {
+        const props = { ...inherited() };
+        const update = (key, input) => { if (input.trim())
+            props[key] = input.trim();
+        else
+            delete props[key]; };
+        update("font_family", font.value);
+        update("color", color.value);
+        update("background", highlight.value);
+        update("based_on", parent.select.value);
+        for (const [key, input] of numbers) {
+            if (kinds.select.value === "character" && ["line_height", "space_before_pt", "space_after_pt", "indent_mm", "first_line_indent_mm"].includes(key)) {
+                delete props[key];
+                continue;
+            }
+            if (!input.value) {
+                delete props[key];
+                continue;
+            }
+            const n = Number(input.value);
+            if (!Number.isFinite(n))
+                throw new Error(`Invalid ${key}`);
+            props[key] = n;
+        }
+        for (const [key, value] of [["bold", bold.select.value], ["italic", italic.select.value], ["underline", underline.select.value], ["strike", strike.select.value], ["keep_with_next", kinds.select.value === "paragraph" ? keepNext.select.value : ""]]) {
+            if (!value)
+                delete props[key];
+            else
+                props[key] = value === "true";
+        }
+        if (kinds.select.value === "paragraph")
+            update("align", alignment.select.value);
+        else
+            delete props["align"];
+        return props;
+    };
+    const updatePreview = () => {
+        try {
+            const props = collect();
+            preview.removeAttribute("style");
+            const kind = kinds.select.value;
+            const based = typeof props["based_on"] === "string" ? props["based_on"] : undefined;
+            applyStyle(preview, { ...resolveStyle(ed.model.meta, kind, based), ...props }, kind === "paragraph");
+        }
+        catch { /* The input currently being typed may be incomplete. */ }
+    };
+    for (const el of [name, font, color, highlight, ...numbers.values(), kinds.select, existing.select, parent.select,
+        bold.select, italic.select, underline.select, strike.select, alignment.select, keepNext.select]) {
+        el.addEventListener("input", updatePreview);
+        el.addEventListener("change", updatePreview);
+    }
+    updatePreview();
+    const apply = async (action) => {
+        const source = existing.select.value;
+        const chosen = name.value.trim();
+        const kind = kinds.select.value;
+        if (!/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$/.test(chosen) && action !== "delete" && action !== "reset") {
+            toast("Choose a valid style name of up to 64 characters.", { kind: "error" });
+            return undefined;
+        }
+        try {
+            if (action === "rename") {
+                if (!source)
+                    throw new Error("Choose an existing style to rename.");
+                await ed.op({ op: "style_rename", kind, name: source, new_name: chosen });
+            }
+            else if (action === "delete") {
+                if (!source)
+                    throw new Error("Choose a style to delete.");
+                await ed.op({ op: "style_define", kind, name: source, delete: true });
+            }
+            else {
+                if (action === "duplicate" && (!source || source === chosen))
+                    throw new Error("Enter a different name for the duplicate.");
+                if (action === "save" && source && source !== chosen)
+                    throw new Error("Use Rename to change an existing style's name.");
+                if (action === "reset" && !source)
+                    throw new Error("Choose an existing style to reset.");
+                const target = action === "reset" ? source : chosen;
+                if (action === "duplicate" && group()[target])
+                    throw new Error("A style with this name already exists.");
+                const props = action === "reset" ? { ...(FRONT_MATTER_STYLES[target] ?? {}) }
+                    : action === "duplicate" && !includeOriginal.input.checked ? {} : collect();
+                await ed.op({ op: "style_define", kind, name: target, props });
+                if (typeof props["font_family"] === "string")
+                    void ensureBundledFont(props["font_family"]).then(() => ed.layout()).catch(() => { });
+            }
+            toast(`Style ${action === "save" ? "saved" : action === "reset" ? "reset" : `${action}d`}.`, { kind: "ok" });
+            return true;
+        }
+        catch (error) {
+            toast(errorText(error), { kind: "error" });
+            return undefined;
+        }
+    };
+    const handle = openDialog({ title: "Manage named styles", size: "wide",
+        body: h("div", { class: "stack" }, kinds.root, existing.root, labelled("Name / new name", name), parent.root, h("div", { class: "grid-3" }, labelled("Font family", font), labelled("Font colour (#rrggbb)", color), labelled("Highlight colour (#rrggbb)", highlight)), h("div", { class: "grid-3" }, bold.root, italic.root, underline.root, strike.root, alignment.root, keepNext.root), h("div", { class: "grid-3" }, ...numeric), labelled("Live style preview", preview), includeOriginal.root),
+        actions: [{ label: "Delete", run: () => apply("delete") }, { label: "Reset", run: () => apply("reset") },
+            { label: "Rename", run: () => apply("rename") }, { label: "Duplicate", run: () => apply("duplicate") },
+            { label: "Save style", kind: "primary", run: () => apply("save") }],
+    });
+    await handle.result;
+}

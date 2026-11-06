@@ -6,6 +6,9 @@ import { PageAttachments } from "../attach.js";
 import { createNavMenu } from "../navmenu.js";
 import { createLeftSide, createRightSide } from "../sidepanels.js";
 import { ImageTools } from "../imageedit.js";
+import { editShape } from "../shape_ui.js";
+import { ShapeTools } from "../shapetools.js";
+import { shapeOf } from "../shape.js";
 import { externalDialog, saveAsDialog, saveDocument } from "../docsave.js";
 import { Editor } from "../editor.js";
 import { Find } from "../find.js";
@@ -95,6 +98,7 @@ export async function docScreen(app, route) {
     };
     ctx = { app, ed, sid, ui };
     const imageTools = new ImageTools(ed, { details: (block) => { void figureDialog(ctx, block); } });
+    const shapeTools = new ShapeTools(ed, (id) => { void editShape(ctx, id); });
     const top = buildTopBar(ctx, find, () => nav);
     nav = createNavMenu(ctx, () => top.menuButton, (open) => top.setMenuOpen(open));
     const format = buildFormatBar(ctx);
@@ -344,6 +348,10 @@ export async function docScreen(app, route) {
                 const block = ed.model.block(e.block);
                 if (!block)
                     break;
+                if (shapeOf(block)) {
+                    void editShape(ctx, block.id);
+                    break;
+                }
                 if (e.kind === "embed")
                     ui.showEmbed(e.block);
                 else if (e.kind === "equation")
@@ -549,6 +557,7 @@ export async function docScreen(app, route) {
             offApp();
             uninstall();
             imageTools.destroy();
+            shapeTools.destroy();
             top.dispose();
             status.dispose();
             for (const p of dockPanels.values())

@@ -5,7 +5,9 @@ import { announce, toast } from "./kit.js";
 import * as A from "./actions.js";
 import { blockIdOf, editableOf } from "./domtext.js";
 import { highlightsSupported } from "./decor.js";
-import { parseMarkdownTable } from "./textops.js";
+import { analyzeMarkdownTable } from "./textops.js";
+import { objectKind } from "./object_kind.js";
+import { openShapeTextEditor } from "./shape_text_edit.js";
 function pointFromXY(x, y) {
     const doc = document;
     const pos = doc.caretPositionFromPoint?.(x, y);
@@ -71,12 +73,17 @@ export function installInput(ed) {
                 toast("Click in the document before pasting.", { kind: "info" });
                 return;
             }
-            const table = saved?.collapsed && saved.start.field === "text" ? parseMarkdownTable(text) : null;
-            if (table) {
-                await A.insertTable(ed, table.rows.length, table.columns, saved, table);
+            const found = analyzeMarkdownTable(text);
+            const wherever = !!saved?.collapsed && saved.start.field === "text"; // a table is only made at a caret in the text, never over a selection or in a cell
+            if (found.kind === "table" && wherever) {
+                await A.insertTable(ed, found.table.rows.length, found.table.columns, { selection: saved, object: null }, found.table);
                 return;
             }
             await A.insertText(ed, text);
+            if (found.kind === "rejected")
+                A.tableLeftAsText(found.message);
+            else if (found.kind === "table")
+                toast("Pasted as text because text was selected or the cursor was not in a paragraph. Use Convert Markdown text to table to make it a table.", { kind: "info" });
         });
     };
     /** Typed characters held behind a structural edit are merged into one insertion, so catching up costs one round trip, not one per key. */
@@ -339,8 +346,8 @@ export function installInput(ed) {
             if (e.key === "Delete" || e.key === "Backspace")
                 return run(() => A.deleteBlocks(ed, [ed.selectedBlock]));
             if (e.key === "Enter")
-                return run(() => { const b = ed.model.block(ed.selectedBlock); if (b && (b.type === "figure" || b.type === "equation" || b.type === "embed" || b.type === "table"))
-                    ed.events.emit({ type: "open-object", kind: b.type, block: b.id }); });
+                return run(() => { const b = ed.model.block(ed.selectedBlock); const kind = b ? objectKind(b.type, Boolean(b.extensions?.["slai.writer.shape"])) : null; if (b && kind)
+                    ed.events.emit({ type: "open-object", kind, block: b.id }); });
             if (e.key === "Escape") {
                 A.clearBlockSelection(ed);
                 return;
@@ -355,6 +362,8 @@ export function installInput(ed) {
     /* ------------------------------------------------------------------------------------------ pointer */
     on("click", (e) => {
         const target = e.target;
+        if (target.closest(".shape-direct-editor"))
+            return;
         const add = target.closest("[data-table-add]");
         if (add) {
             e.preventDefault();
@@ -388,8 +397,8 @@ export function installInput(ed) {
         const wrap = wrapperAt(ed, target);
         const type = wrap?.dataset["type"];
         const inField = !!target.closest("[data-edit]");
-        if (wrap && !inField && (type === "figure" || type === "equation" || type === "embed" || type === "table")) {
-            A.selectBlock(ed, wrap.dataset["id"]);
+        if (wrap && !inField && (wrap.querySelector(".writer-shape") || type === "figure" || type === "equation" || type === "embed" || type === "table")) {
+            A.selectBlock(ed, wrap.dataset["id"], e.shiftKey && !!wrap.querySelector(".writer-shape"));
             if (type === "embed")
                 ed.events.emit({ type: "open-object", kind: "embed", block: wrap.dataset["id"] });
             return;
@@ -399,6 +408,16 @@ export function installInput(ed) {
     });
     on("dblclick", (e) => {
         const target = e.target;
+        if (target.closest(".shape-direct-editor"))
+            return;
+        const shapeWrap = wrapperAt(ed, target);
+        const shapeId = shapeWrap?.dataset["id"];
+        if (shapeId && shapeWrap?.querySelector(".writer-shape") && !ed.readOnly) {
+            e.preventDefault();
+            e.stopPropagation();
+            openShapeTextEditor(ed, shapeId);
+            return;
+        }
         const wrap = wrapperAt(ed, target);
         const type = wrap?.dataset["type"];
         if (target.closest(".i-eq")) {
@@ -407,8 +426,9 @@ export function installInput(ed) {
                 ed.events.emit({ type: "open-object", kind: "equation", block: id });
             return;
         }
-        if (wrap && (type === "figure" || type === "equation" || type === "embed") && !target.closest("[data-edit]")) {
-            ed.events.emit({ type: "open-object", kind: type, block: wrap.dataset["id"] });
+        const kind = objectKind(type, Boolean(wrap?.querySelector(".writer-shape")), false);
+        if (wrap && kind && !target.closest("[data-edit]")) {
+            ed.events.emit({ type: "open-object", kind, block: wrap.dataset["id"] });
             return;
         }
         // double-click on a search result turns it into a note
@@ -425,8 +445,42 @@ export function installInput(ed) {
             }
         }
     });
-    on("contextmenu", (e) => { e.preventDefault(); ed.events.emit({ type: "context", x: e.clientX, y: e.clientY }); });
+    on("contextmenu", (e) => {
+        const target = e.target;
+        const wrap = target instanceof Element ? wrapperAt(ed, target) : null;
+        if (wrap?.querySelector(".writer-shape") && wrap.dataset["id"])
+            A.selectBlock(ed, wrap.dataset["id"]);
+        e.preventDefault();
+        ed.events.emit({ type: "context", x: e.clientX, y: e.clientY });
+    });
     /* ------------------------------------------------------------------------------------------ clipboard */
+    const SHAPE_CLIP = "application/x-slai-writer-shape+json";
+    const selectedShape = () => {
+        const id = ed.selectedBlock;
+        const item = id ? ed.model.block(id) : undefined;
+        const shape = item?.extensions?.["slai.writer.shape"];
+        return id && shape && item?.type === "paragraph" ? { id, shape } : null;
+    };
+    const pasteShape = (raw) => {
+        if (raw.length > 50_000) {
+            toast("Copied shape is too large.", { kind: "error" });
+            return;
+        }
+        try {
+            const shape = JSON.parse(raw);
+            if (shape.version !== 1 || typeof shape.kind !== "string")
+                throw Error("Not a Writer shape");
+            const clone = structuredClone(shape);
+            delete clone.group_id;
+            void A.insertBlock(ed, { type: "paragraph", text: "", extensions: { "slai.writer.shape": clone } })
+                .then(id => { if (id)
+                A.selectBlock(ed, id); })
+                .catch(error => ed.failed(error));
+        }
+        catch (_error) {
+            toast("The clipboard does not contain a valid Writer shape.", { kind: "error" });
+        }
+    };
     /** A picture on the clipboard (a screenshot, "Copy image" in a browser, a file copied in the file manager) is brought in as a picture. Text that comes with it
      *  (a spreadsheet cell copies both) wins: then the text is pasted as usual. A picture that only exists as a web address is not fetched. */
     on("paste", (e) => {
@@ -437,6 +491,12 @@ export function installInput(ed) {
         }
         if (!data)
             return;
+        if (data.types.includes(SHAPE_CLIP)) {
+            e.preventDefault();
+            e.stopPropagation();
+            pasteShape(data.getData(SHAPE_CLIP));
+            return;
+        }
         const pictures = Array.from(data.files).filter((f) => f.type.startsWith("image/"));
         const text = data.getData("text/plain");
         const hasText = text.length > 0;
@@ -457,6 +517,13 @@ export function installInput(ed) {
         }
     });
     on("copy", (e) => {
+        const selected = selectedShape();
+        if (selected && e.clipboardData) {
+            e.preventDefault();
+            e.clipboardData.setData(SHAPE_CLIP, JSON.stringify(selected.shape));
+            e.clipboardData.setData("text/plain", `Writer ${selected.shape.kind} vector shape`);
+            return;
+        }
         const text = ed.selectionText();
         if (!text)
             return;
@@ -464,6 +531,14 @@ export function installInput(ed) {
         e.clipboardData?.setData("text/plain", text);
     });
     on("cut", (e) => {
+        const selected = selectedShape();
+        if (selected && e.clipboardData && !ed.readOnly) {
+            e.preventDefault();
+            e.clipboardData.setData(SHAPE_CLIP, JSON.stringify(selected.shape));
+            e.clipboardData.setData("text/plain", `Writer ${selected.shape.kind} vector shape`);
+            void A.deleteBlocks(ed, [selected.id]);
+            return;
+        }
         const sel = ed.readSelection();
         const text = ed.selectionText(sel);
         if (!sel || !text || ed.readOnly || !e.clipboardData)

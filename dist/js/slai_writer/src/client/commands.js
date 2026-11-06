@@ -10,6 +10,9 @@ import { addNoteAtSelection } from "./notesapi.js";
 import { citeDialog, footnoteDialog, xrefDialog } from "./panels/sources.js";
 import { pickFile } from "./widgets.js";
 import { paragraphFontDialog } from "./typography.js";
+import { editShape } from "./shape_ui.js";
+import { shapeOf, SHAPE_KEY } from "./shape.js";
+import { insertShape } from "./shape_ui.js";
 const EDITING = (ctx) => (ctx.ed.readOnly ? "This document is read-only." : null);
 const needsCaret = (ctx) => EDITING(ctx) ?? (ctx.ed.recallSelection() ? null : "Place the cursor in the text first.");
 const AI_NOTE = "AI is off or unavailable; writing works without it.";
@@ -63,7 +66,12 @@ export const COMMANDS = [
     { id: "move-down", label: "Move paragraph down", group: "Paragraph", icon: "arrow-down", shortcut: "Alt+Shift+Down", unavailable: needsCaret, run: (c) => A.moveBlocks(c.ed, 1) },
     /* insert */
     { id: "table", label: "Table…", group: "Insert", icon: "table", keywords: "grid rows columns", unavailable: EDITING, run: (c) => tableDialog(c) },
+    { id: "markdown-table", label: "Convert Markdown text to table", group: "Insert", icon: "table", keywords: "markdown gfm pipe paste text to table convert", unavailable: EDITING, run: (c) => A.convertMarkdownToTable(c.ed) },
     { id: "table-tools", label: "Table tools: rows, columns, header rows…", group: "Insert", icon: "table", keywords: "add delete row column", unavailable: (c) => EDITING(c) ?? (tableAtCaret(c) ? null : "Place the cursor in a table first."), run: (c) => { const id = tableAtCaret(c); return id ? tableToolsDialog(c, id) : undefined; } },
+    { id: "shape-format", label: "Shape Format…", group: "Insert", icon: "layers", keywords: "shape text fill outline shadow rotate arrange group",
+        unavailable: c => EDITING(c) ?? (shapeOf(c.ed.model.block(c.ed.selectedBlock ?? "")) ? null : "Select a shape first."),
+        run: c => c.ed.selectedBlock ? editShape(c, c.ed.selectedBlock) : undefined },
+    { id: "shape", label: "Insert Shape…", group: "Insert", icon: "layers", keywords: "vector rectangle ellipse line star arrow triangle diamond pentagon hexagon cross", unavailable: EDITING, run: (c) => insertShape(c) },
     { id: "picture", label: "Add illustration (picture)…", group: "Insert", icon: "image", keywords: "image photo figure illustration place", shortcut: "Ctrl+D", unavailable: EDITING, run: (c) => pickPicture(c) },
     { id: "equation", label: "Equation (block)…", group: "Insert", icon: "sigma", keywords: "math formula latex", unavailable: EDITING, run: (c) => equationDialog(c) },
     { id: "equation-inline", label: "Equation (inline)…", group: "Insert", icon: "sigma", keywords: "math formula latex", unavailable: needsCaret, run: (c) => equationDialog(c, undefined, true) },
@@ -289,6 +297,27 @@ export function contextMenu(ctx, x, y, restore) {
             item.icon = c.icon;
         return item;
     };
+    const selected = ctx.ed.selectedBlock;
+    const shape = shapeOf(ctx.ed.model.block(selected ?? ""));
+    if (shape && selected) {
+        const duplicate = () => {
+            const next = structuredClone(shape);
+            delete next.group_id;
+            void A.insertBlock(ctx.ed, { type: "paragraph", text: "", extensions: { [SHAPE_KEY]: next } }, selected)
+                .then(id => { if (id)
+                A.selectBlock(ctx.ed, id); })
+                .catch(err => toast(errorText(err), { kind: "error" }));
+        };
+        menuAt(x, y, [
+            { label: "Edit Text…", icon: "paragraph", disabled: ctx.ed.readOnly, run: () => void editShape(ctx, selected) },
+            entry("shape-format"),
+            { label: "Duplicate Shape", icon: "copy", disabled: ctx.ed.readOnly, run: duplicate },
+            { label: "Delete Shape", icon: "trash", disabled: ctx.ed.readOnly, run: () => { void A.deleteBlocks(ctx.ed, [selected]); } },
+            "separator",
+            entry("shape"), entry("picture"),
+        ], "Shape actions");
+        return;
+    }
     const hasText = !!ctx.ed.selectionText();
     const clip = (cmd) => () => { restore(); document.execCommand(cmd); };
     const paste = () => {
