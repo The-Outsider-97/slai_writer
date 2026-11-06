@@ -6,7 +6,7 @@ import * as A from "./actions.js";
 import { blockIdOf, editableOf } from "./domtext.js";
 import type { Editor } from "./editor.js";
 import { highlightsSupported } from "./decor.js";
-import { parseMarkdownTable } from "./textops.js";
+import { analyzeMarkdownTable } from "./textops.js";
 import { objectKind } from "./object_kind.js";
 import { openShapeTextEditor } from "./shape_text_edit.js";
 
@@ -70,12 +70,15 @@ export function installInput(ed: Editor): () => void {
         toast("Click in the document before pasting.", { kind: "info" });
         return;
       }
-      const table = saved?.collapsed && saved.start.field === "text" ? parseMarkdownTable(text) : null;
-      if (table) {
-        await A.insertTable(ed, table.rows.length, table.columns, saved, table);
+      const found = analyzeMarkdownTable(text);
+      const wherever = !!saved?.collapsed && saved.start.field === "text";               // a table is only made at a caret in the text, never over a selection or in a cell
+      if (found.kind === "table" && wherever) {
+        await A.insertTable(ed, found.table.rows.length, found.table.columns, { selection: saved, object: null }, found.table);
         return;
       }
       await A.insertText(ed, text);
+      if (found.kind === "rejected") A.tableLeftAsText(found.message);
+      else if (found.kind === "table") toast("Pasted as text because text was selected or the cursor was not in a paragraph. Use Convert Markdown text to table to make it a table.", { kind: "info" });
     });
   };
   /** Typed characters held behind a structural edit are merged into one insertion, so catching up costs one round trip, not one per key. */

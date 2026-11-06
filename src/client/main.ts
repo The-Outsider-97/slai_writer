@@ -43,8 +43,11 @@ window.addEventListener("beforeunload", (event) => {
   if ([...app.docs.values()].some((d) => d.dirty)) { event.preventDefault(); }
 });
 
-app.start().catch((error: unknown) => {
-  window.dispatchEvent(new CustomEvent('slai:startup-error', { detail: errorText(error) }));
+/** The shared start-up loader (tools/web/startup) waits for one of these two events. */
+const startupFinished = (): void => { window.dispatchEvent(new Event("slai:ready")); };
+
+app.start().then(startupFinished, (error: unknown) => {
+  window.dispatchEvent(new CustomEvent("slai:startup-error", { detail: errorText(error) }));
   root.replaceChildren(h("main", { class: "auth", id: "main" }, h("div", { class: "auth-card" }, h("h1", { text: "SLAI Writer could not start" }),
     h("p", { text: errorText(error) }), h("p", { class: "muted", text: "Check that the SLAI Writer server is running on this computer, then reload this page." }),
     h("button", { class: "btn primary", type: "button", text: "Reload", on: { click: () => window.location.reload() } }))));

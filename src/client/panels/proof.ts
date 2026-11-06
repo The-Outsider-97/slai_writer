@@ -7,6 +7,7 @@ import type { DocCtx, Panel } from "../docctx.js";
 import { api, errorText } from "../net.js";
 import type { DocState, Patch } from "../types.js";
 import { button, fill, notice, selectField, statusBadge } from "../widgets.js";
+import { ProofStatus } from "../proof_status.js";
 
 interface SpellIssue { kind: "spelling"; block: string; start: number; end: number; text: string; suggestions: string[]; source: string }
 interface GrammarIssue { kind: "grammar"; block: string; start: number; end: number; text: string; message: string; suggestion?: string; replacement?: string; severity?: string; rule?: string }
@@ -30,6 +31,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
   let ours = false;                    // true while a patch is our own accepted suggestion, so its marks are kept
   let autoTimer: number | undefined;
   const pendingBlocks = new Set<string>();
+  const status = new ProofStatus();   // checks that said they cannot run, and why
 
   const marks = (): void => {
     ed.decor.set("typo", issues.filter((i) => i.kind === "spelling").map((i) => ({ block: i.block, start: i.start, end: i.end })));
@@ -61,6 +63,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
 
   const paintIssues = (): void => {
     clear(issuesBox);
+    for (const n of status.notices({ spell: app.prefs.spell, grammar: app.prefs.grammar })) issuesBox.appendChild(notice(n.reason, "warn", n.title));
     if (checkedVersion < 0) { issuesBox.appendChild(h("p", { class: "fine", text: "Proofreading checks nearby text automatically when available. You can also check the selection or entire document using the buttons above." })); return; }
     if (checkedVersion !== ed.model.version && !ours) issuesBox.appendChild(notice("The text has changed since this check. Each suggestion is still verified against the current text before it is applied, but check again for a fresh list.", "info"));
     if (!issues.length) { issuesBox.appendChild(notice("No problems found in what was checked.", "ok")); return; }
@@ -102,26 +105,37 @@ export function createProofPanel(ctx: DocCtx): Panel {
       await ed.whenIdle();
       const blocks = changed ?? targets();
       const out = await api.post<{ available: boolean; reason?: string; issues: Issue[]; version: number; truncated?: boolean }>(`/docs/${encodeURIComponent(ctx.sid)}/${what === "spell" ? "spell" : "grammar"}`, blocks ? { blocks } : {});
-      if (!out.available) { if (btn) toast(out.reason ?? "This check is not available.", { kind: "info", timeoutMs: 9000 }); return; }
+      const kind = what === "spell" ? "spelling" : "grammar";
+      if (!out.available) {
+        status.report(what, out.reason ?? "This check is not available.");
+        issues = issues.filter((i) => i.kind !== kind);          // marks from before the checker became unavailable would be stale
+        marks(); paintIssues();
+        if (btn) toast(out.reason ?? "This check is not available.", { kind: "info", timeoutMs: 9000 });
+        return;
+      }
+      status.report(what, null);
       // Never attach old offsets to text changed during an asynchronous check.
       if (out.version !== ed.model.version) return;
-      const kind = what === "spell" ? "spelling" : "grammar";
       issues = [...issues.filter((i) => i.kind !== kind || (changed !== undefined && !changed.includes(i.block))), ...out.issues];
       checkedVersion = out.version;
       marks(); paintIssues();
       if (btn) announce(`${out.issues.length} ${what === "spell" ? "spelling" : "grammar"} suggestion${out.issues.length === 1 ? "" : "s"}.`);
       if (btn && out.truncated) toast("Only the first suggestions are shown. Fix these, then check again.", { kind: "info" });
     } catch (e) {
-      if (btn) {
-        const why = unavailable(e);
+      const why = unavailable(e);
+      if (why) {
+        status.report(what, why);
+        issues = issues.filter((i) => i.kind !== (what === "spell" ? "spelling" : "grammar"));
+        marks(); paintIssues();
+      } else if (btn) {
         clear(issuesBox);
-        issuesBox.appendChild(notice(why ?? errorText(e), why ? "warn" : "danger", what === "spell" ? "Spelling is not available here." : "Grammar is not available here."));
-        checkedVersion = -1;
+        issuesBox.appendChild(notice(errorText(e), "danger", what === "spell" ? "Spelling is not available here." : "Grammar is not available here."));
       }
+      if (btn) checkedVersion = -1;
     } finally { if (btn) btn.disabled = false; }
   };
 
-  const clearMarks = (): void => { issues = []; checkedVersion = -1; marks(); paintIssues(); };
+  const clearMarks = (): void => { issues = []; checkedVersion = -1; status.reset(); marks(); paintIssues(); };
 
   const scheduleAutomatic = (blocks: string[]): void => {
     for (const id of blocks) {
@@ -134,10 +148,10 @@ export function createProofPanel(ctx: DocCtx): Panel {
       const changed = [...pendingBlocks]; pendingBlocks.clear();
       // Run these checks independently: an unavailable grammar model must not
       // disable deterministic spelling, and neither path may block editing.
-      if (app.prefs.spell) void check("spell", undefined, changed);
+      if (app.prefs.spell && status.shouldAutoCheck("spell")) void check("spell", undefined, changed);
       // Deterministic local grammar analysis is available independently of
       // optional AI rewriting and its separate privacy permission setting.
-      if (app.prefs.grammar) void check("grammar", undefined, changed);
+      if (app.prefs.grammar && status.shouldAutoCheck("grammar")) void check("grammar", undefined, changed);
     }, 500);
   };
 
@@ -269,12 +283,14 @@ export function createProofPanel(ctx: DocCtx): Panel {
       if (e.type === "patch") {
         const changed = Object.keys(e.patch.blocks);
         if (issues.length && !ours) { issues = issues.filter((i) => !changed.includes(i.block)); marks(); paintIssues(); }
+        if (e.patch.document && "language" in e.patch.document) { status.reset(); scheduleAutomatic(ed.model.order.slice(0, 100)); }   // a new language may be covered
         scheduleAutomatic(changed);
       }
       if (e.type === "reloaded") { clearMarks(); scheduleAutomatic(ed.model.order.slice(0, 100)); }
     }),
     app.events.on((e) => {
       if (e.type === "prefs") {
+        status.reset();
         paintAi();
         issues = issues.filter((i) => i.kind === "spelling" ? app.prefs.spell : app.prefs.grammar);
         marks(); paintIssues();

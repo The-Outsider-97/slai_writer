@@ -319,15 +319,15 @@ export async function figureDialog(ctx: DocCtx, block: Block): Promise<void> {
 
 /* -------------------------------------------------------------------------------------------------------- tables */
 export async function tableDialog(ctx: DocCtx): Promise<void> {
-  // Remember the caret before the modal steals focus. Never infer an insertion
+  // Remember where the table goes before the modal steals focus. Never infer an insertion
   // anchor from an inactive browser selection when the user confirms.
-  const selection = ctx.ed.recallSelection();
+  const where = A.captureInsertPoint(ctx.ed);
   const rows = numberInput(3, 1, 200), cols = numberInput(3, 1, 40);
   const handle = openDialog<true>({
     title: "Insert table", size: "narrow", body: h("div", { class: "grid-2" }, labelled("Rows", rows), labelled("Columns", cols)),
     actions: [{ label: "Insert table", kind: "primary", run: async () => {
       const r = Math.max(1, Math.min(200, Math.round(Number(rows.value) || 3))), c = Math.max(1, Math.min(40, Math.round(Number(cols.value) || 3)));
-      return await A.insertTable(ctx.ed, r, c, selection) ? true as const : undefined;
+      return await A.insertTable(ctx.ed, r, c, where) ? true as const : undefined;
     } }],
   });
   await handle.result;

@@ -194,7 +194,6 @@ export class App {
     this.mount.appendChild(screen.el);
     this.events.emit({ type: "route", route });
     window.scrollTo(0, 0);
-    window.dispatchEvent(new Event('slai:ready'));
     screen.focus?.();
   }
 }

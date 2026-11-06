@@ -2,40 +2,83 @@
  *  Offsets are UTF-16 code units, exactly like the server's block text. An inline object (equation or picture) is one U+FFFC character. */
 import { OBJECT_CHAR, type Block, type Span, type TableData } from "./types.js";
 
-/** A strict, standalone GFM pipe-table recognizer for clipboard text. Invalid or
- * incomplete Markdown remains ordinary text. Canonical table semantics are
- * provided by SLDC; this function only recognizes the source syntax. */
-export function parseMarkdownTable(source: string): TableData | null {
+/** What the strict table recognizer accepts, so the limits are said to the person in the same numbers the code enforces. */
+export const TABLE_LIMITS = { lines: 200, columns: 40 } as const;
+
+export type TableRejection = "too-many-lines" | "code-fence" | "too-many-columns" | "single-column" | "column-mismatch" | "bad-delimiter" | "blank-line" | "extra-cells";
+
+/** What `analyzeMarkdownTable` makes of some text: a table; ordinary text that never tried to be one (nothing to say about it); or an attempt at a
+ *  table (a line with pipes, then a line of dashes and pipes) that is left as text, with the reason in words. */
+export type TableAnalysis =
+  | { kind: "table"; table: TableData }
+  | { kind: "text" }
+  | { kind: "rejected"; reason: TableRejection; message: string };
+
+const DELIMITER_LIKE = /^[\s|:-]+$/;
+const DELIMITER_CELL = /^:?-{3,}:?$/;
+
+function tableCells(line: string): string[] {
+  let value = line.trim();
+  if (value.startsWith("|")) value = value.slice(1);
+  if (/(?<!\\)\|$/.test(value)) value = value.slice(0, -1);
+  const parts: string[] = [];
+  let current = "";
+  for (let i = 0; i < value.length; i += 1) {
+    if (value[i] === "\\" && i + 1 < value.length && ["|", "\\"].includes(value[i + 1] as string)) current += value[++i];
+    else if (value[i] === "|") { parts.push(current.trim()); current = ""; }
+    else current += value[i];
+  }
+  parts.push(current.trim());
+  return parts;
+}
+
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+
+/** A strict, standalone GFM pipe-table recognizer for clipboard text and typed lines. Canonical table semantics are provided by SLDC; this function only
+ *  recognizes the source syntax. Text that does not look like an attempt at a table is `text` and stays quiet; an attempt that breaks a rule (too big,
+ *  uneven, a bad delimiter row) is `rejected` with the reason, so the person is told why it was left as text rather than left guessing. */
+export function analyzeMarkdownTable(source: string): TableAnalysis {
   const lines = source.trim().split(/\r\n?|\n/);
-  if (lines.length < 2 || lines.length > 200 || lines.some((line) => /^\s*```/.test(line))) return null;
-  const cells = (line: string): string[] => {
-    let value = line.trim();
-    if (value.startsWith("|")) value = value.slice(1);
-    if (/(?<!\\)\|$/.test(value)) value = value.slice(0, -1);
-    const parts: string[] = [];
-    let current = "";
-    for (let i = 0; i < value.length; i += 1) {
-      if (value[i] === "\\" && i + 1 < value.length && ["|", "\\"].includes(value[i + 1] as string)) current += value[++i];
-      else if (value[i] === "|") { parts.push(current.trim()); current = ""; }
-      else current += value[i];
-    }
-    parts.push(current.trim());
-    return parts;
-  };
-  // Requiring separators avoids treating normal prose with pipes as a table.
-  if (!lines[0]?.includes("|") || !lines[1]?.includes("-")) return null;
-  const header = cells(lines[0]);
-  const separator = cells(lines[1]);
-  if (header.length < 2 || header.length > 40 || separator.length !== header.length) return null;
-  if (!separator.every((cell) => /^:?-{3,}:?$/.test(cell))) return null;
+  if (lines.length < 2 || !lines[0]?.includes("|") || !lines[1]?.includes("|") || !DELIMITER_LIKE.test(lines[1]) || !lines[1].includes("-")) return { kind: "text" };
+  const reject = (reason: TableRejection, message: string): TableAnalysis => ({ kind: "rejected", reason, message });
+  if (lines.length > TABLE_LIMITS.lines) return reject("too-many-lines", `It has ${lines.length} lines, and a Markdown table can have up to ${TABLE_LIMITS.lines}.`);
+  const fence = lines.findIndex((line) => /^\s*```/.test(line));
+  if (fence >= 0) return reject("code-fence", `Line ${fence + 1} starts a code block, so the text is not a plain table.`);
+  const header = tableCells(lines[0] as string);
+  const separator = tableCells(lines[1] as string);
+  if (header.length < 2) return reject("single-column", "A table needs at least two columns; put a | between the cells of the header line.");
+  if (header.length > TABLE_LIMITS.columns) return reject("too-many-columns", `It has ${header.length} columns, and a Markdown table can have up to ${TABLE_LIMITS.columns}.`);
+  if (separator.length !== header.length) {
+    return reject("column-mismatch", `The header line has ${plural(header.length, "cell", "cells")} but the line of dashes has ${separator.length}; they must match.`);
+  }
+  if (!separator.every((cell) => DELIMITER_CELL.test(cell))) return reject("bad-delimiter", "Each cell of the line of dashes needs at least three dashes, like --- or :---: .");
   const rows = [header];
-  for (const line of lines.slice(2)) {
-    if (!line.trim()) return null;
-    const row = cells(line);
-    if (row.length > header.length) return null;
+  for (const [index, line] of lines.slice(2).entries()) {
+    if (!line.trim()) return reject("blank-line", `Line ${index + 3} is empty. A table is one block with no empty lines in it.`);
+    const row = tableCells(line);
+    if (row.length > header.length) return reject("extra-cells", `Line ${index + 3} has ${plural(row.length, "cell", "cells")} but the header has ${header.length}.`);
     rows.push([...row, ...Array(header.length - row.length).fill("")]);
   }
-  return { columns: header.length, header_rows: 1, rows: rows.map((row) => row.map((text) => ({ text }))) };
+  return { kind: "table", table: { columns: header.length, header_rows: 1, rows: rows.map((row) => row.map((text) => ({ text }))) } };
+}
+
+/** The table in some Markdown text, or null: ordinary text, and any attempt `analyzeMarkdownTable` rejects, stay ordinary text. */
+export function parseMarkdownTable(source: string): TableData | null {
+  const found = analyzeMarkdownTable(source);
+  return found.kind === "table" ? found.table : null;
+}
+
+/** A caret offset in the browser's UTF-16 units as the Unicode code-point offset the server's text model counts in. The two differ after any
+ *  character outside the Basic Multilingual Plane (an emoji, say), so every offset sent in an operation goes through here. */
+export function toCodepoints(text: string, offset: number): number { return Array.from(text.slice(0, offset)).length; }
+
+/** The table a person starts by typing a header line and then a delimiter line (`| A | B |`, `| --- | --- |`): the same strict recognizer as
+ *  paste, with one empty body row to type into. Null when the two lines are not a table, or when either holds an inline object. */
+export function typedTableStart(header: string, delimiter: string): TableData | null {
+  if (header.includes(OBJECT_CHAR) || delimiter.includes(OBJECT_CHAR)) return null;
+  const head = parseMarkdownTable(`${header}\n${delimiter}`);
+  if (!head) return null;
+  return { ...head, rows: [...head.rows, Array.from({ length: head.columns }, () => ({ text: "" }))] };
 }
 
 export interface TextEdit { start: number; end: number; insert: string }

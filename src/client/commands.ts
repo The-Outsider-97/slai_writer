@@ -79,6 +79,7 @@ export const COMMANDS: Command[] = [
   { id: "move-down", label: "Move paragraph down", group: "Paragraph", icon: "arrow-down", shortcut: "Alt+Shift+Down", unavailable: needsCaret, run: (c) => A.moveBlocks(c.ed, 1) },
   /* insert */
   { id: "table", label: "Table…", group: "Insert", icon: "table", keywords: "grid rows columns", unavailable: EDITING, run: (c) => tableDialog(c) },
+  { id: "markdown-table", label: "Convert Markdown text to table", group: "Insert", icon: "table", keywords: "markdown gfm pipe paste text to table convert", unavailable: EDITING, run: (c) => A.convertMarkdownToTable(c.ed) },
   { id: "table-tools", label: "Table tools: rows, columns, header rows…", group: "Insert", icon: "table", keywords: "add delete row column", unavailable: (c) => EDITING(c) ?? (tableAtCaret(c) ? null : "Place the cursor in a table first."), run: (c) => { const id = tableAtCaret(c); return id ? tableToolsDialog(c, id) : undefined; } },
   { id: "shape-format", label: "Shape Format…", group: "Insert", icon: "layers", keywords: "shape text fill outline shadow rotate arrange group", 
     unavailable: c => EDITING(c) ?? (shapeOf(c.ed.model.block(c.ed.selectedBlock ?? "")) ? null : "Select a shape first."),

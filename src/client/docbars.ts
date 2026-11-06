@@ -16,7 +16,8 @@ import { bundledFonts, ensureBundledFont } from "./font_catalog.js";
 import { resolveStyle } from "./render.js";
 import { segments } from "./textops.js";
 import { manageStyles } from "./style_manager.js";
-import { buildShapeWorkspace } from "./shape_ribbon.js";
+import { shapeOf, type ShapeData } from "./shape.js";
+import { editShape } from "./shape_ui.js";
 import { bibliographyDialog, removeBibliography, sourceDialog } from "./panels/sources.js";
 import type { Block } from "./types.js";
 import { ago, notice, pickFile } from "./widgets.js";
@@ -384,11 +385,45 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     referenceGroup("Citation style", h("span", { class: "ribbon-style-label", text: "APA-style author–date" })));
   const illustrations = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Insert illustrations" } },
     referenceGroup("Illustrations", ribbonButton("Insert Picture", fire("picture"), "image"), ribbonButton("Insert Shape", fire("shape"), "layers")));
-  // Advanced shape workspace reuses Writer's canonical shape_set and batch
-  // operations. Controls are divided into contextual categories rather than
-  // a horizontally overflowing row of unrelated buttons.
-  const workspace = buildShapeWorkspace(ctx);
-  const shapeRibbon = workspace.el;
+  // Contextual shape formatting uses the same canonical shape_set operation as
+  // the full dialog; there is no separate undo, document store, or renderer.
+  const selectedShape = (): { id: string; shape: ShapeData } | null => {
+    const id = ed.selectedBlock;
+    const shape = shapeOf(id ? ed.model.block(id) : undefined);
+    return id && shape ? { id, shape } : null;
+  };
+  const changeShape = (update: (shape: ShapeData) => void): void => {
+    const pair = selectedShape();
+    if (!pair) return;
+    const shape: ShapeData = structuredClone(pair.shape);
+    update(shape);
+    void ed.op({ op: "shape_set", block: pair.id, shape, label: "shape formatting" })
+      .catch((err: unknown) => toast(errorText(err), { kind: "error" }));
+  };
+  const fillPicker = h("input", { type: "color", value: "#f1d24b", attrs: { "aria-label": "Shape fill color" } });
+  const outlinePicker = h("input", { type: "color", value: "#202020", attrs: { "aria-label": "Shape outline color" } });
+  const fillAlpha = h("input", { type: "number", min: 0, max: 100, step: 5, value: "100", attrs: { "aria-label": "Fill opacity percent" } });
+  const overallAlpha = h("input", { type: "number", min: 0, max: 100, step: 5, value: "100", attrs: { "aria-label": "Overall shape opacity percent" } });
+  const outlineWidth = h("input", { type: "number", min: .1, max: 72, step: .5, value: "1.5", attrs: { "aria-label": "Shape outline width in points" } });
+  const rotation = h("input", { type: "number", min: -360, max: 360, step: 1, value: "0", attrs: { "aria-label": "Shape rotation in degrees" } });
+  const percent = (raw: string): number => Math.max(0, Math.min(1, Number(raw) / 100));
+  fillPicker.addEventListener("change", () => changeShape(s => { s.fill.color = fillPicker.value; s.fill.enabled = true; }));
+  outlinePicker.addEventListener("change", () => changeShape(s => { s.outline.color = outlinePicker.value; s.outline.enabled = true; }));
+  fillAlpha.addEventListener("change", () => changeShape(s => { s.fill.opacity = percent(fillAlpha.value); }));
+  overallAlpha.addEventListener("change", () => changeShape(s => { s.opacity = percent(overallAlpha.value); }));
+  outlineWidth.addEventListener("change", () => changeShape(s => { s.outline.width_pt = Math.max(.1, Math.min(72, Number(outlineWidth.value))); }));
+  rotation.addEventListener("change", () => changeShape(s => { s.rotation_deg = Math.max(-360, Math.min(360, Number(rotation.value))); }));
+  const fillOff = ribbonButton("No Fill", () => changeShape(s => { s.fill.enabled = false; }), "close");
+  const borderOff = ribbonButton("No Outline", () => changeShape(s => { s.outline.enabled = false; }), "close");
+  const openShape = (): void => { const pair = selectedShape(); if (pair) void editShape(ctx, pair.id); };
+  const shapeRibbon = h("div", { class: "format-ribbon references-ribbon", attrs: { role: "toolbar", "aria-label": "Shape Format ribbon" } },
+    referenceGroup("Fill", fillPicker, fillOff, field("Fill opacity %", fillAlpha)),
+    referenceGroup("Outline", outlinePicker, field("Width (pt)", outlineWidth), borderOff),
+    referenceGroup("Transparency", field("Overall opacity %", overallAlpha)),
+    referenceGroup("Geometry", field("Rotation (°)", rotation), ribbonButton("Size & Corners", openShape, "layers")),
+    referenceGroup("Shape Text", ribbonButton("Edit Shape Text", openShape, "paragraph")),
+    referenceGroup("Effects", ribbonButton("Shadows & Effects", openShape, "sparkle")),
+    referenceGroup("Arrange", ribbonButton("Arrange & Group", openShape, "layers")));
   const home = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Home formatting ribbon" } }, fontGroup, paragraphGroup);
   const homeTab = h("button", { type: "button", class: "ribbon-tab", text: "Home", attrs: { role: "tab", "aria-selected": "true" } });
   const insertTab = h("button", { type: "button", class: "ribbon-tab", text: "Insert", attrs: { role: "tab", "aria-selected": "false" } });
@@ -477,12 +512,21 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     return current;
   };
   const update = (): void => {
-    workspace.update();
-    const hasShape = !shapeRibbon.hidden;
+    const activeShape = selectedShape();
+    const hasShape = Boolean(activeShape);
     shapeTab.hidden = !hasShape;
-    if(hasShape && !hadShape)showTab("shape");
-    else if(!hasShape && activeTab==="shape")showTab("home");
-    hadShape=hasShape;
+    if (hasShape && !hadShape) showTab("shape");
+    else if (!hasShape && activeTab === "shape") showTab("home");
+    hadShape = hasShape;
+    if (activeShape) {
+      const s = activeShape.shape;
+      if (document.activeElement !== fillPicker) fillPicker.value = s.fill.color;
+      if (document.activeElement !== outlinePicker) outlinePicker.value = s.outline.color;
+      if (document.activeElement !== fillAlpha) fillAlpha.value = String(Math.round(s.fill.opacity * 100));
+      if (document.activeElement !== overallAlpha) overallAlpha.value = String(Math.round(s.opacity * 100));
+      if (document.activeElement !== outlineWidth) outlineWidth.value = String(s.outline.width_pt);
+      if (document.activeElement !== rotation) rotation.value = String(s.rotation_deg);
+    }
     const sel = ed.recallSelection();
     const block = sel ? ed.model.block(sel.start.block) : undefined;
     for (const [id, btn] of toggles) {
