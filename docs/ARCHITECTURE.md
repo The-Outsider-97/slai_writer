@@ -20,8 +20,15 @@ Shared web kit                            applications/tools/web   (slai-ui.css,
 Shared server                             applications/tools/server (loopback ThreadingHTTPServer, token → HttpOnly cookie, Host/Origin checks,
    │                                       CSP, marker header on writes, body limits, static files, router)
    ▼
-Writer application                        applications/slai_writer/*.py
-   │   routes_*.py    HTTP handlers (126 routes, see API.md)
+Writer API                                applications/slai_writer/api/
+   │   routing.py     one shared router and request validation / access readers
+   │   routes/*.py    canonical HTTP handlers (see API.md); root routes_*.py are compatibility imports
+   ▼
+Writer application                        applications/slai_writer/app/ and top-level *.py
+   │   app.py         original runtime, loaded once by app/__init__.py (public entry-point facade)
+   │   app/services/document_lifecycle.py  create / Save As, saved-version views, failed-create cleanup
+   │   app/commands/documents.py           version-checked history travel, unsaved-close protection
+   │   app/queries/documents.py            consistent undo/redo menu snapshots
    │   session.py     one DocumentSession per open document: model, undo/redo, revisions, autosave, recovery, snapshots, merge
    │   ops.py         the operation vocabulary applied to a session (text, format, blocks, tables, pages, styles, sources, embeds, ext…)
    │   textmodel.py   block/span arithmetic shared by ops
@@ -38,7 +45,7 @@ Writer application                        applications/slai_writer/*.py
    │   store.py       Writer's SQLite store (via applications/tools storage + database)
    │   library.py     library folders, recents, favorites, unique names
    │   templates.py   8 templates, built through SLDC
-   │   cursors.py, picker.py, mailer.py, protect.py, app.py, routing.py
+   │   cursors.py, picker.py, mailer.py, protect.py
    ▼
 SLAI core                                 src/utils/sldc.py (SLDC), src/utils/configuration (ConfigRepository, optional), applications/Documaster
 ```
@@ -46,6 +53,21 @@ SLAI core                                 src/utils/sldc.py (SLDC), src/utils/co
 Reused rather than rebuilt: the server, storage, database, config, errors, validation, SLAI locator and web kit in `applications/tools`; the
 logo/icon set in `applications/assets`; SLDC in `src/utils/sldc.py`; Documaster's format converters. The only edits to shared code are listed in
 `CHANGES.md` ("Shared tools") and are covered by tests.
+
+### API/application ownership and intentional non-modules
+
+* `api/routes/{accounts,core,documents,tools}.py` owns the route adapters, with no duplicate registrations. The historical
+  `routes_{account,core,docs,tools}.py` modules and `routing.py` remain import-compatible facades. The public `routes.router` is
+  the identical object to `api.routing.router`.
+* The document lifecycle and history use cases are extracted only where they coordinate multiple established components.
+  Editing (`ops.py`), session transactions (`session.py`), storage (`store.py`), SLDC format handling and account policies
+  remain single-source implementations. `app.py` is not moved because its module/package compatibility loader is part of startup.
+* `api/middleware/`, `api/utils/api_errors.py` and `app/utils/app_errors.py` do **not** define competing middleware or error
+  hierarchies. The shared SLAI server already handles Host/Origin/marker checks, body limits, secure headers and error responses;
+  the shared `applications.tools.errors` is canonical. No Writer-specific middleware requirement was found.
+* `app/ports/` remains intentionally free of artificial wrappers: existing storage, converters, and AI integrations already
+  expose callable interfaces. No new persistence, auth, configuration, or dependency-injection framework is introduced.
+* `domain/`, `utils/`, `export.py`, `docmaster.py` and shared SLAI modules retain their pre-existing responsibilities.
 
 ## 2. Server-authoritative editing
 

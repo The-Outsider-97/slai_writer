@@ -3,7 +3,7 @@
 Every route is under `/api`, loopback only, requires the session cookie and (for writes) the `X-SLAI-Writer` header, and answers `{ok, data}` or `{ok:false, error:{code,message,hint,details}}`. Regenerate with `python3 docs/gen_api.py`.
 
 
-## routes_account.py
+## api/routes/accounts.py
 
 | Method | Path | Handler |
 |---|---|---|
@@ -32,7 +32,7 @@ Every route is under `/api`, loopback only, requires the session cookie and (for
 | GET | `/api/plans` | `plans` |
 | POST | `/api/plans/checkout` | `plan_checkout` |
 
-## routes_core.py
+## api/routes/core.py
 
 | Method | Path | Handler |
 |---|---|---|
@@ -57,7 +57,7 @@ Every route is under `/api`, loopback only, requires the session cookie and (for
 | GET | `/api/cursors/{id}.png` | `cursor_image` |
 | DELETE | `/api/cursors/{id}` | `cursor_delete` |
 
-## routes_docs.py
+## api/routes/documents.py
 
 | Method | Path | Handler |
 |---|---|---|
@@ -93,10 +93,12 @@ Every route is under `/api`, loopback only, requires the session cookie and (for
 | POST | `/api/docs/{sid}/replace` | `doc_replace` |
 | GET | `/api/docs/{sid}/outline` | `doc_outline` |
 
-## routes_tools.py
+## api/routes/tools.py
 
 | Method | Path | Handler |
 |---|---|---|
+| GET | `/api/fonts` | `document_fonts` |
+| GET | `/api/fonts/{face_id}` | `document_font_file` |
 | GET | `/api/signing/key` | `sign_key` |
 | POST | `/api/signing/key` | `sign_key_create` |
 | POST | `/api/signing/key/delete` | `sign_key_delete` |
@@ -136,13 +138,17 @@ Every route is under `/api`, loopback only, requires the session cookie and (for
 | POST | `/api/docs/{sid}/cite` | `cite` |
 | POST | `/api/docs/{sid}/footnote` | `footnote` |
 | POST | `/api/docs/{sid}/bibliography` | `bibliography` |
+| DELETE | `/api/docs/{sid}/bibliography` | `remove_bibliography` |
 | POST | `/api/docs/{sid}/contents` | `contents` |
+| POST | `/api/docs/{sid}/contents/{tocid}/refresh` | `refresh_contents` |
+| POST | `/api/docs/{sid}/contents/{tocid}/remove` | `remove_contents` |
 | POST | `/api/docs/{sid}/xref` | `xref` |
 | GET | `/api/exchange/formats` | `formats` |
 | GET | `/api/docs/{sid}/preflight` | `preflight` |
 | POST | `/api/docs/{sid}/export` | `export` |
 | POST | `/api/docs/{sid}/download` | `download` |
 | POST | `/api/docs/{sid}/preview` | `preview` |
+| GET | `/api/docs/{sid}/layout` | `measured_layout` |
 | POST | `/api/import` | `import_upload` |
 | POST | `/api/import/path` | `import_path` |
 | GET | `/api/workspace` | `workspace` |
