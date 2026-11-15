@@ -204,7 +204,12 @@ table.plans td { min-width: 9rem; }
 .b-code .txt { font-family: var(--font-mono); background: rgba(0, 0, 0, .06); padding: 2mm; border-radius: 3px; white-space: pre; overflow-x: auto; }
 .b-quote .txt { border-left: 3px solid #999; padding-left: 4mm; font-style: italic; }
 table.tbl { border-collapse: collapse; width: 100%; margin: 2mm 0; table-layout: fixed; }
-table.tbl .cell { border: 1px solid #888; padding: 1.2mm 2mm; vertical-align: top; outline: none; overflow-wrap: anywhere; }
+table.tbl .cell { border: 1px solid #888; padding: 1.2mm 2mm; vertical-align: top; outline: none; overflow-wrap: anywhere; white-space: pre-wrap; }
+table.tbl .cell:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.b-table > .grip { opacity: .85; left: -1.45rem; top: -.35rem; }
+.b-table[data-table-resizing] { user-select: none; }
+.b-table[data-table-resizing="col"], .b-table[data-table-resizing="col"] * { cursor: col-resize !important; }
+.b-table[data-table-resizing="row"], .b-table[data-table-resizing="row"] * { cursor: row-resize !important; }
 table.tbl th.cell { background: rgba(0, 0, 0, .07); font-weight: 700; text-align: left; }
 table.tbl caption { caption-side: top; font-size: 9pt; text-align: left; padding-bottom: 1mm; }
 .b-table .table-grow { position: absolute; z-index: 2; display: none; place-items: center;

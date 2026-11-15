@@ -344,14 +344,55 @@ export async function tableToolsDialog(ctx: DocCtx, blockId: string): Promise<vo
   const t = block.table;
   const action = async (name: string, index: number, count?: number): Promise<void> => { await A.tableEdit(ed, blockId, name, index, count); };
   const header = numberInput(t.header_rows ?? 0, 0, t.rows.length);
+  const layout = block.extensions?.["slai.writer.table_layout"] as { width_mm?: number; align?: string } | undefined;
+  const tableWidth = numberInput(layout?.width_mm ?? 0, 0, 2000, 1);
+  if (layout?.width_mm === undefined) tableWidth.value = "";
+  tableWidth.placeholder = "Automatic";
+  const tableAlign = selectField("Table alignment", [["left", "Left"], ["center", "Center"], ["right", "Right"]], layout?.align ?? "left");
+  const existing = (block.extensions?.["slai.writer.table_cell_styles"] as Record<string, Record<string, unknown>> | undefined)?.[`${row},${col}`] ?? {};
+  const cell = t.rows[row]?.[col];
+  const halign = selectField("Horizontal alignment", [["left", "Left"], ["center", "Center"], ["right", "Right"], ["justify", "Justified"]], cell?.align ?? "left");
+  const valign = selectField("Vertical alignment", [["top", "Top"], ["middle", "Middle"], ["bottom", "Bottom"]], String(existing["valign"] ?? "top"));
+  const fill = h("input", { type: "color", value: String(existing["background"] ?? "#ffffff"), attrs: { "aria-label": "Cell background color" } });
+  const border = h("input", { type: "color", value: String(existing["border_color"] ?? "#888888"), attrs: { "aria-label": "Cell border color" } });
+  const padding = numberInput(Number(existing["padding_mm"] ?? 1), 0, 25, 0.5);
+  const borderWidth = numberInput(Number(existing["border_width_pt"] ?? 0.5), 0, 12, 0.25);
+  const borderStyle = selectField("Border style", [["solid", "Solid"], ["dashed", "Dashed"], ["dotted", "Dotted"], ["double", "Double"], ["none", "None"]], String(existing["border_style"] ?? "solid"));
+  const applyCell = async (): Promise<void> => {
+    const operations: Array<Record<string, unknown>> = [{ op: "table_cell_style", block: blockId, row, col, props: {
+      align: halign.select.value, valign: valign.select.value, background: fill.value,
+      padding_mm: Number(padding.value), border_color: border.value, border_width_pt: Number(borderWidth.value), border_style: borderStyle.select.value,
+    } }, { op: "table_layout", block: blockId, props: {
+      align: tableAlign.select.value, width_mm: tableWidth.value ? Number(tableWidth.value) : null,
+    } }];
+    await ed.op({ op: "batch", ops: operations, label: "table properties" });
+  };
+  const distribute = async (axis: "column_widths_mm" | "row_heights_mm"): Promise<void> => {
+    const table = ed.els.get(blockId)?.querySelector<HTMLTableElement>("table.tbl");
+    const count = axis === "column_widths_mm" ? t.columns : t.rows.length;
+    const initial = axis === "column_widths_mm" ? (table?.getBoundingClientRect().width ?? 600) / 3.7795275591 / ed.page.zoom
+      : Array.from(table?.rows ?? []).reduce((sum, tr) => sum + tr.getBoundingClientRect().height / 3.7795275591 / ed.page.zoom, 0);
+    await ed.op({ op: "table_layout", block: blockId, props: { [axis]: Array(count).fill(Math.max(axis === "column_widths_mm" ? 8 : 4, initial / count)) } });
+  };
   const btn = (label: string, run: () => Promise<unknown>): HTMLButtonElement => { const b = h("button", { class: "btn", type: "button", text: label }); b.addEventListener("click", () => { void run(); handle.close(); }); return b; };
   const handle = openDialog<true>({
     title: "Table tools", size: "narrow",
     body: h("div", { class: "stack" }, h("p", { class: "muted", text: `Row ${row + 1} of ${t.rows.length}, column ${col + 1} of ${t.columns}.` }),
       h("div", { class: "actions" }, btn("Insert row above", () => action("insert_row", row)), btn("Insert row below", () => action("insert_row", row + 1)), btn("Delete this row", () => action("delete_row", row))),
       h("div", { class: "actions" }, btn("Insert column left", () => action("insert_col", col)), btn("Insert column right", () => action("insert_col", col + 1)), btn("Delete this column", () => action("delete_col", col))),
+      h("div", { class: "actions" }, btn("Split current cell", () => ed.op({ op: "table_edit", block: blockId, action: "split_cell", row, col })),
+        sel?.start.field === "cell" && sel.end.field === "cell" && !sel.collapsed && (sel.end.row !== row || sel.end.col !== col)
+          ? btn("Merge selection", () => ed.op({ op: "table_edit", block: blockId, action: "merge_cells", row,
+            col, end_row: sel.end.row, end_col: sel.end.col })) : null),
+      h("div", { class: "actions" }, btn("Distribute columns", () => distribute("column_widths_mm")),
+        btn("Distribute rows", () => distribute("row_heights_mm"))),
+      h("h3", { text: "Table properties" }), tableAlign.root, labelled("Table width (mm)", tableWidth),
+      h("h3", { text: "Selected cell appearance" }), halign.root, valign.root, borderStyle.root,
+      h("div", { class: "grid-2" }, labelled("Background", fill), labelled("Border color", border),
+        labelled("Padding (mm)", padding), labelled("Border width (pt)", borderWidth)),
       labelled("Header rows", header, { hint: "Header rows are marked for screen readers and repeat in exported files." })),
-    actions: [{ label: "Set header rows", run: async (): Promise<true> => { await action("header_rows", 0, Math.max(0, Math.min(t.rows.length, Math.round(Number(header.value) || 0)))); return true as const; } }],
+    actions: [{ label: "Apply cell properties", kind: "primary", run: async (): Promise<true> => { await applyCell(); return true as const; } },
+      { label: "Set header rows", run: async (): Promise<true> => { await action("header_rows", 0, Math.max(0, Math.min(t.rows.length, Math.round(Number(header.value) || 0)))); return true as const; } }],
     cancelLabel: "Close",
   });
   await handle.result;

@@ -9,6 +9,7 @@ import type { Block, DocState, Op, Patch, Span, TableData } from "./types.js";
 import { TEXT_TYPES } from "./types.js";
 import { FRONT_MATTER_STYLES } from "./named_styles.js";
 import { ensureBundledFont } from "./font_catalog.js";
+import { placeCaret } from "./domtext.js";
 
 const FLAGS = ["bold", "italic", "underline", "strike", "code", "superscript", "subscript"] as const;
 export type FormatFlag = (typeof FLAGS)[number];
@@ -42,6 +43,39 @@ function covered(b: Block, from: number, to: number, flag: FormatFlag): boolean 
     if (at >= to) return true;
   }
   return at >= to;
+}
+
+interface FormatTarget { block: Block; from: number; to: number; text: string; spans?: Span[]; row?: number; col?: number }
+
+/** Formatting ranges are document text or table-cell text, never the table caption. */
+function formatTargets(ed: Editor, sel: Sel): FormatTarget[] {
+  if (sel.start.field === "cell" && sel.end.field === "cell" && sel.start.block === sel.end.block) {
+    const block = ed.model.block(sel.start.block);
+    if (!block?.table) return [];
+    const firstRow = sel.start.row ?? 0, lastRow = sel.end.row ?? 0;
+    const out: FormatTarget[] = [];
+    for (let r = firstRow; r <= lastRow; r += 1) {
+      const row = block.table.rows[r] ?? [];
+      const begin = r === firstRow ? sel.start.col ?? 0 : 0;
+      const finish = r === lastRow ? sel.end.col ?? 0 : row.length - 1;
+      for (let c = begin; c <= finish; c += 1) {
+        const cell = row[c];
+        if (!cell) continue;
+        const from = r === firstRow && c === begin ? sel.start.offset : 0;
+        const to = r === lastRow && c === finish ? sel.end.offset : cell.text.length;
+        if (to > from || sel.collapsed) out.push({ block, text: cell.text, spans: cell.spans, from, to, row: r, col: c });
+      }
+    }
+    return out;
+  }
+  return textRanges(ed, sel).map(({ block, from, to }) => ({ block, from, to, text: block.text, spans: block.spans }));
+}
+
+function formatOp(target: FormatTarget, props: Record<string, unknown>, unset: string[] = []): Op {
+  return { op: "format", block: target.block.id,
+    ...(target.row === undefined ? {} : { row: target.row, col: target.col }),
+    start: toCodepoints(target.text, target.from), end: toCodepoints(target.text, target.to),
+    ...(Object.keys(props).length ? { set: props } : {}), ...(unset.length ? { unset } : {}) };
 }
 
 async function guarded<T>(ed: Editor, work: () => Promise<T>): Promise<T | undefined> {
@@ -78,6 +112,35 @@ export async function replaceRange(ed: Editor, sel: Sel, insert: string): Promis
     const last = ed.model.block(end.block);
     if (!first || !last) return null;
     if (start.block === end.block) {
+      if (start.field === "cell" && end.field === "cell" && (start.row !== end.row || start.col !== end.col)) {
+        const rows = first.table?.rows;
+        if (!rows) return null;
+        const ops: Op[] = [];
+        for (let r = start.row ?? 0; r <= (end.row ?? 0); r++) {
+          const startCol = r === (start.row ?? 0) ? start.col ?? 0 : 0;
+          const endCol = r === (end.row ?? 0) ? end.col ?? 0 : (rows[r]?.length ?? 1) - 1;
+          for (let c = startCol; c <= endCol; c++) {
+            const cell = rows[r]?.[c];
+            if (!cell) continue;
+            const from = r === start.row && c === start.col ? start.offset : 0;
+            const to = r === end.row && c === end.col ? end.offset : cell.text.length;
+            ops.push({ op: "table_cell_text", block: start.block, row: r, col: c,
+              start: toCodepoints(cell.text, from), end: toCodepoints(cell.text, to),
+              insert: r === start.row && c === start.col ? insert : "" });
+          }
+        }
+        if (!ops.length) return null;
+        await ed.queue.send({ op: "batch", ops, label: "edit selected table cells" });
+        return { ...start, offset: start.offset + insert.length };
+      }
+      if (start.field === "cell" && end.field === "cell" && start.row === end.row && start.col === end.col) {
+        if (start.offset === end.offset && !insert) return start;
+        const cell = first.table?.rows[start.row ?? 0]?.[start.col ?? 0];
+        if (!cell) return null;
+        await ed.queue.send({ op: "table_cell_text", block: start.block, row: start.row, col: start.col,
+          start: toCodepoints(cell.text, start.offset), end: toCodepoints(cell.text, end.offset), insert });
+        return { ...start, offset: start.offset + insert.length };
+      }
       if (start.field !== "text") return null;
       if (start.offset === end.offset && !insert) return start;
       await ed.queue.send({ op: "text", block: start.block, start: start.offset, end: end.offset, insert });
@@ -106,8 +169,11 @@ export async function insertText(ed: Editor, raw: string): Promise<void> {
   const lines = ed.lines(text);
   const block = ed.model.block(sel.start.block);
   if (lines.length === 1 || block?.type === "code" || sel.start.field !== "text") {
-    const at = await replaceRange(ed, sel, lines.join(block?.type === "code" ? "\n" : " "));
-    if (at) ed.focusBlock(at.block, at.offset);
+    const at = await replaceRange(ed, sel, lines.join(block?.type === "code" || sel.start.field === "cell" ? "\n" : " "));
+    if (at) {
+      if (at.field === "cell") focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+      else ed.focusBlock(at.block, at.offset);
+    }
     return;
   }
   if (lines.length > 2400) { toast("That is a lot of text at once. Paste it in smaller parts (up to about 2,400 lines).", { kind: "error" }); return; }
@@ -233,7 +299,8 @@ export async function enter(ed: Editor): Promise<void> {
   if (!sel.collapsed) {
     const at = await replaceRange(ed, sel, "");
     if (!at) return;
-    ed.focusBlock(at.block, at.offset);
+    if (at.field === "cell") focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+    else ed.focusBlock(at.block, at.offset);
     sel = ed.readSelection();
     if (!sel) return;
   }
@@ -242,10 +309,8 @@ export async function enter(ed: Editor): Promise<void> {
   if (!block) return;
   await guarded(ed, async () => {
     if (pt.field === "cell") {
-      const rows = block.table?.rows.length ?? 0;
-      const next = (pt.row ?? 0) + 1;
-      if (next >= rows) await ed.op({ op: "table_edit", block: block.id, action: "insert_row", index: rows });
-      focusCell(ed, block.id, Math.min(next, (block.table?.rows.length ?? rows + 1) - 0), pt.col ?? 0);
+      const at = await replaceRange(ed, sel, "\n");
+      if (at) focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
       return;
     }
     if (pt.field === "caption") { moveToNext(ed, block.id); return; }
@@ -279,27 +344,22 @@ export async function enter(ed: Editor): Promise<void> {
   });
 }
 
-function focusCell(ed: Editor, id: string, row: number, col: number): void {
+export function focusCell(ed: Editor, id: string, row: number, col: number, offset?: number): void {
   const cell = ed.els.get(id)?.querySelector<HTMLElement>(`[data-edit=cell][data-row="${row}"][data-col="${col}"]`);
   if (!cell) return;
   cell.focus();
-  const range = document.createRange();
-  range.selectNodeContents(cell);
-  range.collapse(false);
-  const s = window.getSelection();
-  s?.removeAllRanges();
-  s?.addRange(range);
+  placeCaret(cell, offset ?? cell.textContent?.length ?? 0);
 }
 
 export function focusNextCell(ed: Editor, pt: Pt, backwards: boolean): boolean {
   const block = ed.model.block(pt.block);
-  const cols = block?.table?.columns ?? 0;
-  const rows = block?.table?.rows.length ?? 0;
-  if (!block || !cols) return false;
+  const grid = block?.table?.rows;
+  const rows = grid?.length ?? 0;
+  if (!block || !grid?.length) return false;
   let r = pt.row ?? 0;
   let c = (pt.col ?? 0) + (backwards ? -1 : 1);
-  if (c >= cols) { c = 0; r += 1; }
-  if (c < 0) { c = cols - 1; r -= 1; }
+  if (c >= (grid[r]?.length ?? 0)) { c = 0; r += 1; }
+  if (c < 0) { r -= 1; c = (grid[r]?.length ?? 1) - 1; }
   if (r < 0) { moveToPrevious(ed, block.id); return true; }
   if (r >= rows) {
     void (async () => { await ed.op({ op: "table_edit", block: block.id, action: "insert_row", index: rows }); focusCell(ed, block.id, rows, 0); })();
@@ -322,7 +382,10 @@ function moveToPrevious(ed: Editor, id: string): void {
 export async function backspace(ed: Editor): Promise<boolean> {
   const sel = ed.readSelection();
   if (!sel || ed.readOnly) return false;
-  if (!sel.collapsed) { const at = await replaceRange(ed, sel, ""); if (at) ed.focusBlock(at.block, at.offset); return true; }
+  if (!sel.collapsed) { const at = await replaceRange(ed, sel, ""); if (at) {
+    if (at.field === "cell") focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+    else ed.focusBlock(at.block, at.offset);
+  } return true; }
   const pt = sel.start;
   if (pt.field !== "text") return pt.offset === 0;          // at the start of a cell or caption nothing may be merged away
   if (pt.offset > 0) return false;                          // ordinary deletion inside the text: the browser does it, the diff is sent
@@ -349,7 +412,10 @@ export async function backspace(ed: Editor): Promise<boolean> {
 export async function forwardDelete(ed: Editor): Promise<boolean> {
   const sel = ed.readSelection();
   if (!sel || ed.readOnly) return false;
-  if (!sel.collapsed) { const at = await replaceRange(ed, sel, ""); if (at) ed.focusBlock(at.block, at.offset); return true; }
+  if (!sel.collapsed) { const at = await replaceRange(ed, sel, ""); if (at) {
+    if (at.field === "cell") focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+    else ed.focusBlock(at.block, at.offset);
+  } return true; }
   const pt = sel.start;
   if (pt.field !== "text") return false;
   const block = ed.model.block(pt.block);
@@ -411,19 +477,17 @@ export async function deleteBlocks(ed: Editor, ids: string[]): Promise<void> {
 
 /* ---------------------------------------------------------------------------------------------- formatting */
 export async function toggleFormat(ed: Editor, flag: FormatFlag): Promise<void> {
-  const sel = ed.readSelection();
+  const sel = ed.recallSelection();
   if (!sel || ed.readOnly) return;
   if (sel.collapsed) {
     if (ed.pendingFormat.has(flag)) ed.pendingFormat.delete(flag); else ed.pendingFormat.add(flag);
     announce(`${flag} ${ed.pendingFormat.has(flag) ? "on" : "off"} for the next text you type`);
     return;
   }
-  const ranges = textRanges(ed, sel).filter((r) => r.to > r.from);
+  const ranges = formatTargets(ed, sel).filter((r) => r.to > r.from);
   if (!ranges.length) return;
-  const all = ranges.every((r) => covered(r.block, toCodepoints(r.block.text, r.from), toCodepoints(r.block.text, r.to), flag));
-  const ops: Op[] = ranges.map((r) => (all
-    ? { op: "format", block: r.block.id, start: toCodepoints(r.block.text, r.from), end: toCodepoints(r.block.text, r.to), unset: [flag] }
-    : { op: "format", block: r.block.id, start: toCodepoints(r.block.text, r.from), end: toCodepoints(r.block.text, r.to), set: { [flag]: true } }));
+  const all = ranges.every((r) => covered({ ...r.block, text: r.text, spans: r.spans }, toCodepoints(r.text, r.from), toCodepoints(r.text, r.to), flag));
+  const ops: Op[] = ranges.map((r) => all ? formatOp(r, {}, [flag]) : formatOp(r, { [flag]: true }));
   await guarded(ed, async () => { await ed.op(ops.length === 1 ? (ops[0] as Op) : { op: "batch", ops, label: "formatting" }); ed.restoreSelection(sel); });
 }
 
@@ -457,16 +521,15 @@ export function scopedTextRanges(ed: Editor, sel: Sel, scope: FormattingScope): 
 }
 
 export async function setInlineProperty(ed: Editor, key: "color" | "background" | "font_family" | "font_size_pt" | "letter_spacing_pt" | "word_spacing_pt", value: string | number | null, scope: FormattingScope = "selection"): Promise<void> {
-  const sel = ed.readSelection();
+  const sel = ed.recallSelection();
   if (!sel || ed.readOnly) return;
   if (sel.collapsed && scope === "selection") {
     ed.pendingInline.set(key, value);
     announce(`${key.replaceAll("_", " ")} ${value === null ? "reset to default" : "set"} for the next text you type`);
     return;
   }
-  const ops: Op[] = scopedTextRanges(ed, sel, scope).filter((r) => r.to > r.from).map((r) => (value !== null
-    ? { op: "format", block: r.block.id, start: toCodepoints(r.block.text, r.from), end: toCodepoints(r.block.text, r.to), set: { [key]: value } }
-    : { op: "format", block: r.block.id, start: toCodepoints(r.block.text, r.from), end: toCodepoints(r.block.text, r.to), unset: [key] }));
+  const ranges = sel.start.field === "cell" ? formatTargets(ed, sel) : scopedTextRanges(ed, sel, scope).map((r) => ({ ...r, text: r.block.text, spans: r.block.spans }));
+  const ops: Op[] = ranges.filter((r) => r.to > r.from).map((r) => value !== null ? formatOp(r, { [key]: value }) : formatOp(r, {}, [key]));
   if (ops.length) await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "inline formatting" }); ed.restoreSelection(sel); });
 }
 
@@ -491,9 +554,10 @@ export async function transformCase(ed: Editor, mode: "upper" | "lower"): Promis
 }
 
 export async function clearFormatting(ed: Editor): Promise<void> {
-  const sel = ed.readSelection();
+  const sel = ed.recallSelection();
   if (!sel || sel.collapsed || ed.readOnly) return;
-  const ops: Op[] = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => ({ op: "format", block: r.block.id, start: r.from, end: r.to, unset: [...FLAGS, "color", "background", "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"] }));
+  const ops: Op[] = formatTargets(ed, sel).filter((r) => r.to > r.from)
+    .map((r) => formatOp(r, {}, [...FLAGS, "color", "background", "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"]));
   if (ops.length) await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "clear formatting" }); ed.restoreSelection(sel); });
 }
 
@@ -529,6 +593,20 @@ export async function setBlockType(ed: Editor, type: "paragraph" | "heading" | "
 }
 
 export async function setBlockAttribute(ed: Editor, attrs: Record<string, unknown>, label = "paragraph"): Promise<void> {
+  const cellSel = ed.recallSelection();
+  if (cellSel?.start.field === "cell" && !ed.readOnly) {
+    const allowed = ["align", "valign", "background", "padding_mm", "border_color", "border_width_pt", "border_style",
+      "line_height", "space_before_pt", "space_after_pt", "indent_mm"];
+    const props = Object.fromEntries(Object.entries(attrs).filter(([key]) => allowed.includes(key)));
+    const cells = formatTargets(ed, cellSel);
+    if (!cells.length || !Object.keys(props).length) return;
+    await guarded(ed, async () => {
+      await ed.op({ op: "batch", ops: cells.map((cell) => ({ op: "table_cell_style", block: cell.block.id,
+        row: cell.row, col: cell.col, props })), label });
+      ed.restoreSelection(cellSel);
+    });
+    return;
+  }
   const ids = selectedTextIds(ed);
   if (!ids.length || ed.readOnly) return;
   const sel = ed.readSelection();
@@ -540,6 +618,17 @@ export async function setBlockAttribute(ed: Editor, attrs: Record<string, unknow
 }
 
 export async function setParagraphStyle(ed: Editor, name: string | null): Promise<void> {
+  const cellSel = ed.recallSelection();
+  if (cellSel?.start.field === "cell" && !ed.readOnly) {
+    const cells = formatTargets(ed, cellSel);
+    if (!cells.length) return;
+    await guarded(ed, async () => {
+      await ed.op({ op: "batch", ops: cells.map((cell) => ({ op: "table_cell_style", block: cell.block.id,
+        row: cell.row, col: cell.col, props: { paragraph_style: name } })), label: "paragraph style" });
+      ed.restoreSelection(cellSel);
+    });
+    return;
+  }
   const ids = selectedTextIds(ed);
   if (!ids.length || ed.readOnly) return;
   const sel = ed.readSelection();
