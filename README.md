@@ -4,16 +4,17 @@ SLAI Writer is a local-first document editor in the [SLAI ecosystem](https://git
 
 Its native document format is **`.sldc` (SLAI Document)**. Importing and exporting other formats depends on the available integrations, particularly Documaster.
 
-## Quick start — Windows (PowerShell)
+## Install and run — Windows (PowerShell)
 
 ### Requirements
 
-- **Git** to clone the repositories.
+- An **existing SLAI checkout**. Writer belongs at `SLAI/applications/slai_writer/` and uses SLAI's shared application tools and document-format implementation. If SLAI itself is not installed yet, follow the [SLAI installation guide](https://github.com/The-Outsider-97/SLAI#environment-and-installation) first.
+- **Git** to clone SLAI Writer into that checkout.
 - **Python 3.10–3.12** (Python **3.11 recommended** for compatibility with the SLAI v2.4 project). On Windows, check available versions with `py -0p`.
 - A modern web browser. Writer runs a local server and opens its interface in the browser.
 - **Node.js 22** and npm **only if you need to rebuild the browser client**. A built `dist/` directory is included in this repository.
 
-SLAI Writer is an application inside the main SLAI checkout, **not a standalone Python package**. Use this folder structure:
+SLAI Writer runs from its designated folder inside SLAI. The expected folder structure is:
 
 ```text
 SLAI/
@@ -28,50 +29,47 @@ SLAI/
         └── sldc.py        # Shared document format
 ```
 
-### 1. Clone SLAI and SLAI Writer
+### 1. Clone SLAI Writer into `applications/slai_writer`
 
-In PowerShell, navigate to the directory where you want to keep your projects, then run:
+Open PowerShell **in your existing SLAI root directory** (the folder containing `src` and `applications`; for example, `G:\GAIA\AI\SLAI`). Run:
 
 ```powershell
-git clone https://github.com/The-Outsider-97/SLAI.git
-cd SLAI
-git clone https://github.com/The-Outsider-97/slai_writer.git applications/slai_writer
+git clone https://github.com/The-Outsider-97/slai_writer.git .\applications\slai_writer
 ```
 
-**Already have SLAI?** Open PowerShell in your existing SLAI root (the directory containing `src` and `applications`) and run only the last `git clone` command. Do not clone Writer into a second nested `SLAI` folder. If `applications/slai_writer` already exists, update that checkout instead of cloning over it.
+This creates `SLAI/applications/slai_writer/` directly. **Do not clone Writer elsewhere or move its files to the SLAI root.** If that folder already exists as a Git checkout, use `git -C .\applications\slai_writer status` to inspect it before updating; do not clone over an existing folder.
 
-### 2. Create a Python environment and install dependencies
+### 2. Install Writer's Python dependencies
 
-Run these commands **from the SLAI root**:
+Use the **same Python environment you already use for SLAI**. If your SLAI virtual environment is named `venv`, activate it from the SLAI root with `.\venv\Scripts\Activate.ps1`; if it is already active, leave it active. Then run:
 
 ```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
 python -m pip install -r .\applications\slai_writer\requirements.txt "pyyaml>=6.0"
 ```
 
-The Writer requirements cover its document, security, citation and PDF-related Python features. PyYAML provides the shared SLAI configuration loader. You do **not** need to install SLAI's entire machine-learning dependency list just to launch Writer; individual optional integrations may need additional packages or services.
+The Writer requirements cover document, security, citation and PDF-related Python features. PyYAML provides the shared SLAI configuration loader. These commands **do not create or replace your existing SLAI environment**. Individual optional integrations may need additional packages or services.
 
-If the PowerShell execution policy prevents activation, you can still install and run with the environment's Python executable:
+If PowerShell prevents activating the existing `venv` environment, invoke its Python executable directly:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r .\applications\slai_writer\requirements.txt "pyyaml>=6.0"
-.\.venv\Scripts\python.exe -m applications.slai_writer
+.\venv\Scripts\python.exe -m pip install -r .\applications\slai_writer\requirements.txt "pyyaml>=6.0"
+.\venv\Scripts\python.exe -m applications.slai_writer
 ```
+
+If you use a differently named environment (for example `.venv`), substitute its name in those commands.
 
 ### 3. Run SLAI Writer
 
 Still in the **SLAI root**, with the environment activated, run:
 
 ```powershell
-python -m applications.slai_writer
+python .\applications\slai_writer\run_slaiwriter.py
 ```
 
-Alternatively, start it via:
+Or use the equivalent module command:
 
 ```powershell
-python .\applications\slai_writer\run_slaiwriter.py
+python -m applications.slai_writer
 ```
 
 **Do not move `run_slaiwriter.py` to the SLAI root.** The launcher already resolves the root from its current location.
@@ -102,20 +100,15 @@ python -m applications.slai_writer
 
 ## Linux / WSL
 
-With Git and Python 3.11 installed, run:
+From an **existing SLAI root**, with its Python environment already activated, run:
 
 ```bash
-git clone https://github.com/The-Outsider-97/SLAI.git
-cd SLAI
 git clone https://github.com/The-Outsider-97/slai_writer.git applications/slai_writer
-python3.11 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
 python -m pip install -r applications/slai_writer/requirements.txt 'pyyaml>=6.0'
 python -m applications.slai_writer
 ```
 
-To rebuild the client on Linux / WSL, run `npm ci` and `npm run build` from `applications/slai_writer` (Node.js required), then return to the SLAI root to start Writer.
+If Writer already exists in that folder, do not clone it again. To rebuild the client on Linux / WSL, run `npm ci` and `npm run build` from `applications/slai_writer` (Node.js required), then return to the SLAI root to start Writer.
 
 ## Optional features and integrations
 
