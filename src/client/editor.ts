@@ -13,7 +13,7 @@ import { DocModel, OpQueue, layerOf } from "./model.js";
 import { api, errorText } from "./net.js";
 import { PageView, type LayoutBlock, type PageEvents } from "./page.js";
 import { EDIT_MODE, footnoteNumbers, listMarkers, refreshBlock, renderBlock, syncLayer, type RenderContext } from "./render.js";
-import { cleanInsert, diffText, MM_PX, splitLines } from "./textops.js";
+import { cleanInsert, diffText, MM_PX, splitLines, toCodepoints } from "./textops.js";
 import { OBJECT_CHAR, TEXT_TYPES, type Block, type CommentThread, type DocState, type HeaderFooter, type Op, type Patch, type Prefs, type Reference } from "./types.js";
 
 export type EditorEvent =
@@ -163,9 +163,22 @@ export class Editor {
     this.invalidate();
     this.els.clear();
     this.sigs.clear();
+    this.sent.clear();
     const ctx = this.ctx();
-    for (const block of this.model.list()) { this.els.set(block.id, renderBlock(block, ctx)); this.sigs.set(block.id, SIG(block)); this.sent.set(block.id, block.text); }
+    for (const block of this.model.list()) {
+      this.els.set(block.id, renderBlock(block, ctx));
+      this.sigs.set(block.id, SIG(block));
+      this.rememberFields(block);
+    }
     this.layout();
+  }
+
+  private rememberFields(block: Block): void {
+    this.sent.set(block.id, block.text);
+    if (block.type === "table") block.table?.rows.forEach((row, r) => row.forEach((cell, c) => {
+      const key = `${block.id}#${r},${c}`;
+      if (!this.dirty.has(key)) this.sent.set(key, cell.text);
+    }));
   }
 
   textEl(id: string): HTMLElement | null { return this.els.get(id)?.querySelector<HTMLElement>("[data-edit=text]") ?? null; }
@@ -368,6 +381,22 @@ export class Editor {
 
   selectionText(sel: Sel | null = this.readSelection()): string {
     if (!sel || sel.collapsed) return "";
+    if (sel.start.field === "cell" && sel.end.field === "cell" && sel.start.block === sel.end.block) {
+      const table = this.model.block(sel.start.block)?.table;
+      if (!table) return "";
+      const sr = sel.start.row ?? 0, sc = sel.start.col ?? 0;
+      const er = sel.end.row ?? 0, ec = sel.end.col ?? 0;
+      if (sr === er && sc === ec) return table.rows[sr]?.[sc]?.text.slice(sel.start.offset, sel.end.offset) ?? "";
+      return table.rows.slice(sr, er + 1).map((row, index) => {
+        const r = sr + index, left = r === sr ? sc : 0, right = r === er ? ec : row.length - 1;
+        return row.slice(left, right + 1).map((cell, indexInRow) => {
+          const c = left + indexInRow;
+          const from = r === sr && c === sc ? sel.start.offset : 0;
+          const to = r === er && c === ec ? sel.end.offset : cell.text.length;
+          return cell.text.slice(from, to).replaceAll("\t", " ").replaceAll("\n", " ");
+        }).join("\t");
+      }).join("\n");
+    }
     const i = this.model.indexOf(sel.start.block);
     const j = this.model.indexOf(sel.end.block);
     const parts: string[] = [];
@@ -412,7 +441,9 @@ export class Editor {
       if (!el) continue;
       const [id, field] = key.split("#") as [string, string | undefined];
       const now = serialise(el);
-      const was = this.sent.get(key) ?? this.model.block(id)?.text ?? "";
+      const was = this.sent.get(key) ?? (field && field !== "cap"
+        ? this.model.block(id)?.table?.rows[Number(field.split(",")[0])]?.[Number(field.split(",")[1])]?.text
+        : this.model.block(id)?.text) ?? "";
       if (now === was) continue;
       this.sent.set(key, now);
       if (!field) {
@@ -436,6 +467,21 @@ export class Editor {
       } else {
         const [r, c] = field.split(",").map(Number) as [number, number];
         void this.queue.send({ op: "table_cell", block: id, row: r, col: c, text: now }).catch((e) => this.failed(e));
+        if ((this.pendingFormat.size || this.pendingInline.size) && now !== was) {
+          const diff = diffText(was, now);
+          if (diff?.insert) {
+            const set: Record<string, boolean | number | string> = Object.fromEntries([...this.pendingFormat].map((name) => [name, true]));
+            const unset: string[] = [];
+            for (const [name, value] of this.pendingInline) {
+              if (value === null) unset.push(name); else set[name] = value;
+            }
+            this.pendingFormat.clear();
+            this.pendingInline.clear();
+            void this.queue.send({ op: "format", block: id, row: r, col: c,
+              start: toCodepoints(now, diff.start), end: toCodepoints(now, diff.start + diff.insert.length), set, unset })
+              .catch((e) => this.failed(e));
+          }
+        }
       }
     }
     await this.queue.idle();
@@ -448,7 +494,9 @@ export class Editor {
     if (!id) return;
     const field = el.dataset["edit"];
     const key = field === "caption" ? `${id}#cap` : field === "cell" ? `${id}#${el.dataset["row"]},${el.dataset["col"]}` : id;
-    if (!this.sent.has(key)) this.sent.set(key, this.model.block(id)?.text ?? "");
+    if (!this.sent.has(key)) this.sent.set(key, field === "cell"
+      ? this.model.block(id)?.table?.rows[Number(el.dataset["row"]) ]?.[Number(el.dataset["col"])]?.text ?? ""
+      : this.model.block(id)?.text ?? "");
     this.dirty.add(key);
     window.clearTimeout(this.flushTimer);
     if (!this.composing) this.flushTimer = window.setTimeout(() => { void this.flush(); }, 60);
@@ -530,7 +578,7 @@ export class Editor {
     for (const id of changed) {
       const block = this.model.block(id) as Block;
       const wrapper = this.els.get(id);
-      if (!wrapper) { this.els.set(id, renderBlock(block, ctx)); this.sigs.set(id, SIG(block)); this.sent.set(id, block.text); relayout = true; continue; }
+      if (!wrapper) { this.els.set(id, renderBlock(block, ctx)); this.sigs.set(id, SIG(block)); this.rememberFields(block); relayout = true; continue; }
       const sig = SIG(block);
       if (wrapper.hasAttribute("data-break") !== (block.attributes?.["page_break_before"] === true)) relayout = true;   // a page break was added or removed: the pages are laid out again
       const textBlock = TEXT_TYPES.includes(block.type) && !block.extensions?.["slai.writer.shape"] && wrapper.dataset["type"] === block.type;
@@ -549,15 +597,18 @@ export class Editor {
         this.rerender(id, block, wrapper);
         this.scheduleReflow();
       } else {
-        const fresh = renderBlock(block, ctx);
-        wrapper.replaceWith(fresh);
-        this.els.set(id, fresh);
-        this.sigs.set(id, sig);
-        this.sent.set(id, block.text);
-        for (const key of [...this.dirty]) if (key.startsWith(`${id}#`)) this.dirty.delete(key);
+        // A cell edit is acknowledged as a whole table patch. Never replace the
+        // browser's active cell while more native keystrokes or IME input are
+        // outstanding; its DOM is ahead of the last server patch.
+        if (block.type === "table" && id === active && (pendingTyping || this.queue.pending > 1)) {
+          this.deferred.add(id);
+          this.sigs.set(id, sig);
+          continue;
+        }
+        this.rerender(id, block, wrapper);
         this.scheduleReflow();
       }
-      this.sent.set(id, block.text);
+      this.rememberFields(block);
     }
     if (documentChanged) for (const [id, block] of this.model.blocks) { const w = this.els.get(id); if (w && !changed.includes(id)) { this.rerender(id, block, w); } }
     if (relayout) {
@@ -573,6 +624,7 @@ export class Editor {
   /** Re-render one block in place and put the caret back where it was. */
   private rerender(id: string, block: Block, wrapper: HTMLElement): void {
     const saved = this.readSelection();
+    const hadFocus = wrapper.contains(document.activeElement);
     const ctx = this.ctx();
     if (!refreshBlock(wrapper, block, ctx)) {
       const fresh = renderBlock(block, ctx);
@@ -580,7 +632,12 @@ export class Editor {
       this.els.set(id, fresh);
     } else syncLayer(wrapper, block, ctx);
     this.sigs.set(id, SIG(block));
-    this.sent.set(id, block.text);
+    this.rememberFields(block);
+    if (hadFocus && saved?.start.block === id) {
+      const key = saved.start.field === "cell" ? `${id}#${saved.start.row},${saved.start.col}`
+        : saved.start.field === "caption" ? `${id}#cap` : id;
+      this.fieldEl(key)?.focus({ preventScroll: true });
+    }
     if (saved && (saved.start.block === id || saved.end.block === id)) this.restoreSelection(saved);
     this.decor.refresh();
   }

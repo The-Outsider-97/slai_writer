@@ -166,14 +166,46 @@ function defaultStyle(block: Block): string | undefined {
 function tableElement(block: Block, ctx: RenderContext): HTMLElement {
   const data = block.table;
   const table = h("table", { class: "tbl", attrs: { role: "table" } });
+  const layout = block.extensions?.["slai.writer.table_layout"] as { width_mm?: number; column_widths_mm?: number[]; row_heights_mm?: number[]; align?: string } | undefined;
+  const cellStyles = block.extensions?.["slai.writer.table_cell_styles"] as Record<string, {
+    valign?: string; background?: string; padding_mm?: number; border_color?: string; border_width_pt?: number; border_style?: string;
+    line_height?: number; space_before_pt?: number; space_after_pt?: number; indent_mm?: number;
+    paragraph_style?: string;
+  }> | undefined;
+  if (layout?.width_mm) table.style.width = `${layout.width_mm}mm`;
+  if (layout?.align === "center") { table.style.marginLeft = "auto"; table.style.marginRight = "auto"; }
+  if (layout?.align === "right") { table.style.marginLeft = "auto"; table.style.marginRight = "0"; }
+  if (layout?.align === "left") { table.style.marginLeft = "0"; table.style.marginRight = "auto"; }
+  const columnWidths = layout?.column_widths_mm;
+  if (columnWidths && columnWidths.length === data?.columns) {
+    const colgroup = h("colgroup");
+    for (const width of columnWidths) colgroup.appendChild(h("col", { attrs: { style: `width: ${width}mm` } }));
+    table.appendChild(colgroup);
+    table.style.width = `${columnWidths.reduce((a, b) => a + b, 0)}mm`;
+  }
   if (block.text) table.appendChild(h("caption", { text: block.text }));
   const headerRows = data?.header_rows ?? 0;
   (data?.rows ?? []).forEach((row, r) => {
     const tr = h("tr");
+    if (layout?.row_heights_mm?.[r]) tr.style.height = `${layout.row_heights_mm[r]}mm`;
     row.forEach((cell, c) => {
       const isHeader = r < headerRows;
       const td = h(isHeader ? "th" : "td", { class: "cell", attrs: { "data-edit": "cell", "data-row": r, "data-col": c, contenteditable: ctx.readOnly ? "false" : EDIT_MODE, colspan: cell.colspan && cell.colspan > 1 ? cell.colspan : null, rowspan: cell.rowspan && cell.rowspan > 1 ? cell.rowspan : null, scope: isHeader ? "col" : null, "aria-label": `Row ${r + 1}, column ${c + 1}`, tabindex: "0" }, text: cell.text });
       if (cell.align) td.style.textAlign = cell.align;
+      const style = cellStyles?.[`${r},${c}`];
+      if (style) {
+        if (style.paragraph_style) applyStyle(td, resolveStyle(ctx.meta, "paragraph", style.paragraph_style), true);
+        if (style.valign) td.style.verticalAlign = style.valign;
+        if (style.background) td.style.backgroundColor = style.background;
+        if (style.padding_mm !== undefined) td.style.padding = `${style.padding_mm}mm`;
+        if (style.border_color) td.style.borderColor = style.border_color;
+        if (style.border_width_pt !== undefined) td.style.borderWidth = `${style.border_width_pt}pt`;
+        if (style.border_style) td.style.borderStyle = style.border_style;
+        if (style.line_height) td.style.lineHeight = String(style.line_height);
+        if (style.space_before_pt) td.style.paddingTop = `${style.space_before_pt}pt`;
+        if (style.space_after_pt) td.style.paddingBottom = `${style.space_after_pt}pt`;
+        if (style.indent_mm) td.style.textIndent = `${style.indent_mm}mm`;
+      }
       if (cell.spans?.length) fillText(td, ctx, { ...block, text: cell.text, spans: cell.spans });
       tr.appendChild(td);
     });

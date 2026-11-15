@@ -22,6 +22,12 @@ export interface Span {
 }
 export interface Cell { text: string; colspan?: number; rowspan?: number; align?: "left" | "center" | "right" | "justify"; spans?: Span[] }
 export interface TableData { columns: number; header_rows?: number; rows: Cell[][] }
+export interface TableLayout { width_mm?: number; column_widths_mm?: number[]; row_heights_mm?: number[]; align?: "left" | "center" | "right" }
+export interface TableCellStyle {
+  valign?: "top" | "middle" | "bottom"; background?: string; padding_mm?: number;
+  border_color?: string; border_width_pt?: number; border_style?: "solid" | "dashed" | "dotted" | "double" | "none"; line_height?: number;
+  space_before_pt?: number; space_after_pt?: number; indent_mm?: number; paragraph_style?: string;
+}
 export interface Block {
   id: string; type: BlockType; text: string; spans?: Span[]; style?: string; section?: string;
   attributes?: { level?: number; ordered?: boolean; depth?: number; language?: string; [k: string]: unknown };

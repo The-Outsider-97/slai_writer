@@ -7,6 +7,7 @@ import { layerList } from "./model.js";
 import { TEXT_TYPES } from "./types.js";
 import { FRONT_MATTER_STYLES } from "./named_styles.js";
 import { ensureBundledFont } from "./font_catalog.js";
+import { placeCaret } from "./domtext.js";
 const FLAGS = ["bold", "italic", "underline", "strike", "code", "superscript", "subscript"];
 function isTextBlock(b) { return !!b && TEXT_TYPES.includes(b.type); }
 /** Text blocks touched by a selection, each with the covered range. */
@@ -38,6 +39,38 @@ function covered(b, from, to, flag) {
             return true;
     }
     return at >= to;
+}
+/** Formatting ranges are document text or table-cell text, never the table caption. */
+function formatTargets(ed, sel) {
+    if (sel.start.field === "cell" && sel.end.field === "cell" && sel.start.block === sel.end.block) {
+        const block = ed.model.block(sel.start.block);
+        if (!block?.table)
+            return [];
+        const firstRow = sel.start.row ?? 0, lastRow = sel.end.row ?? 0;
+        const out = [];
+        for (let r = firstRow; r <= lastRow; r += 1) {
+            const row = block.table.rows[r] ?? [];
+            const begin = r === firstRow ? sel.start.col ?? 0 : 0;
+            const finish = r === lastRow ? sel.end.col ?? 0 : row.length - 1;
+            for (let c = begin; c <= finish; c += 1) {
+                const cell = row[c];
+                if (!cell)
+                    continue;
+                const from = r === firstRow && c === begin ? sel.start.offset : 0;
+                const to = r === lastRow && c === finish ? sel.end.offset : cell.text.length;
+                if (to > from || sel.collapsed)
+                    out.push({ block, text: cell.text, spans: cell.spans, from, to, row: r, col: c });
+            }
+        }
+        return out;
+    }
+    return textRanges(ed, sel).map(({ block, from, to }) => ({ block, from, to, text: block.text, spans: block.spans }));
+}
+function formatOp(target, props, unset = []) {
+    return { op: "format", block: target.block.id,
+        ...(target.row === undefined ? {} : { row: target.row, col: target.col }),
+        start: toCodepoints(target.text, target.from), end: toCodepoints(target.text, target.to),
+        ...(Object.keys(props).length ? { set: props } : {}), ...(unset.length ? { unset } : {}) };
 }
 async function guarded(ed, work) {
     try {
@@ -79,6 +112,40 @@ export async function replaceRange(ed, sel, insert) {
         if (!first || !last)
             return null;
         if (start.block === end.block) {
+            if (start.field === "cell" && end.field === "cell" && (start.row !== end.row || start.col !== end.col)) {
+                const rows = first.table?.rows;
+                if (!rows)
+                    return null;
+                const ops = [];
+                for (let r = start.row ?? 0; r <= (end.row ?? 0); r++) {
+                    const startCol = r === (start.row ?? 0) ? start.col ?? 0 : 0;
+                    const endCol = r === (end.row ?? 0) ? end.col ?? 0 : (rows[r]?.length ?? 1) - 1;
+                    for (let c = startCol; c <= endCol; c++) {
+                        const cell = rows[r]?.[c];
+                        if (!cell)
+                            continue;
+                        const from = r === start.row && c === start.col ? start.offset : 0;
+                        const to = r === end.row && c === end.col ? end.offset : cell.text.length;
+                        ops.push({ op: "table_cell_text", block: start.block, row: r, col: c,
+                            start: toCodepoints(cell.text, from), end: toCodepoints(cell.text, to),
+                            insert: r === start.row && c === start.col ? insert : "" });
+                    }
+                }
+                if (!ops.length)
+                    return null;
+                await ed.queue.send({ op: "batch", ops, label: "edit selected table cells" });
+                return { ...start, offset: start.offset + insert.length };
+            }
+            if (start.field === "cell" && end.field === "cell" && start.row === end.row && start.col === end.col) {
+                if (start.offset === end.offset && !insert)
+                    return start;
+                const cell = first.table?.rows[start.row ?? 0]?.[start.col ?? 0];
+                if (!cell)
+                    return null;
+                await ed.queue.send({ op: "table_cell_text", block: start.block, row: start.row, col: start.col,
+                    start: toCodepoints(cell.text, start.offset), end: toCodepoints(cell.text, end.offset), insert });
+                return { ...start, offset: start.offset + insert.length };
+            }
             if (start.field !== "text")
                 return null;
             if (start.offset === end.offset && !insert)
@@ -122,9 +189,13 @@ export async function insertText(ed, raw) {
     const lines = ed.lines(text);
     const block = ed.model.block(sel.start.block);
     if (lines.length === 1 || block?.type === "code" || sel.start.field !== "text") {
-        const at = await replaceRange(ed, sel, lines.join(block?.type === "code" ? "\n" : " "));
-        if (at)
-            ed.focusBlock(at.block, at.offset);
+        const at = await replaceRange(ed, sel, lines.join(block?.type === "code" || sel.start.field === "cell" ? "\n" : " "));
+        if (at) {
+            if (at.field === "cell")
+                focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+            else
+                ed.focusBlock(at.block, at.offset);
+        }
         return;
     }
     if (lines.length > 2400) {
@@ -291,7 +362,10 @@ export async function enter(ed) {
         const at = await replaceRange(ed, sel, "");
         if (!at)
             return;
-        ed.focusBlock(at.block, at.offset);
+        if (at.field === "cell")
+            focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+        else
+            ed.focusBlock(at.block, at.offset);
         sel = ed.readSelection();
         if (!sel)
             return;
@@ -302,11 +376,9 @@ export async function enter(ed) {
         return;
     await guarded(ed, async () => {
         if (pt.field === "cell") {
-            const rows = block.table?.rows.length ?? 0;
-            const next = (pt.row ?? 0) + 1;
-            if (next >= rows)
-                await ed.op({ op: "table_edit", block: block.id, action: "insert_row", index: rows });
-            focusCell(ed, block.id, Math.min(next, (block.table?.rows.length ?? rows + 1) - 0), pt.col ?? 0);
+            const at = await replaceRange(ed, sel, "\n");
+            if (at)
+                focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
             return;
         }
         if (pt.field === "caption") {
@@ -345,33 +417,28 @@ export async function enter(ed) {
         ed.focusBlock(id, 0);
     });
 }
-function focusCell(ed, id, row, col) {
+export function focusCell(ed, id, row, col, offset) {
     const cell = ed.els.get(id)?.querySelector(`[data-edit=cell][data-row="${row}"][data-col="${col}"]`);
     if (!cell)
         return;
     cell.focus();
-    const range = document.createRange();
-    range.selectNodeContents(cell);
-    range.collapse(false);
-    const s = window.getSelection();
-    s?.removeAllRanges();
-    s?.addRange(range);
+    placeCaret(cell, offset ?? cell.textContent?.length ?? 0);
 }
 export function focusNextCell(ed, pt, backwards) {
     const block = ed.model.block(pt.block);
-    const cols = block?.table?.columns ?? 0;
-    const rows = block?.table?.rows.length ?? 0;
-    if (!block || !cols)
+    const grid = block?.table?.rows;
+    const rows = grid?.length ?? 0;
+    if (!block || !grid?.length)
         return false;
     let r = pt.row ?? 0;
     let c = (pt.col ?? 0) + (backwards ? -1 : 1);
-    if (c >= cols) {
+    if (c >= (grid[r]?.length ?? 0)) {
         c = 0;
         r += 1;
     }
     if (c < 0) {
-        c = cols - 1;
         r -= 1;
+        c = (grid[r]?.length ?? 1) - 1;
     }
     if (r < 0) {
         moveToPrevious(ed, block.id);
@@ -401,8 +468,12 @@ export async function backspace(ed) {
         return false;
     if (!sel.collapsed) {
         const at = await replaceRange(ed, sel, "");
-        if (at)
-            ed.focusBlock(at.block, at.offset);
+        if (at) {
+            if (at.field === "cell")
+                focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+            else
+                ed.focusBlock(at.block, at.offset);
+        }
         return true;
     }
     const pt = sel.start;
@@ -448,8 +519,12 @@ export async function forwardDelete(ed) {
         return false;
     if (!sel.collapsed) {
         const at = await replaceRange(ed, sel, "");
-        if (at)
-            ed.focusBlock(at.block, at.offset);
+        if (at) {
+            if (at.field === "cell")
+                focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+            else
+                ed.focusBlock(at.block, at.offset);
+        }
         return true;
     }
     const pt = sel.start;
@@ -530,7 +605,7 @@ export async function deleteBlocks(ed, ids) {
 }
 /* ---------------------------------------------------------------------------------------------- formatting */
 export async function toggleFormat(ed, flag) {
-    const sel = ed.readSelection();
+    const sel = ed.recallSelection();
     if (!sel || ed.readOnly)
         return;
     if (sel.collapsed) {
@@ -541,13 +616,11 @@ export async function toggleFormat(ed, flag) {
         announce(`${flag} ${ed.pendingFormat.has(flag) ? "on" : "off"} for the next text you type`);
         return;
     }
-    const ranges = textRanges(ed, sel).filter((r) => r.to > r.from);
+    const ranges = formatTargets(ed, sel).filter((r) => r.to > r.from);
     if (!ranges.length)
         return;
-    const all = ranges.every((r) => covered(r.block, toCodepoints(r.block.text, r.from), toCodepoints(r.block.text, r.to), flag));
-    const ops = ranges.map((r) => (all
-        ? { op: "format", block: r.block.id, start: toCodepoints(r.block.text, r.from), end: toCodepoints(r.block.text, r.to), unset: [flag] }
-        : { op: "format", block: r.block.id, start: toCodepoints(r.block.text, r.from), end: toCodepoints(r.block.text, r.to), set: { [flag]: true } }));
+    const all = ranges.every((r) => covered({ ...r.block, text: r.text, spans: r.spans }, toCodepoints(r.text, r.from), toCodepoints(r.text, r.to), flag));
+    const ops = ranges.map((r) => all ? formatOp(r, {}, [flag]) : formatOp(r, { [flag]: true }));
     await guarded(ed, async () => { await ed.op(ops.length === 1 ? ops[0] : { op: "batch", ops, label: "formatting" }); ed.restoreSelection(sel); });
 }
 /** Resolve each scope against stable block IDs; visible page numbers are never stored as text identities. */
@@ -581,7 +654,7 @@ export function scopedTextRanges(ed, sel, scope) {
         .map((block) => ({ block, from: 0, to: block.text.length }));
 }
 export async function setInlineProperty(ed, key, value, scope = "selection") {
-    const sel = ed.readSelection();
+    const sel = ed.recallSelection();
     if (!sel || ed.readOnly)
         return;
     if (sel.collapsed && scope === "selection") {
@@ -589,9 +662,8 @@ export async function setInlineProperty(ed, key, value, scope = "selection") {
         announce(`${key.replaceAll("_", " ")} ${value === null ? "reset to default" : "set"} for the next text you type`);
         return;
     }
-    const ops = scopedTextRanges(ed, sel, scope).filter((r) => r.to > r.from).map((r) => (value !== null
-        ? { op: "format", block: r.block.id, start: toCodepoints(r.block.text, r.from), end: toCodepoints(r.block.text, r.to), set: { [key]: value } }
-        : { op: "format", block: r.block.id, start: toCodepoints(r.block.text, r.from), end: toCodepoints(r.block.text, r.to), unset: [key] }));
+    const ranges = sel.start.field === "cell" ? formatTargets(ed, sel) : scopedTextRanges(ed, sel, scope).map((r) => ({ ...r, text: r.block.text, spans: r.block.spans }));
+    const ops = ranges.filter((r) => r.to > r.from).map((r) => value !== null ? formatOp(r, { [key]: value }) : formatOp(r, {}, [key]));
     if (ops.length)
         await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "inline formatting" }); ed.restoreSelection(sel); });
 }
@@ -618,10 +690,11 @@ export async function transformCase(ed, mode) {
     });
 }
 export async function clearFormatting(ed) {
-    const sel = ed.readSelection();
+    const sel = ed.recallSelection();
     if (!sel || sel.collapsed || ed.readOnly)
         return;
-    const ops = textRanges(ed, sel).filter((r) => r.to > r.from).map((r) => ({ op: "format", block: r.block.id, start: r.from, end: r.to, unset: [...FLAGS, "color", "background", "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"] }));
+    const ops = formatTargets(ed, sel).filter((r) => r.to > r.from)
+        .map((r) => formatOp(r, {}, [...FLAGS, "color", "background", "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"]));
     if (ops.length)
         await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "clear formatting" }); ed.restoreSelection(sel); });
 }
@@ -659,6 +732,21 @@ export async function setBlockType(ed, type, attrs = {}) {
     });
 }
 export async function setBlockAttribute(ed, attrs, label = "paragraph") {
+    const cellSel = ed.recallSelection();
+    if (cellSel?.start.field === "cell" && !ed.readOnly) {
+        const allowed = ["align", "valign", "background", "padding_mm", "border_color", "border_width_pt", "border_style",
+            "line_height", "space_before_pt", "space_after_pt", "indent_mm"];
+        const props = Object.fromEntries(Object.entries(attrs).filter(([key]) => allowed.includes(key)));
+        const cells = formatTargets(ed, cellSel);
+        if (!cells.length || !Object.keys(props).length)
+            return;
+        await guarded(ed, async () => {
+            await ed.op({ op: "batch", ops: cells.map((cell) => ({ op: "table_cell_style", block: cell.block.id,
+                    row: cell.row, col: cell.col, props })), label });
+            ed.restoreSelection(cellSel);
+        });
+        return;
+    }
     const ids = selectedTextIds(ed);
     if (!ids.length || ed.readOnly)
         return;
@@ -670,6 +758,18 @@ export async function setBlockAttribute(ed, attrs, label = "paragraph") {
     });
 }
 export async function setParagraphStyle(ed, name) {
+    const cellSel = ed.recallSelection();
+    if (cellSel?.start.field === "cell" && !ed.readOnly) {
+        const cells = formatTargets(ed, cellSel);
+        if (!cells.length)
+            return;
+        await guarded(ed, async () => {
+            await ed.op({ op: "batch", ops: cells.map((cell) => ({ op: "table_cell_style", block: cell.block.id,
+                    row: cell.row, col: cell.col, props: { paragraph_style: name } })), label: "paragraph style" });
+            ed.restoreSelection(cellSel);
+        });
+        return;
+    }
     const ids = selectedTextIds(ed);
     if (!ids.length || ed.readOnly)
         return;

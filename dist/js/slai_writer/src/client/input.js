@@ -5,7 +5,7 @@ import { announce, toast } from "./kit.js";
 import * as A from "./actions.js";
 import { blockIdOf, editableOf } from "./domtext.js";
 import { highlightsSupported } from "./decor.js";
-import { analyzeMarkdownTable } from "./textops.js";
+import { analyzeMarkdownTable, MM_PX } from "./textops.js";
 import { objectKind } from "./object_kind.js";
 import { openShapeTextEditor } from "./shape_text_edit.js";
 function pointFromXY(x, y) {
@@ -63,7 +63,36 @@ export function installInput(ed) {
     /** ClipboardEvent is the authoritative source of pasted text. Chromium and Firefox
      * may expose no DataTransfer on the subsequent beforeinput event, so relying on
      * beforeinput alone silently discards content copied from other applications. */
-    const pasteText = (text, saved = ed.readSelection()) => {
+    const pasteGrid = async (values, saved) => {
+        if (!saved || saved.start.field !== "cell" || values.length === 0 || !values[0]?.length)
+            return false;
+        const pt = saved.start;
+        const table = ed.model.block(pt.block)?.table;
+        if (!table)
+            return false;
+        if (table.rows.some((row) => row.some((cell) => (cell.rowspan ?? 1) > 1 || (cell.colspan ?? 1) > 1))) {
+            toast("Paste into merged tables cell by cell; expanding merged grids is not supported.", { kind: "info" });
+            return true;
+        }
+        const startRow = pt.row ?? 0, startCol = pt.col ?? 0;
+        const height = values.length, width = Math.max(...values.map((row) => row.length));
+        if (startRow + height > 10000 || startCol + width > 256 || (startRow + height) * (startCol + width) > 20000) {
+            toast("The pasted grid exceeds the table's size limits.", { kind: "error" });
+            return true;
+        }
+        await ed.flush();
+        const ops = [];
+        for (let c = table.columns; c < startCol + width; c++)
+            ops.push({ op: "table_edit", block: pt.block, action: "insert_col", index: c });
+        for (let r = table.rows.length; r < startRow + height; r++)
+            ops.push({ op: "table_edit", block: pt.block, action: "insert_row", index: r });
+        values.forEach((row, r) => row.forEach((text, c) => ops.push({ op: "table_cell", block: pt.block,
+            row: startRow + r, col: startCol + c, text: ed.clean(text).slice(0, 20000) })));
+        await ed.op({ op: "batch", ops, label: "paste table data" });
+        A.focusCell(ed, pt.block, startRow, startCol);
+        return true;
+    };
+    const pasteText = (text, saved = ed.readSelection(), grid) => {
         serial(async () => {
             if (ed.readOnly)
                 return;
@@ -73,6 +102,9 @@ export function installInput(ed) {
                 toast("Click in the document before pasting.", { kind: "info" });
                 return;
             }
+            const rows = grid ?? (text.includes("\t") ? text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n").map((row) => row.split("\t")) : undefined);
+            if (rows && await pasteGrid(rows, saved))
+                return;
             const found = analyzeMarkdownTable(text);
             const wherever = !!saved?.collapsed && saved.start.field === "text"; // a table is only made at a caret in the text, never over a selection or in a cell
             if (found.kind === "table" && wherever) {
@@ -225,8 +257,15 @@ export function installInput(ed) {
                 }
                 if (spans && sel) {
                     e.preventDefault();
-                    serial(async () => { const at = await A.replaceRange(ed, sel, ed.clean(e.data ?? "")); if (at)
-                        ed.focusBlock(at.block, at.offset); });
+                    serial(async () => {
+                        const at = await A.replaceRange(ed, sel, ed.clean(e.data ?? ""));
+                        if (at) {
+                            if (at.field === "cell")
+                                A.focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+                            else
+                                ed.focusBlock(at.block, at.offset);
+                        }
+                    });
                 }
                 return;
             }
@@ -236,8 +275,15 @@ export function installInput(ed) {
                 if (sel && !sel.collapsed) {
                     e.preventDefault();
                     if (type !== "deleteByDrag")
-                        serial(async () => { const at = await A.replaceRange(ed, sel, ""); if (at)
-                            ed.focusBlock(at.block, at.offset); });
+                        serial(async () => {
+                            const at = await A.replaceRange(ed, sel, "");
+                            if (at) {
+                                if (at.field === "cell")
+                                    A.focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+                                else
+                                    ed.focusBlock(at.block, at.offset);
+                            }
+                        });
                 }
                 return;
             }
@@ -359,7 +405,129 @@ export function installInput(ed) {
                 s.collapseToEnd();
         }
     });
-    /* ------------------------------------------------------------------------------------------ pointer */
+    let gridDrag = null;
+    const logicalBoundary = (rows, row, index) => {
+        const occupied = new Set();
+        for (let r = 0; r <= row; r++) {
+            let column = 0;
+            for (const [position, cell] of (rows[r] ?? []).entries()) {
+                while (occupied.has(`${r},${column}`))
+                    column++;
+                const width = cell.colspan ?? 1, height = cell.rowspan ?? 1;
+                if (r === row && position === index)
+                    return column + width - 1;
+                for (let y = r; y < r + height; y++)
+                    for (let x = column; x < column + width; x++)
+                        occupied.add(`${y},${x}`);
+                column += width;
+            }
+        }
+        return -1;
+    };
+    const gridBorder = (target, x, y) => {
+        const cell = target instanceof Element ? target.closest("table.tbl .cell") : null;
+        const table = cell?.closest("table.tbl");
+        const wrap = table?.closest(".b-table");
+        const id = wrap?.dataset["id"];
+        const data = id ? ed.model.block(id)?.table : null;
+        if (!cell || !table || !wrap || !id || !data || ed.readOnly || lockedBlock(ed, id))
+            return null;
+        const rect = cell.getBoundingClientRect();
+        const tolerance = 7;
+        const column = logicalBoundary(data.rows, Number(cell.dataset["row"]), Number(cell.dataset["col"]));
+        const row = Number(cell.dataset["row"]) + cell.rowSpan - 1;
+        const vertical = Math.abs(x - rect.right) <= tolerance;
+        const horizontal = Math.abs(y - rect.bottom) <= tolerance;
+        if (vertical && column < data.columns)
+            return { wrap, table, block: id, axis: "col", index: column };
+        if (horizontal && row < data.rows.length)
+            return { wrap, table, block: id, axis: "row", index: row };
+        return null;
+    };
+    const measureGrid = (hit, start) => {
+        const block = ed.model.block(hit.block);
+        const count = block?.table?.columns ?? 1;
+        const layout = block?.extensions?.["slai.writer.table_layout"];
+        const width = hit.table.getBoundingClientRect().width / MM_PX / ed.page.zoom / count;
+        const widths = layout?.column_widths_mm?.length === count ? [...layout.column_widths_mm] : Array(count).fill(width);
+        const rows = Array.from(hit.table.rows);
+        const heights = layout?.row_heights_mm?.length === rows.length ? [...layout.row_heights_mm] : rows.map((tr) => tr.getBoundingClientRect().height / MM_PX / ed.page.zoom);
+        return { ...hit, start, widths, heights };
+    };
+    const previewGrid = (drag, delta) => {
+        if (drag.axis === "col") {
+            const index = drag.index;
+            const next = drag.widths[index] ?? 8;
+            const neighbor = drag.widths[index + 1];
+            const allowed = neighbor === undefined ? Math.max(8, next + delta) - next
+                : Math.max(8 - next, Math.min(delta, neighbor - 8));
+            drag.widths[index] = next + allowed;
+            if (neighbor !== undefined)
+                drag.widths[index + 1] = neighbor - allowed;
+            let cols = drag.table.querySelector("colgroup");
+            if (!cols) {
+                cols = document.createElement("colgroup");
+                drag.table.prepend(cols);
+            }
+            cols.replaceChildren(...drag.widths.map((mm) => {
+                const col = document.createElement("col");
+                col.style.width = `${mm}mm`;
+                return col;
+            }));
+            drag.table.style.width = `${drag.widths.reduce((a, b) => a + b, 0)}mm`;
+        }
+        else {
+            drag.heights[drag.index] = Math.max(4, (drag.heights[drag.index] ?? 4) + delta);
+            const tr = drag.table.rows[drag.index];
+            if (tr)
+                tr.style.height = `${drag.heights[drag.index]}mm`;
+        }
+    };
+    on("pointermove", (e) => {
+        if (gridDrag)
+            return;
+        const hit = gridBorder(e.target, e.clientX, e.clientY);
+        const table = e.target?.closest?.("table.tbl");
+        if (table)
+            table.style.cursor = hit ? hit.axis === "col" ? "col-resize" : "row-resize" : "";
+    });
+    on("pointerdown", (e) => {
+        if (e.button !== 0)
+            return;
+        const hit = gridBorder(e.target, e.clientX, e.clientY);
+        if (!hit)
+            return;
+        e.preventDefault();
+        gridDrag = measureGrid(hit, hit.axis === "col" ? e.clientX : e.clientY);
+        hit.wrap.dataset["tableResizing"] = hit.axis;
+    });
+    const moveGrid = (event) => {
+        if (!gridDrag)
+            return;
+        event.preventDefault();
+        const next = gridDrag.axis === "col" ? event.clientX : event.clientY;
+        const delta = (next - gridDrag.start) / MM_PX / ed.page.zoom;
+        gridDrag.start = next;
+        previewGrid(gridDrag, delta);
+    };
+    const endGrid = () => {
+        const drag = gridDrag;
+        if (!drag)
+            return;
+        gridDrag = null;
+        delete drag.wrap.dataset["tableResizing"];
+        const props = drag.axis === "col" ? { column_widths_mm: drag.widths.map((n) => Math.round(n * 10) / 10) }
+            : { row_heights_mm: drag.heights.map((n) => Math.round(n * 10) / 10) };
+        void ed.op({ op: "table_layout", block: drag.block, props }).catch((error) => ed.failed(error));
+    };
+    document.addEventListener("pointermove", moveGrid);
+    document.addEventListener("pointerup", endGrid);
+    document.addEventListener("pointercancel", endGrid);
+    off.push(() => {
+        document.removeEventListener("pointermove", moveGrid);
+        document.removeEventListener("pointerup", endGrid);
+        document.removeEventListener("pointercancel", endGrid);
+    });
     on("click", (e) => {
         const target = e.target;
         if (target.closest(".shape-direct-editor"))
@@ -499,10 +667,22 @@ export function installInput(ed) {
         }
         const pictures = Array.from(data.files).filter((f) => f.type.startsWith("image/"));
         const text = data.getData("text/plain");
+        const html = data.getData("text/html");
+        const grid = (() => {
+            if (!html || !ed.readSelection()?.start.field.includes("cell"))
+                return undefined;
+            const htmlDoc = new DOMParser().parseFromString(html, "text/html");
+            const table = htmlDoc.querySelector("table");
+            if (!table)
+                return undefined;
+            const rows = Array.from(table.querySelectorAll("tr")).map((row) => Array.from(row.children)
+                .filter((cell) => /^(TD|TH)$/.test(cell.tagName)).map((cell) => cell.textContent ?? ""));
+            return rows.length && rows.every((row) => row.length > 0) ? rows : undefined;
+        })();
         const hasText = text.length > 0;
-        if (hasText) {
+        if (hasText || grid) {
             e.preventDefault();
-            pasteText(text);
+            pasteText(text, ed.readSelection(), grid);
             return;
         }
         if (pictures.length && !hasText) {
@@ -548,8 +728,12 @@ export function installInput(ed) {
         serial(async () => {
             ed.refocus(sel);
             const at = await A.replaceRange(ed, sel, "");
-            if (at)
-                ed.focusBlock(at.block, at.offset);
+            if (at) {
+                if (at.field === "cell")
+                    A.focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+                else
+                    ed.focusBlock(at.block, at.offset);
+            }
         });
     });
     /* ------------------------------------------------------------------------------------------ drag and drop */
