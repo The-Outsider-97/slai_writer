@@ -6,7 +6,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent.parent
 groups: "OrderedDict[str, list[tuple[str, str, str]]]" = OrderedDict()
-for f in sorted(glob.glob(str(HERE / "routes*.py"))) + [str(HERE / "export.py")]:
+for f in sorted(glob.glob(str(HERE / "api" / "routes" / "*.py"))) + [str(HERE / "export.py")]:
     lines = Path(f).read_text(encoding="utf-8").split("\n")
     for i, line in enumerate(lines):
         m = re.match(r'@router\.route\("(\w+)",\s*"([^"]+)"', line)
@@ -14,7 +14,8 @@ for f in sorted(glob.glob(str(HERE / "routes*.py"))) + [str(HERE / "export.py")]
             j = i + 1
             while not lines[j].lstrip().startswith(("def ", "async def ")):
                 j += 1
-            groups.setdefault(Path(f).name, []).append((m.group(1), m.group(2), lines[j].split("(")[0].replace("def ", "").strip()))
+            owner = f"api/routes/{Path(f).name}" if Path(f).parent.name == "routes" else Path(f).name
+            groups.setdefault(owner, []).append((m.group(1), m.group(2), lines[j].split("(")[0].replace("def ", "").strip()))
 out = ["# Writer HTTP API (generated from the route table)\n",
        "Every route is under `/api`, loopback only, requires the session cookie and (for writes) the `X-SLAI-Writer` header, and answers `{ok, data}` or "
        "`{ok:false, error:{code,message,hint,details}}`. Regenerate with `python3 docs/gen_api.py`.\n"]
