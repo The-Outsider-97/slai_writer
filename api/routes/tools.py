@@ -320,7 +320,8 @@ def contents(app, req: Request):
                                  text(body, "title", required=False, max_len=80, default="Contents") or "Contents", whole(body, "depth", low=1, high=6, default=3) or 3,
                                  text(body, "preset", required=False, max_len=16, default="standard") or "standard",
                                  show_page_numbers=flag(body, "showPageNumbers", True), leader_dots=flag(body, "leaderDots", True),
-                                 refresh_mode=text(body, "refreshMode", required=False, max_len=16, default="automatic") or "automatic")
+                                 refresh_mode=text(body, "refreshMode", required=False, max_len=16, default="automatic") or "automatic",
+                                 look=body.get("look") if isinstance(body.get("look"), dict) else None)
 
 
 @router.route("POST", "/api/docs/{sid}/contents/{tocid}/refresh")
@@ -333,7 +334,8 @@ def refresh_contents(app, req: Request):
                                          entry=body.get("entry"),
                                          show_page_numbers=flag(body, "showPageNumbers") if "showPageNumbers" in body else None,
                                          leader_dots=flag(body, "leaderDots") if "leaderDots" in body else None,
-                                         refresh_mode=text(body, "refreshMode", max_len=16) if "refreshMode" in body else None)
+                                         refresh_mode=text(body, "refreshMode", max_len=16) if "refreshMode" in body else None,
+                                         look=body.get("look") if isinstance(body.get("look"), dict) else None)
 
 
 @router.route("POST", "/api/docs/{sid}/contents/{tocid}/remove")
