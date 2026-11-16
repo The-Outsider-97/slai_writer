@@ -174,3 +174,45 @@ What the new tests check (and how):
 6. **Windows, Firefox, Safari, screen readers** were not run for these features. The Windows folder received the same files and ran the Python suite and the
    three type checks (see above); the production build and the browser suites were not run there because this session cannot execute `npm.cmd`.
 7. **Reader / SPlanner / Documaster `.sldc` forward-compatibility** (an earlier request) is not part of this round and was not delivered.
+
+
+## v2.4 round 2: start-up, Scripture styles, proofreading, text boxes
+
+Run at the end of the round on the build machine (Linux, Python 3.13, Node 22, Chromium via Playwright). Commands are run from `applications/slai_writer` unless noted.
+
+| Suite | Result |
+|---|---|
+| Writer Python (`PYTHONPATH=. python3 -m unittest discover -s applications/slai_writer/tests -t .`, from the repository root) | 406 run, 403 pass. The 3 failures (`test_import_text_markdown_html`, `test_sdoc_is_never_silently_reinterpreted`, `test_import_markdown_upload_and_rejections`) need `src.agents.reader`, which is absent on the build machine (503 `dependency_missing`); they are environmental, not caused by this round. |
+| Writer TypeScript unit (`node_modules/.bin/tsx --test tests_ts/*.test.ts`) | 183 run, all pass (8 new for text boxes) |
+| Type check (`tsc -p tsconfig.json`, `tsconfig.test.json`, `tsconfig.build.json`, `--noEmit`) | clean |
+| Production build (`node ../tools/build/build-static.mjs`) | builds `dist/` |
+| Browser `node tests_e2e/run.mjs` | 38 of 38 |
+| Browser `startup.mjs` | 10 of 10 |
+| Browser `column_features.mjs` / `table_features.mjs` / `toc_features.mjs` | 11/11, 10/10, 7/7 |
+| Browser `table_editor.mjs` (needs `WRITER_CHROMIUM=<chromium>`) | all PASS lines |
+| Browser `proofing.mjs` | 11 of 11 when run alone and while another suite runs; in one long sequential run on the build machine 3 timing-based scenarios failed (marks still painted 500 ms after a switch, a 2.5 s settle). Their fixed waits were replaced by polling with a longer limit; they pass after that change. |
+| Browser `textbox.mjs` | 19 of 19 |
+
+Text boxes: `tests/test_textbox.py` (18 tests, 23 sub-checks) covers the schema, 18 rejection cases, UTF-16 spans, undo/redo, an SLDC round trip, a newer version being refused,
+pin/lock (also in batches), neighbours (table, heading), the export painter (including the built-in Scripture fallback) and the PNG. `tests_ts/textbox.test.ts` covers the
+editing model. `tests_e2e/textbox.mjs` drives real Chromium: insert and type (one undo step), the gallery and drawing, the selection chrome (and its absence from the saved
+document), smooth move with a kept grab offset and saved millimetres equal to the screen, the same at another zoom, resize (continuous, reflow, minimum, auto-expand, from the
+north-west corner), numeric size, rich text and reload, the Home style list including Scripture without columns, appearance, pin, lock, wrapping, cross-page drag and undo,
+auto-scroll at the window edge, table/heading neighbours, copy/paste/duplicate, an exported PDF rasterised and checked for chrome, and legacy shapes. Failures found while
+writing these are listed in `CHANGES.md`.
+
+On your Windows folder (run from this session's Linux shell over the connected folder): the three type checks are clean; the text-box, proofing, Scripture, assist,
+integration, API-tools and export Python tests ran 128 tests with the same 3 Reader-import failures (there the Reader reports `colorama` has no `just_fix_windows_console`;
+on the build machine the Reader module is absent, so the cause differs but the three tests are the same). The TypeScript unit tests could not be run there from this shell
+because `node_modules` holds the Windows build of esbuild; they were run on the build machine (183 of 183). The production build and browser suites were not run on Windows.
+
+### What was NOT done or not verified (this round)
+
+1. **Windows, Firefox, Safari, screen readers.** The browser suites ran in Chromium on the build machine only. The Windows folder received the files; `npm.cmd run build` must be run there.
+2. **Word, Google Docs and other word processors** were not run; a text box is exported as a picture, so there is nothing editable to compare.
+3. **Text boxes:** *Square* wrapping and alignment guides are not provided; dashed and dotted borders are drawn solid in exported pictures; borders are per box; a corner-resize
+   scenario needed an explicit settle time after a reload because a late page re-layout can clear the selection overlay (the cause of that late clearing was not investigated further).
+4. **Proofreading accuracy** is measured on a corpus authored alongside the rules (`PROOFING_V24.md`); no claim is made for unseen text. SLAI's own grammar processor and the
+   Dutch word list were not available on the build machine.
+5. **Start-up** was measured with a throttled/gated server in Chromium (stage order, retries, failure and high-DPI); no timing comparison against the other SLAI applications' loader was made beyond using the same shared loader.
+6. **Reader / SPlanner / Documaster `.sldc` forward-compatibility** (an earlier request) is still not delivered.

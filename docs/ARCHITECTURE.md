@@ -214,13 +214,25 @@ motion and text scaling are honoured; the "contrast" theme raises contrast of pa
   continuous sections, column properties, bookmarks and `PAGEREF` fields. Writer adds the measured page numbers to the converted copy only
   (`slai.writer.toc_page_labels`), never to the document.
 
+## 9b. Start-up, proofreading, text boxes (v2.4 round 2)
+
+* **Start-up.** The loader (`applications/tools/web/startup/loader.js`, `loader.css`, shared with the other SLAI applications and copied to `dist/startup/` by `tools/build/publish-startup.mjs`) is plain files loaded before the application script; `app.ts` reports stages to the loader through `App.report`;
+  `main.ts` ends it when the first screen is interactive.
+* **Proofreading.** `proofing.py` wraps SLAI's providers (lexicon, rule engine, verifier, normaliser); `assist.py` serves `/api/docs/{id}/proof`; the client paints results as
+  CSS highlights and ignores results computed for older text. Detail: `PROOFING_V24.md`.
+* **Text boxes.** A text box is the shape carrier (`slai.writer.shape`, `kind: "rectangle"`) plus an optional `textbox` object validated by `shape_validation.py`; the
+  stable id is the block id. Pin/lock are enforced in `ops.py` (`op_shape_set`, `op_move`, `op_block_delete`, also inside `batch`). Client: `textbox.ts` (model and painting),
+  `textbox_edit.ts` (editing session, one `shape_set` per editing session, ordered changes), `textbox_ui.ts` (insert/draw), `textbox_ribbon.ts` (the Text Box tab), the page
+  overlay in `shapetools.ts` (chrome never enters the document). Export: `shape_export.py` draws the real paragraphs into the PNG fallback; `export.py` switches the native
+  shape writers off for text boxes. Detail: `TEXTBOX_V24.md`.
+
 ## 12. Directory map
 
 ```
 applications/slai_writer/
-  *.py              server side            tests/            Python tests (151)
-  src/client/       browser client         tests_ts/         TypeScript unit tests (27)
-  configs/          config.yaml, plans.yaml tests_e2e/        Playwright scenarios (31), run.mjs
+  *.py              server side            tests/            Python tests (406)
+  src/client/       browser client         tests_ts/         TypeScript unit tests (183)
+  configs/          config.yaml, plans.yaml tests_e2e/        Playwright scenarios (8 suites), run.mjs
   assets/           Writer-only images     docs/             this documentation
   dist/             build output (generated)
 ```

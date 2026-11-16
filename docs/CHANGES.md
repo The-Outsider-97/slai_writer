@@ -108,3 +108,26 @@ namespaced `slai.writer.*` extensions, and in ordinary paragraph styles, so olde
   contents entries with a leader tab and a page-reference field to a bookmark on each heading. RTF: the same. ODT, HTML, Markdown: columns are not written
   (the export dialog says so). Documaster fix: a one-line default for `TrackedParagraph.block_id`.
 * **Known limits.** See `TEST_REPORT.md`, "v2.4 round".
+
+
+## v2.4 round 2: start-up, Scripture in Paragraph Styles, proofreading, text boxes
+
+Request: "SLAI Writer v2.4 — Startup Modernization, Scripture Style Integration, Intelligent Proofreading, and Advanced Text Box System". Nothing here changes the
+SLDC core schema; everything new is in `slai.writer.*` extensions, ordinary paragraph styles and Writer's own code.
+
+* **Start-up.** The shared branded loader (`applications/tools/web/startup/loader.js`, `loader.css`, published into `dist/startup/` by the build; shown before the application's first request) with real stage progress, a fade-out into an
+  interactive first screen, three tries with a clear error and a Reload button instead of an endless spinner, reduced-motion support, and a missing optional SLAI
+  service (Documaster) no longer stops start. Tests: `tests_e2e/startup.mjs` (10), `tests_ts/startup_loader.test.ts`.
+* **Scripture in Home → Paragraph Styles.** One style definition (`Scripture`: Times New Roman 11 pt italic, left aligned); typography and section columns are separate
+  actions. Choosing the style no longer forces two columns; the Layout tab's columns work on any text.
+* **Proofreading.** See `PROOFING_V24.md`: a verified, local spelling/grammar/style layer with explanations, ranked suggestions, ignore/dictionary controls, per-document
+  language, and a reproducible before/after corpus (19 false positives -> 0).
+* **Text boxes.** See `TEXTBOX_V24.md`: Insert → Text Box / Draw Text Box, rich text, a move handle and resize handles, pin and lock enforced by the server,
+  appearance and wrapping controls, a contextual Text Box ribbon tab, canonical SLDC persistence (a rectangle shape carrier with a versioned `textbox` object), and export
+  as a picture of the text with a preflight notice.
+* **Defects found by the browser tests while building this round and fixed** (each has a test): page re-layout dropped the focus of a box being edited; the Home ribbon
+  silently re-enabled text-box controls that pinned/locked boxes disable; two quick ribbon edits could overwrite each other; shrinking a box to the minimum was refused by the
+  server because its padding did not shrink; a wide ribbon widened the whole application; a box dropped at the top of page 2 stayed on page 1; the text-box ribbon's labels
+  collided with the Home ribbon's (it is now only in the page while its tab shows).
+* **Tests stale before this round, now corrected:** `run.mjs` ("bold and heading") used the formatting-bar command, which now hides the ribbon, and picked the first
+  select, which is now the formatting scope; `table_editor.mjs` typed before the page had taken the focus.
