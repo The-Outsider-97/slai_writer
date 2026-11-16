@@ -6,6 +6,8 @@ source is real or an AI edit is applied - those rules are in ``signing.py``, ``a
 """
 from __future__ import annotations
 
+import re
+
 import shutil
 import tempfile
 from pathlib import Path
@@ -197,19 +199,40 @@ def assist_status(app, req: Request):
 
 @router.route("POST", "/api/docs/{sid}/spell")
 def spell(app, req: Request):
-    blocks = req.json().get("blocks")
-    return app.assist.spelling(session_of(app, req), [str(b) for b in blocks][:500] if isinstance(blocks, list) else None)
+    body = req.json()
+    blocks = body.get("blocks")
+    return app.assist.spelling(session_of(app, req), [str(b) for b in blocks][:500] if isinstance(blocks, list) else None, language=_language(body))
 
 
 @router.route("POST", "/api/docs/{sid}/dictionary")
 def dictionary(app, req: Request):
-    return app.assist.add_to_dictionary(session_of(app, req), text(req.json(), "word", max_len=60))
+    body = req.json()
+    return app.assist.add_to_dictionary(session_of(app, req), text(body, "word", max_len=60), scope="user" if body.get("scope") == "user" else "document")
 
 
 @router.route("POST", "/api/docs/{sid}/grammar")
 def grammar(app, req: Request):
-    blocks = req.json().get("blocks")
-    return app.assist.grammar(session_of(app, req), [str(b) for b in blocks][:500] if isinstance(blocks, list) else None)
+    body = req.json()
+    blocks = body.get("blocks")
+    return app.assist.grammar(session_of(app, req), [str(b) for b in blocks][:500] if isinstance(blocks, list) else None, language=_language(body))
+
+
+@router.route("POST", "/api/docs/{sid}/proof")
+def proof(app, req: Request):
+    """Spelling, grammar and style in one pass. {blocks?: [ids], kinds?: [spelling|grammar|style], language?: "en-GB"}."""
+    body = req.json()
+    blocks = body.get("blocks")
+    kinds = tuple(k for k in (body.get("kinds") or ("spelling", "grammar", "style")) if k in ("spelling", "grammar", "style")) or ("spelling", "grammar")
+    return app.assist.proofread(session_of(app, req), kinds, [str(b) for b in blocks][:500] if isinstance(blocks, list) else None, language=_language(body))
+
+
+def _language(body: dict[str, Any]) -> str | None:
+    value = body.get("language")
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?", value):
+        raise BadRequest("language must be a language tag such as en, en-GB or nl.")
+    return value
 
 
 @router.route("POST", "/api/docs/{sid}/assist")
