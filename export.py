@@ -277,6 +277,7 @@ class Exchange:
             return self._export_sldc(session, package, out_dir, stem, password, pre)
         dm = self._dm()
         converted, shape_warnings = self._shape_export_package(package, fmt, dm)
+        toc_warnings = self._toc_page_labels(session, converted, fmt)
         files = dm.module("files")
         writers = dm.module("docmodel.writers")
         verify = dm.module("docmodel.verify")
@@ -315,7 +316,7 @@ class Exchange:
             extras.append(str(target))
         report = {"path": str(final), "name": final.name, "format": fmt, "bytes": final.stat().st_size, "sha256": files.sha256_file(final),
                   "pages": written.pages, "kept": written.kept,
-                   "lost": sorted(set([*LOSSY[fmt], *written.lost, *shape_warnings])), "warnings": [*written.warnings, *shape_warnings],
+                   "lost": sorted(set([*LOSSY[fmt], *written.lost, *shape_warnings])), "warnings": [*written.warnings, *shape_warnings, *toc_warnings],
                   "extras": extras, "backend": written.backend, "preflight": pre,
                   "verification": {"ok": check["ok"], "checks": check["checks"]}}
         if fmt == "pdf":
@@ -324,6 +325,26 @@ class Exchange:
                 report["warnings"] = [*report["warnings"], "These fonts are not embedded in the PDF: " + ", ".join(facts["unembeddedFonts"]) +
                                       ". Viewers normally have them, but a print shop or archive may require embedded fonts; choose an installed font family in the export options to embed it."]
         return report
+
+    def _toc_page_labels(self, session: DocumentSession, package: Any, fmt: str) -> list[str]:
+        """Word and RTF get a page reference in each contents entry. The number cached in it is the one from Writer's own PDF layout (the writer
+        cannot measure pages); Word refreshes it when the fields are updated, so the file says so."""
+        if fmt not in ("docx", "rtf"):
+            return []
+        doc = package.document
+        entries = [b for b in doc["blocks"] if ((b.get("extensions") or {}).get("slai.sldc.toc") or {}).get("role") == "entry"]
+        if not entries:
+            return []
+        try:
+            labels = {k: v for k, v in (self.layout(session).get("blockLabels") or {}).items() if v}
+        except Exception:                                                                   # noqa: BLE001 - a layout that fails must not fail the export
+            return ["The page numbers of the table of contents could not be measured, so its entries have no page numbers."]
+        if not labels:
+            return []
+        mine = doc.setdefault("extensions", {}).setdefault("slai.writer", {})
+        mine["toc_page_labels"] = labels
+        return ["The page numbers in the table of contents were measured with Writer's own page layout; "
+                f"{'Word' if fmt == 'docx' else 'your word processor'} may paginate differently, so update the fields there (Ctrl+A, then F9) after editing."]
 
     def _export_sldc(self, session: DocumentSession, package: Any, out_dir: Path, stem: str, password: str | None, pre: dict[str, Any]) -> dict[str, Any]:
         recipients = [sldc().password_recipient(password)] if password else ([sldc().password_recipient(session.password)] if session.password else None)

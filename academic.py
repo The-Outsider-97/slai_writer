@@ -28,6 +28,7 @@ from typing import Any, Callable
 
 from ..tools.errors import BadRequest, DependencyMissing, NotFound
 from ..tools.validation import utc_now
+from . import toc_presets
 from .session import DocumentSession, sldc
 from .textmodel import OBJ
 from .citation_engine import CitationEngine, SOURCE_TYPES
@@ -441,7 +442,7 @@ class Academic:
 
     def contents(self, session: DocumentSession, after: str | None, title: str = "Contents", depth: int = 3,
                  preset: str = "standard", *, show_page_numbers: bool = True, leader_dots: bool = True,
-                 refresh_mode: str = "automatic") -> dict[str, Any]:
+                 refresh_mode: str = "automatic", look: dict[str, Any] | None = None) -> dict[str, Any]:
         """Insert a managed, refreshable TOC as one undoable document transaction.
 
         Its metadata is an inert namespaced SLDC block extension, so readers can
@@ -449,12 +450,13 @@ class Academic:
         """
         with session.lock:
             return self._contents(session, after, title, depth, toc_id=secrets.token_hex(12), preset=preset,
-                                  show_page_numbers=show_page_numbers, leader_dots=leader_dots, refresh_mode=refresh_mode)
+                                  show_page_numbers=show_page_numbers, leader_dots=leader_dots, refresh_mode=refresh_mode, look=look)
 
     def refresh_contents(self, session: DocumentSession, toc_id: str, *, depth: int | None = None,
                          title: str | None = None, preset: str | None = None,
                          entry: dict[str, Any] | None = None, show_page_numbers: bool | None = None,
-                         leader_dots: bool | None = None, refresh_mode: str | None = None) -> dict[str, Any]:
+                         leader_dots: bool | None = None, refresh_mode: str | None = None,
+                         look: dict[str, Any] | None = None) -> dict[str, Any]:
         """Replace only the generated blocks of one TOC; preserve surrounding content."""
         with session.lock:
             blocks = session.doc["blocks"]
@@ -473,7 +475,8 @@ class Academic:
                                   old_blocks=[b for _, b in owned], entry=entry,
                                   show_page_numbers=show_page_numbers if show_page_numbers is not None else settings.get("show_page_numbers", True),
                                   leader_dots=leader_dots if leader_dots is not None else settings.get("leader_dots", True),
-                                  refresh_mode=refresh_mode if refresh_mode is not None else settings.get("refresh_mode", "automatic"))
+                                  refresh_mode=refresh_mode if refresh_mode is not None else settings.get("refresh_mode", "automatic"),
+                                  look=look)
 
     def remove_contents(self, session: DocumentSession, toc_id: str) -> dict[str, Any]:
         """Remove the generated TOC in one undoable transaction without touching headings."""
@@ -489,11 +492,15 @@ class Academic:
                   toc_id: str, remove: list[str] | None = None, preset: str = "standard",
                   old_blocks: list[dict[str, Any]] | None = None,
                   entry: dict[str, Any] | None = None, *, show_page_numbers: bool = True,
-                  leader_dots: bool = True, refresh_mode: str = "automatic") -> dict[str, Any]:
+                  leader_dots: bool = True, refresh_mode: str = "automatic",
+                  look: dict[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(depth, int) or not 1 <= depth <= 6:
             raise BadRequest("TOC depth must be between 1 and 6.")
         if preset not in ("standard", "compact", "academic"):
             raise BadRequest("Choose a supported TOC preset.")
+        look = look or {}
+        if not isinstance(look, dict) or set(look) - {"preset", "leader", "page_align", "hyperlinks", "numbered", "levels", "title"}:
+            raise BadRequest("TOC look settings are preset, leader, page_align, hyperlinks, numbered, levels and title.")
         if type(show_page_numbers) is not bool or type(leader_dots) is not bool:
             raise BadRequest("TOC page-number and leader-dot settings must be booleans.")
         if refresh_mode not in ("automatic", "manual"):
@@ -547,17 +554,65 @@ class Academic:
                     custom["label"] = label.strip()
             if not custom:
                 del overrides[target]
+        wants_look = bool(look) or (old_title is not None and toc_presets.EXTENSION in old_title.get("extensions", {}))
+        settings: dict[str, Any] | None = None
+        level_props: dict[int, dict[str, Any]] = {}
+        title_props_new: dict[str, Any] = {}
+        restyle = False
+        if wants_look:
+            try:
+                over_levels = toc_presets.check_levels(look.get("levels"))
+                over_title = toc_presets.check_title(look.get("title"))
+            except ValueError as exc:
+                raise BadRequest(str(exc)) from exc
+            chosen = look.get("preset")
+            if chosen is not None and chosen not in toc_presets.PRESETS:
+                raise BadRequest("Choose one of the twelve contents styles.")
+            current = dict((old_title or {}).get("extensions", {}).get(toc_presets.EXTENSION) or
+                           {"preset": "custom", "leader": "dots" if leader_dots else "none", "page_align": "right", "hyperlinks": True, "numbered": False})
+            spec = toc_presets.PRESETS[chosen] if chosen else None
+
+            def pick(key: str, default: Any) -> Any:
+                if look.get(key) is not None:
+                    return look[key]
+                if spec is not None and chosen != "custom" and key in ("leader", "page_align", "numbered"):
+                    return spec[key]
+                return current.get(key, default)
+            settings = {"preset": "custom" if (over_levels or over_title) else (chosen or current.get("preset", "custom")),
+                        "leader": pick("leader", "dots"), "page_align": pick("page_align", "right"),
+                        "hyperlinks": pick("hyperlinks", True), "numbered": pick("numbered", False)}
+            if settings["leader"] not in toc_presets.LEADERS or settings["page_align"] not in toc_presets.ALIGNS:
+                raise BadRequest("Choose dots, dashes, a solid line or no leader, and page numbers on the right, after the title or on the left.")
+            if type(settings["hyperlinks"]) is not bool or type(settings["numbered"]) is not bool:
+                raise BadRequest("TOC hyperlink and numbering settings must be booleans.")
+            leader_dots = settings["leader"] != "none"
+            if spec is not None:
+                preset = spec["core"]
+            restyle = bool(chosen) or bool(over_levels) or bool(over_title)
+            named_now = session.doc.get("styles", {}).get("paragraph", {})
+            base_ready = spec is not None and chosen != "custom"
+            title_props_new = dict(spec["title"]) if base_ready else dict(named_now.get("TOC Title") or {"font_size_pt": 20, "bold": True, "space_after_pt": 12})
+            for n in range(1, 7):
+                fallback = {"font_size_pt": max(8, round(11 - (n - 1) * 0.35, 2)), "space_after_pt": 3, **({"bold": True} if n == 1 else {})}
+                level_props[n] = dict(spec["levels"][n - 1]) if base_ready else dict(named_now.get(f"TOC Level {n}") or fallback)
+                level_props[n].update(over_levels.get(n, {}))
+            title_props_new.update(over_title)
         ops: list[dict[str, Any]] = []
         # TOC levels are ordinary named paragraph styles. The existing Style
         # Manager can change their typography and inheritance without a second
         # TOC-specific style engine.
         named = session.doc.get("styles", {}).get("paragraph", {})
-        if "TOC Title" not in named:
+        if wants_look:
+            wanted = {"TOC Title": title_props_new, **{f"TOC Level {n}": level_props[n] for n in range(1, 7)}}
+            for name, props in wanted.items():
+                if (restyle or name not in named) and props and named.get(name) != props:
+                    ops.append({"op": "style_define", "kind": "paragraph", "name": name, "props": props})
+        if not wants_look and "TOC Title" not in named:
             title_props: dict[str, Any] = {"font_size_pt": 20, "bold": True, "space_after_pt": 12}
             if "Body Text" in named:
                 title_props["based_on"] = "Body Text"
             ops.append({"op": "style_define", "kind": "paragraph", "name": "TOC Title", "props": title_props})
-        for level in range(1, depth + 1):
+        for level in range(1, depth + 1) if not wants_look else ():
             name = f"TOC Level {level}"
             if name not in named:
                 props: dict[str, Any] = {"font_size_pt": max(8, round(11 - (level - 1) * 0.35, 2)),
@@ -569,41 +624,60 @@ class Academic:
                 ops.append({"op": "style_define", "kind": "paragraph", "name": name, "props": props})
         if remove:
             ops.append({"op": "block_delete", "blocks": remove})
-        head = "toc_" + secrets.token_hex(12)
+        head = old_title["id"] if old_title else "toc_" + secrets.token_hex(12)          # a table keeps the ids of its blocks when it is brought up to date
         new_title: dict[str, Any] = {"id": head, "type": "paragraph", "text": title,
             "extensions": {TOC_EXTENSION: {"id": toc_id, "role": "title", "depth": depth,
                                            "preset": preset, "overrides": overrides,
                                            "show_page_numbers": show_page_numbers, "leader_dots": leader_dots,
                                            "refresh_mode": refresh_mode}}}
-        if old_title:
+        if settings is not None:
+            new_title["extensions"][toc_presets.EXTENSION] = settings
+        if old_title and not (wants_look and restyle):
             for attr in ("attributes", "style"):
                 if attr in old_title:
                     new_title[attr] = copy.deepcopy(old_title[attr])
+        elif wants_look:
+            new_title["style"] = "TOC Title"
         else:
             new_title["attributes"] = {"space_after_pt": 12}
             new_title["style"] = "TOC Title"
         ops.append({"op": "block_insert", "after": after, "block": new_title})
         prev = head
+        numbers: dict[str, str] = {}
+        if settings is not None and settings["numbered"]:
+            counters = [0] * 6
+            for item in headings:                                                      # numbered like an outline from the headings themselves (hidden ones count)
+                counters[item["level"] - 1] += 1
+                counters[item["level"]:] = [0] * (6 - item["level"])
+                numbers[item["block"]] = ".".join(str(c) for c in counters[:item["level"]] if c)
         for item in headings:
             override = overrides.get(item["block"], {})
             if override.get("hidden") is True:
                 continue
             source = item["text"].strip()
-            label = override.get("label", source)
-            new_id = "toc_" + secrets.token_hex(12)
+            label = override.get("label", f"{numbers[item['block']]} {source}" if item["block"] in numbers else source)
             previous = old_entries.get(item["block"])
-            spacing = {"compact": (3, 0), "standard": (6, 3), "academic": (7, 5)}[preset]
-            attributes = copy.deepcopy(previous.get("attributes", {})) if previous else {
-                "indent_mm": spacing[0] * (item["level"] - 1), "space_after_pt": spacing[1]}
+            new_id = previous["id"] if previous else "toc_" + secrets.token_hex(12)
+            if settings is not None:
+                keep_own = previous is not None and not restyle                           # a new look replaces direct formatting; bringing a table up to date keeps it
+                attributes = copy.deepcopy(previous.get("attributes", {})) if keep_own and previous else {}
+            else:
+                spacing = {"compact": (3, 0), "standard": (6, 3), "academic": (7, 5)}[preset]
+                attributes = copy.deepcopy(previous.get("attributes", {})) if previous else {
+                    "indent_mm": spacing[0] * (item["level"] - 1), "space_after_pt": spacing[1]}
             entry: dict[str, Any] = {
                 "id": new_id, "type": "paragraph", "text": label,
                 "style": f"TOC Level {item['level']}",
                 "attributes": attributes,
-                "spans": [{"type": "xref", "start": 0, "end": len(label), "target": item["block"]}],
                 "extensions": {TOC_EXTENSION: {"id": toc_id, "role": "entry", "heading": item["block"],
                                                "source_text": label, "level": item["level"]}}}
-            if previous and previous.get("style"):
-                entry["style"] = previous["style"]
+            if not attributes:
+                entry.pop("attributes")
+            if settings is None or settings["hyperlinks"]:
+                entry["spans"] = [{"type": "xref", "start": 0, "end": len(label), "target": item["block"]}]
+            own = previous.get("style") if previous else None
+            if own and (settings is None or (not own.startswith("TOC Level") and not restyle)):
+                entry["style"] = own                                                   # a style the writer chose by hand stays
             ops.append({"op": "block_insert", "after": prev, "block": entry})
             prev = new_id
         # The session validates the final document and records exactly one undo step.

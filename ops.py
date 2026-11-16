@@ -213,6 +213,20 @@ def _need_text_block(tr: Tracker, block_id: Any) -> dict[str, Any]:
     return block
 
 
+def _text_target(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
+    """The thing an inline-text operation edits: a text block, or the cell of a table when the operation names ``row`` and ``col``.
+
+    A cell has ``text`` and ``spans`` like a block, so the text model edits it unchanged.
+    """
+    block = _need_text_block(tr, op.get("block"))
+    if block["type"] == "table" or "row" in op:
+        if block["type"] != "table":
+            raise OpError("Only a table has cells")
+        from .tableops import cell_of
+        return cell_of(block["table"], _i(op, "row", 0, 10_000), _i(op, "col", 0, 1_000))
+    return block
+
+
 def _tidy_attributes(block: dict[str, Any]) -> None:
     attrs = block.get("attributes")
     if attrs is None:
@@ -288,10 +302,7 @@ def op_text(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
 
 @handler("format")
 def op_format(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
-    if "row" in op or "col" in op:
-        block = _cell(tr, op)
-    else:
-        block = _need_text_block(tr, op.get("block"))
+    block = _text_target(tr, op)
     start, end = _i(op, "start"), _i(op, "end")
     set_props = dict(_d(op, "set", required=False) or {})
     unset = list(op.get("unset") or [])
@@ -331,7 +342,7 @@ def op_format(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
 @handler("case")
 def op_case(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     """Case-convert selected Unicode text while remapping every inline span boundary."""
-    block = _need_text_block(tr, op.get("block"))
+    block = _text_target(tr, op)
     start, end = _i(op, "start"), _i(op, "end")
     mode = _s(op, "mode")
     if mode not in ("upper", "lower"):
@@ -369,7 +380,7 @@ def op_case(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
 
 @handler("span")
 def op_span(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
-    block = _need_text_block(tr, op.get("block"))
+    block = _text_target(tr, op)
     kind, start, end = _s(op, "kind"), _i(op, "start"), _i(op, "end")
     try:
         if op.get("clear"):
@@ -576,6 +587,15 @@ def op_split(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
         right["type"] = "paragraph"                            # Enter on an empty list item leaves the list
         right.pop("attributes", None)
     _tidy_attributes(right)
+    for half in (right,):                                      # a column break belongs to the start of the original text, as a page break does
+        if at != 0 and isinstance(half.get("extensions"), dict):
+            half["extensions"].pop("slai.writer.column_break", None)
+            if not half["extensions"]:
+                half.pop("extensions")
+    if at == 0 and isinstance(block.get("extensions"), dict):
+        block["extensions"].pop("slai.writer.column_break", None)
+        if not block["extensions"]:
+            block.pop("extensions")
     tr.insert(tr.position(block["id"]) + 1, right)
     return {"block": right["id"]}
 
@@ -625,415 +645,6 @@ def op_move(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---- tables and figures ------------------------------------------------------------------------------------------------
-def _table(tr: Tracker, block_id: Any) -> tuple[dict[str, Any], dict[str, Any]]:
-    block = tr.get(block_id)
-    if block["type"] != "table":
-        raise OpError("This block is not a table")
-    return block, block["table"]
-
-
-def _plain_grid(table: dict[str, Any]) -> list[list[dict[str, Any]]]:
-    for row in table["rows"]:
-        for cell in row:
-            if cell.get("colspan", 1) != 1 or cell.get("rowspan", 1) != 1:
-                raise OpError("This table has merged cells; row and column changes are not available for it yet")
-    return table["rows"]
-
-
-def _table_anchors(table: dict[str, Any]) -> dict[tuple[int, int], dict[str, Any]]:
-    """Map stored cells onto their logical grid coordinates (including spans)."""
-    anchors: dict[tuple[int, int], dict[str, Any]] = {}
-    covered: set[tuple[int, int]] = set()
-    columns = table["columns"]
-    for row_index, row in enumerate(table["rows"]):
-        column = 0
-        for cell in row:
-            while (row_index, column) in covered:
-                column += 1
-            colspan, rowspan = cell.get("colspan", 1), cell.get("rowspan", 1)
-            if column + colspan > columns:
-                raise OpError("Merged table geometry is invalid")
-            anchors[row_index, column] = cell
-            for r in range(row_index, row_index + rowspan):
-                for c in range(column, column + colspan):
-                    if (r, c) in covered:
-                        raise OpError("Merged table geometry overlaps")
-                    covered.add((r, c))
-            column += colspan
-    return anchors
-
-
-def _rebuild_table_rows(table: dict[str, Any], anchors: dict[tuple[int, int], dict[str, Any]]) -> None:
-    table["rows"] = [[cell for (r, _), cell in sorted(anchors.items()) if r == row]
-                     for row in range(len(table["rows"]))]
-
-
-def _remap_cell_styles(block: dict[str, Any], original: dict[tuple[int, int], dict[str, Any]],
-                       updated: dict[tuple[int, int], dict[str, Any]],
-                       relocation: dict[tuple[int, int], tuple[int, int]] | None = None) -> None:
-    styles = block.get("extensions", {}).get("slai.writer.table_cell_styles")
-    if not isinstance(styles, dict) or not styles:
-        return
-    before: dict[tuple[int, int], dict[str, Any]] = {}
-    for row in {r for r, _ in original}:
-        for index, (column, _) in enumerate(sorted((c, cell) for (r, c), cell in original.items() if r == row)):
-            style = styles.get(f"{row},{index}")
-            if style:
-                coordinate = (row, column)
-                mapped = relocation.get(coordinate) if relocation is not None else coordinate
-                if mapped is not None:
-                    before[mapped] = style
-    after = {}
-    for row in {r for r, _ in updated}:
-        for index, (column, _) in enumerate(sorted((c, cell) for (r, c), cell in updated.items() if r == row)):
-            if (row, column) in before:
-                after[f"{row},{index}"] = before[row, column]
-    if after:
-        block["extensions"]["slai.writer.table_cell_styles"] = after
-    else:
-        block["extensions"].pop("slai.writer.table_cell_styles", None)
-
-
-def _edit_merged_grid(block: dict[str, Any], table: dict[str, Any], action: str, index: int) -> None:
-    """Insert/delete a grid track, expanding or shrinking intersected merged cells."""
-    original = _table_anchors(table)
-    updated: dict[tuple[int, int], dict[str, Any]] = {}
-    moved: dict[tuple[int, int], tuple[int, int]] = {}
-    adding = action.startswith("insert_")
-    along_rows = action.endswith("row")
-    if adding and ((len(table["rows"]) + 1) * table["columns"] > MAX_TABLE_CELLS if along_rows
-                   else len(table["rows"]) * (table["columns"] + 1) > MAX_TABLE_CELLS):
-        raise LimitExceeded("The table would become too large")
-    for (row, col), cell in original.items():
-        coordinate = row if along_rows else col
-        span_key = "rowspan" if along_rows else "colspan"
-        length = cell.get(span_key, 1)
-        new_coordinate = coordinate
-        next_length = length
-        if adding:
-            if coordinate >= index:
-                new_coordinate += 1
-            elif coordinate < index < coordinate + length:
-                next_length += 1
-        else:
-            if coordinate > index:
-                new_coordinate -= 1
-            elif coordinate <= index < coordinate + length:
-                next_length -= 1
-                if next_length == 0:
-                    continue
-        point = (new_coordinate, col) if along_rows else (row, new_coordinate)
-        updated[point] = cell
-        moved[row, col] = point
-        if next_length > 1:
-            cell[span_key] = next_length
-        else:
-            cell.pop(span_key, None)
-    if along_rows:
-        if adding:
-            table["rows"].append([])
-        else:
-            table["rows"].pop(index)
-    else:
-        table["columns"] += 1 if adding else -1
-    if adding:
-        occupied: set[tuple[int, int]] = set()
-        for (r, c), cell in updated.items():
-            for y in range(r, r + cell.get("rowspan", 1)):
-                for x in range(c, c + cell.get("colspan", 1)):
-                    occupied.add((y, x))
-        if along_rows:
-            for col in range(table["columns"]):
-                if (index, col) not in occupied:
-                    updated[index, col] = {"text": ""}
-        else:
-            for row in range(len(table["rows"])):
-                if (row, index) not in occupied:
-                    updated[row, index] = {"text": ""}
-    _remap_cell_styles(block, original, updated, moved)
-    _rebuild_table_rows(table, updated)
-
-
-def _cell(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
-    """Address a stored cell, including one that spans multiple grid positions."""
-    _, table = _table(tr, op.get("block"))
-    row, col = _i(op, "row", 0, 10_000), _i(op, "col", 0, 1_000)
-    rows = table["rows"]
-    if row >= len(rows) or col >= len(rows[row]):
-        raise OpError("That table cell does not exist")
-    return rows[row][col]
-
-
-@handler("table_cell")
-def op_table_cell(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
-    cell = _cell(tr, op)
-    text = _s(op, "text", limit=20_000)
-    old = cell["text"]
-    if old != text:
-        # Preserve unaffected inline formats instead of discarding every span
-        # after each native keystroke. The shortest replacement also preserves
-        # formatting on the surrounding characters.
-        start = 0
-        while start < min(len(old), len(text)) and old[start] == text[start]:
-            start += 1
-        end_old, end_new = len(old), len(text)
-        while end_old > start and end_new > start and old[end_old - 1] == text[end_new - 1]:
-            end_old -= 1
-            end_new -= 1
-        try:
-            tm.replace_text(cell, start, end_old, text[start:end_new])
-        except tm.TextError as exc:
-            raise OpError(str(exc)) from exc
-    return {}
-
-
-@handler("table_cell_text")
-def op_table_cell_text(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
-    """Selection-aware insertion/deletion within a cell, including line breaks."""
-    cell = _cell(tr, op)
-    start, end = _i(op, "start"), _i(op, "end")
-    insert = _s(op, "insert", limit=20_000, required=False) or ""
-    if len(cell["text"]) - (end - start) + len(insert) > 20_000:
-        raise LimitExceeded("That table cell would become too long")
-    try:
-        tm.replace_text(cell, start, end, insert)
-    except tm.TextError as exc:
-        raise OpError(str(exc)) from exc
-    return {}
-
-
-@handler("table_cell_style")
-def op_table_cell_style(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
-    """Persist table-cell alignment and presentation without extending SLDC's canonical table schema."""
-    cell = _cell(tr, op)
-    block, _ = _table(tr, op.get("block"))
-    props = dict(_d(op, "props"))
-    allowed = {"align", "valign", "background", "padding_mm", "border_color", "border_width_pt", "border_style",
-               "line_height", "space_before_pt", "space_after_pt", "indent_mm", "paragraph_style"}
-    if set(props) - allowed:
-        raise OpError("Unknown table cell style property")
-    if "align" in props and props["align"] not in ("left", "center", "right", "justify", None):
-        raise OpError("Invalid table cell alignment")
-    if "valign" in props and props["valign"] not in ("top", "middle", "bottom", None):
-        raise OpError("Invalid table cell vertical alignment")
-    if "border_style" in props and props["border_style"] not in ("solid", "dashed", "dotted", "double", "none", None):
-        raise OpError("Invalid table cell border style")
-    if "paragraph_style" in props and props["paragraph_style"] is not None and props["paragraph_style"] not in tr.doc.get("styles", {}).get("paragraph", {}):
-        raise OpError("Unknown paragraph style")
-    for key in ("background", "border_color"):
-        if props.get(key) is not None and (not isinstance(props[key], str) or not _COLOUR.fullmatch(props[key])):
-            raise OpError(f"Invalid {key}")
-    for key, bounds in {"padding_mm": (0, 25), "border_width_pt": (0, 12), "line_height": (0.7, 4),
-                        "space_before_pt": (0, 100), "space_after_pt": (0, 100), "indent_mm": (0, 100)}.items():
-        if props.get(key) is not None:
-            _num(props[key], *bounds, key)
-    if "align" in props:
-        if props["align"] is None:
-            cell.pop("align", None)
-        else:
-            cell["align"] = props["align"]
-    row, col = _i(op, "row", 0, 10_000), _i(op, "col", 0, 1_000)
-    ext = block.setdefault("extensions", {})
-    styles = ext.setdefault("slai.writer.table_cell_styles", {})
-    key = f"{row},{col}"
-    style = dict(styles.get(key) or {})
-    for name, value in props.items():
-        if name == "align":
-            continue
-        if value is None:
-            style.pop(name, None)
-        else:
-            style[name] = value
-    if style:
-        styles[key] = style
-    else:
-        styles.pop(key, None)
-    if not styles:
-        ext.pop("slai.writer.table_cell_styles", None)
-    if not ext:
-        block.pop("extensions", None)
-    return {}
-
-
-@handler("table_layout")
-def op_table_layout(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
-    """Persist user-adjusted gridlines as a namespaced, backward-compatible SLDC extension."""
-    block, table = _table(tr, op.get("block"))
-    props = dict(_d(op, "props"))
-    if set(props) - {"column_widths_mm", "row_heights_mm", "width_mm", "align"}:
-        raise OpError("Unknown table layout property")
-    ext = block.setdefault("extensions", {})
-    layout = dict(ext.get("slai.writer.table_layout") or {})
-    for name, value in props.items():
-        if value is None:
-            layout.pop(name, None)
-        elif name == "align":
-            if value not in ("left", "center", "right"):
-                raise OpError("Invalid table alignment")
-            layout[name] = value
-        elif name == "width_mm":
-            layout[name] = _num(value, 15, 2000, name)
-        else:
-            needed = table["columns"] if name == "column_widths_mm" else len(table["rows"])
-            if not isinstance(value, list) or len(value) != needed:
-                raise OpError(f"{name} must contain exactly {needed} values")
-            minimum = 4 if name == "row_heights_mm" else 8
-            layout[name] = [_num(x, minimum, 2000, name) for x in value]
-    if layout:
-        ext["slai.writer.table_layout"] = layout
-    else:
-        ext.pop("slai.writer.table_layout", None)
-    if not ext:
-        block.pop("extensions", None)
-    return {}
-
-
-@handler("table_edit")
-def op_table_edit(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
-    block, table = _table(tr, op.get("block"))
-    action, index = _s(op, "action"), _i(op, "index", 0, 10_000, required=False) or 0
-    if action == "merge_cells":
-        first_row = _i(op, "row", 0, len(table["rows"]) - 1)
-        last_row = _i(op, "end_row", first_row, len(table["rows"]) - 1)
-        first_col = _i(op, "col", 0, table["columns"] - 1)
-        last_col = _i(op, "end_col", first_col, table["columns"] - 1)
-        if first_row == last_row and first_col == last_col:
-            raise OpError("Select two or more cells to merge")
-        anchors = _table_anchors(table)
-        original = dict(anchors)
-        selected = []
-        for (row, col), cell in sorted(anchors.items()):
-            height, width = cell.get("rowspan", 1), cell.get("colspan", 1)
-            intersects = (row <= last_row and row + height > first_row and
-                          col <= last_col and col + width > first_col)
-            if intersects:
-                if row < first_row or row + height > last_row + 1 or col < first_col or col + width > last_col + 1:
-                    raise OpError("The selection cuts through an existing merged cell")
-                selected.append(((row, col), cell))
-        if not selected or selected[0][0] != (first_row, first_col):
-            raise OpError("Merge must start at a cell boundary")
-        combined = copy.deepcopy(selected[0][1])
-        for _, cell in selected[1:]:
-            if cell["text"]:
-                if combined["text"]:
-                    tm.replace_text(combined, len(combined["text"]), len(combined["text"]), "\n")
-                tm.join(combined, cell)
-        if last_col > first_col:
-            combined["colspan"] = last_col - first_col + 1
-        else:
-            combined.pop("colspan", None)
-        if last_row > first_row:
-            combined["rowspan"] = last_row - first_row + 1
-        else:
-            combined.pop("rowspan", None)
-        for position, _ in selected:
-            anchors.pop(position)
-        anchors[first_row, first_col] = combined
-        _remap_cell_styles(block, original, anchors)
-        _rebuild_table_rows(table, anchors)
-        return {}
-    if action == "split_cell":
-        row = _i(op, "row", 0, len(table["rows"]) - 1)
-        col = _i(op, "col", 0, len(table["rows"][row]) - 1)
-        anchors = _table_anchors(table)
-        original = dict(anchors)
-        positions = sorted((c, cell) for (r, c), cell in anchors.items() if r == row)
-        start_col, cell = positions[col]
-        height, width = cell.get("rowspan", 1), cell.get("colspan", 1)
-        if height == 1 and width == 1:
-            return {}
-        anchors.pop((row, start_col))
-        for r in range(row, row + height):
-            for c in range(start_col, start_col + width):
-                if r == row and c == start_col:
-                    restored = copy.deepcopy(cell)
-                    restored.pop("colspan", None)
-                    restored.pop("rowspan", None)
-                    anchors[r, c] = restored
-                else:
-                    anchors[r, c] = {"text": ""}
-        _remap_cell_styles(block, original, anchors)
-        _rebuild_table_rows(table, anchors)
-        return {}
-    merged = any(cell.get("colspan", 1) > 1 or cell.get("rowspan", 1) > 1
-                 for row in table["rows"] for cell in row)
-    grid = table["rows"] if merged else _plain_grid(table)
-    cols = table["columns"]
-    effective_index = min(index, len(grid) if action.endswith("row") else cols)
-    if action == "insert_row":
-        if len(grid) + 1 > 10_000 or (len(grid) + 1) * cols > MAX_TABLE_CELLS:
-            raise LimitExceeded("The table would become too large")
-        if merged:
-            _edit_merged_grid(block, table, action, effective_index)
-        else:
-            grid.insert(effective_index, [{"text": ""} for _ in range(cols)])
-    elif action == "delete_row":
-        if len(grid) <= 1 or index >= len(grid):
-            raise OpError("A table keeps at least one row")
-        if merged:
-            _edit_merged_grid(block, table, action, index)
-        else:
-            del grid[index]
-        table["header_rows"] = min(table.get("header_rows", 0), len(grid))
-    elif action == "insert_col":
-        if cols + 1 > 256 or len(grid) * (cols + 1) > MAX_TABLE_CELLS:
-            raise LimitExceeded("The table would become too large")
-        if merged:
-            _edit_merged_grid(block, table, action, effective_index)
-        else:
-            for row in grid:
-                row.insert(effective_index, {"text": ""})
-            table["columns"] = cols + 1
-    elif action == "delete_col":
-        if cols <= 1 or index >= cols:
-            raise OpError("A table keeps at least one column")
-        if merged:
-            _edit_merged_grid(block, table, action, index)
-        else:
-            for row in grid:
-                del row[index]
-            table["columns"] = cols - 1
-    elif action == "header_rows":
-        table["header_rows"] = _i(op, "count", 0, len(grid))
-    else:
-        raise OpError(f"Unknown table action '{action}'")
-    # Keep geometry and cell formatting aligned with the same logical rows/columns.
-    # Otherwise a saved width/height/style silently migrates to the wrong cell.
-    ext = block.get("extensions", {})
-    layout = ext.get("slai.writer.table_layout", {})
-    dimension = "row_heights_mm" if action.endswith("row") else "column_widths_mm"
-    if action in ("insert_row", "delete_row", "insert_col", "delete_col"):
-        sizes = layout.get(dimension)
-        if isinstance(sizes, list):
-            if action.startswith("insert_"):
-                sizes.insert(effective_index, sizes[max(effective_index - 1, 0)] if sizes else (9 if action.endswith("row") else 30))
-            else:
-                del sizes[effective_index]
-        styles = ext.get("slai.writer.table_cell_styles")
-        if isinstance(styles, dict):
-            moved = {}
-            for key, style in styles.items():
-                try:
-                    row, col = (int(v) for v in key.split(","))
-                except (ValueError, AttributeError):
-                    continue
-                axis = row if action.endswith("row") else col
-                if action.startswith("delete_") and axis == effective_index:
-                    continue
-                if axis >= effective_index:
-                    axis += 1 if action.startswith("insert_") else -1
-                if action.endswith("row"):
-                    row = axis
-                else:
-                    col = axis
-                moved[f"{row},{col}"] = style
-            if moved:
-                ext["slai.writer.table_cell_styles"] = moved
-            else:
-                ext.pop("slai.writer.table_cell_styles", None)
-    return {}
-
-
 @handler("caption")
 def op_caption(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     block = tr.get(op.get("block"))
@@ -1181,6 +792,8 @@ def op_page_setup(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     sid = op.get("section") or DEFAULT_SECTION
     sections = copy.deepcopy(tr.key("sections") or [])
     tr.doc["sections"] = sections
+    from .columns import group_members, _read_layouts
+    members = group_members(sections, _read_layouts(tr), sid) if sections else [sid]      # sections that continue on this page change with it
     section = next((s for s in sections if s["id"] == sid), None)
     if section is None:
         if sid != DEFAULT_SECTION and not sections:
@@ -1219,6 +832,15 @@ def op_page_setup(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
                 section[edge] = {k: v for k, v in op[edge].items() if v not in (None, "")}
                 if not section[edge]:
                     section.pop(edge)
+    for other in (s for s in sections if s["id"] in members and s["id"] != sid):
+        if "page" in op:
+            other["page"] = copy.deepcopy(section.get("page", {}))
+        for edge in ("header", "footer"):
+            if edge in op:
+                if section.get(edge):
+                    other[edge] = copy.deepcopy(section[edge])
+                else:
+                    other.pop(edge, None)
     if sid == DEFAULT_SECTION and tr.doc["blocks"]:
         first = tr.doc["blocks"][0]
         if not first.get("section"):
@@ -1247,6 +869,8 @@ def op_section_break(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     tr.doc["sections"] = sections
     for b in tr.doc["blocks"][tr.position(block["id"]):]:
         tr.get(b["id"])["section"] = sid
+    from .columns import inherit
+    inherit(tr, previous["id"], sid)
     return {"section": sid}
 
 
@@ -1498,7 +1122,8 @@ def op_batch(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
 LABELS = {
     "text": "typing", "format": "formatting", "span": "link or reference", "inline_object": "insert object", "block_set": "paragraph style",
     "block_insert": "insert block", "block_delete": "delete", "split": "new paragraph", "merge": "join paragraphs", "move": "move",
-    "table_cell": "table cell", "table_edit": "table", "caption": "caption", "figure_set": "picture", "shape_set": "shape", "equation_set": "equation",
+    "table_cell": "table cell", "table_cell_text": "table cell", "table_edit": "table", "table_cell_style": "table cell format",
+    "table_layout": "table layout", "table_style": "table style", "table_borders": "table borders", "table_style_define": "table style", "caption": "caption", "figure_set": "picture", "shape_set": "shape", "equation_set": "equation",
     "meta": "document details", "page_setup": "page setup", "section_break": "section break", "style_define": "style",
     "reference_put": "citation or footnote", "reference_delete": "remove citation", "embed_put": "EMBED", "embed_delete": "remove EMBED",
     "ext_set": "page settings", "batch": "edit",
@@ -1512,12 +1137,18 @@ def apply_operation(doc: dict[str, Any], op: dict[str, Any]) -> tuple[Undo, dict
     tracker = Tracker(doc)
     try:
         result = HANDLERS[op["op"]](tracker, op)
+        from .columns import reconcile, validate_document
+        reconcile(tracker)
+        validate_document(doc)
         # Shape-bearing paragraph blocks are inert SLDC carriers, not editable
         # text paragraphs. Reject any mutation that would hide or corrupt them.
         from .shape_validation import SHAPE_KEY, validate_shape
         candidate_shapes = (doc["blocks"] if tracker.structural else
                             (tracker.index[ident] for ident in tracker.touched if ident in tracker.index))
         for item in candidate_shapes:
+            if item["type"] == "table" and item.get("extensions"):
+                from .tableops import validate_table_extensions
+                validate_table_extensions(item, doc)
             if SHAPE_KEY not in item.get("extensions", {}):
                 continue
             if item["type"] != "paragraph" or item["text"]:
@@ -1533,3 +1164,7 @@ def apply_operation(doc: dict[str, Any], op: dict[str, Any]) -> tuple[Undo, dict
         raise
     tracker.undo.label = op.get("label") or LABELS.get(op["op"], "edit")
     return tracker.undo, result, tracker
+
+
+from . import tableops  # noqa: E402,F401  (registers the table operations)
+from . import columns  # noqa: E402,F401  (registers the column and Scripture operations)
