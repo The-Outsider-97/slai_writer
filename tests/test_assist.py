@@ -278,10 +278,13 @@ class AssistTests(Workbench):
         self.assertEqual(out["source"], "SLAI grammar processor")
 
     def test_grammar_unavailable(self):
+        # SLAI's grammar processor is an optional provider: when it is down Writer's own rules still run, and the result says what is missing.
         a = Assist(self.app, gateway=FakeGateway(FakeAgent("x"), language_down="NLP engine could not be loaded"))
-        with self.assertRaises(DependencyMissing) as ctx:
-            a.grammar(self.make())
-        self.assertIn("NLP engine", str(ctx.exception))
+        out = a.grammar(self.make("The the cat sat."))
+        self.assertTrue(out["available"])
+        self.assertIn("NLP engine", out["reason"])
+        self.assertNotIn("SLAI grammar processor", out["providers"])
+        self.assertEqual([i["rule"] for i in out["issues"]], ["repeated-word"])        # Writer's own rule found this without SLAI
 
     def test_private_text_blocked_by_local_detector(self):
         s = self.make("My IBAN is NL91ABNA0417164300 and my card is 4111 1111 1111 1111.")
