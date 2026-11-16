@@ -7,6 +7,9 @@ Where things live (nothing here is CSS-only):
   ``rule`` (the line between columns: colour, width_pt, style), ``widths_mm`` (unequal column widths), ``balance``, ``flow`` (ltr or rtl)
   and ``continuous`` (the section starts on the page of the one before it, which is how a selection gets its own columns in the middle of a page).
   Readers that do not know the extension ignore and keep it.
+* ``scripture`` (in the same layout entry) marks a section that the Scripture paragraph style made: its two columns belong to that style and go away
+  again, paragraph by paragraph, when a paragraph stops being Scripture. Any column change the person makes by hand takes the mark off, because
+  those columns are theirs then.
 * A column break is the block extension ``slai.writer.column_break`` (``{"before": true}``): the block starts in the next column
   (in a one-column section it starts a new page, as in Word).
 
@@ -36,8 +39,8 @@ SCRIPTURE_PROPS = {"font_family": "Times New Roman", "font_size_pt": 11, "italic
 # ------------------------------------------------------------------------------------------------------------- the stored layout
 def check_layout(entry: Any, columns: int) -> None:
     """Raise when a stored column layout is not one Writer would write."""
-    if not isinstance(entry, dict) or set(entry) - {"rule", "widths_mm", "balance", "flow", "continuous"}:
-        raise OpError("A column layout holds only rule, widths_mm, balance, flow and continuous")
+    if not isinstance(entry, dict) or set(entry) - {"rule", "widths_mm", "balance", "flow", "continuous", "scripture"}:
+        raise OpError("A column layout holds only rule, widths_mm, balance, flow, continuous and scripture")
     rule = entry.get("rule")
     if rule is not None:
         if not isinstance(rule, dict) or set(rule) - {"color", "width_pt", "style"}:
@@ -55,7 +58,7 @@ def check_layout(entry: Any, columns: int) -> None:
         if (not isinstance(widths, list) or len(widths) != columns or columns < 2
                 or any(isinstance(w, bool) or not isinstance(w, (int, float)) or not math.isfinite(w) or not 10 <= w <= 500 for w in widths)):
             raise OpError(f"Unequal widths need one width (10 to 500 mm) for each of the {columns} columns")
-    for key in ("balance", "continuous"):
+    for key in ("balance", "continuous", "scripture"):
         if key in entry and not isinstance(entry[key], bool):
             raise OpError(f"'{key}' must be true or false")
     if entry.get("flow", "ltr") not in FLOWS:
@@ -228,6 +231,10 @@ def _apply(section: dict[str, Any], layout: dict[str, Any], op: dict[str, Any]) 
     if "rule" in layout and isinstance(layout["rule"], dict):
         layout["rule"] = {"color": layout["rule"].get("color", "#000000"), "width_pt": layout["rule"].get("width_pt", 0.75),
                           "style": layout["rule"].get("style", "solid")}
+    if op.get("scripture") is True and columns > 1:
+        layout["scripture"] = True                                               # these columns come from the Scripture style
+    else:
+        layout.pop("scripture", None)                                            # columns the person sets are theirs, whatever style the text has
     if layout.get("flow") == "ltr":
         layout.pop("flow")                                                       # left to right is what an absent value means
     if layout.get("balance") is False:
@@ -336,11 +343,12 @@ def op_scripture_apply(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     if not start:
         raise OpError("Select the text to set as Scripture")
     p0, p1 = sorted((tr.position(start), tr.position(end)))
-    chosen = [b for b in tr.doc["blocks"][p0:p1 + 1] if b["type"] in ops.TEXT_TYPES and b["type"] != "code"]
+    chosen = [b for b in tr.doc["blocks"][p0:p1 + 1] if _is_text(b)]
     if not chosen:
         raise OpError("Scripture style applies to text paragraphs")
     styles = copy.deepcopy(tr.key("styles") or {})
-    styles.setdefault("paragraph", {})[SCRIPTURE] = dict(SCRIPTURE_PROPS)
+    if SCRIPTURE not in styles.setdefault("paragraph", {}):                      # the person may have edited the definition: keep it
+        styles["paragraph"][SCRIPTURE] = dict(SCRIPTURE_PROPS)
     tr.doc["styles"] = styles
     for block in chosen:
         target = tr.get(block["id"])
@@ -355,12 +363,62 @@ def op_scripture_apply(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
         if target["type"] != "paragraph":
             target["type"] = "paragraph"
             ops._tidy_attributes(target)
-    inner = {"op": "columns_set", "scope": "selection", "block": chosen[0]["id"], "end_block": chosen[-1]["id"], "columns": 2}
+    inner = {"op": "columns_set", "scope": "selection", "block": chosen[0]["id"], "end_block": chosen[-1]["id"], "columns": 2, "scripture": True}
     return {"blocks": [b["id"] for b in chosen], **op_columns_set(tr, inner)}
+
+
+def _is_text(block: dict[str, Any]) -> bool:
+    """A paragraph the Scripture style can apply to: text, not code, and not the inert carrier of a vector shape or text box."""
+    from .shape_validation import SHAPE_KEY
+    return block["type"] in ops.TEXT_TYPES and block["type"] != "code" and SHAPE_KEY not in (block.get("extensions") or {})
+
+
+def _scripture_sync(tr: Tracker) -> None:
+    """The two columns of a Scripture section belong to the Scripture style. A paragraph in such a section that is no longer Scripture (switched to
+    Normal text, a heading, a list ...) goes back to the one column it would have had; paragraphs around it keep their columns, and so does every
+    section the style did not make. Undo restores both together because it restores the document as it was."""
+    layouts = _read_layouts(tr)
+    flagged = [sid for sid, entry in layouts.items() if entry.get("scripture")]
+    if not flagged:
+        return
+    blocks = tr.doc["blocks"]
+    runs: list[tuple[str, str]] = []
+    for sid in flagged:
+        members = _blocks_of(tr, sid)
+        if not members:
+            continue
+        texts = [i for i in members if _is_text(blocks[i])]
+        if not any(blocks[i].get("style") == SCRIPTURE for i in texts):          # nothing of the style is left: the whole section goes back
+            runs.append((blocks[members[0]]["id"], blocks[members[-1]]["id"]))
+            continue
+        start = None
+        for i in members:
+            stray = _is_text(blocks[i]) and blocks[i].get("style") != SCRIPTURE
+            if stray and start is None:
+                start = i
+            if not stray and start is not None:
+                runs.append((blocks[start]["id"], blocks[i - 1]["id"]))
+                start = None
+        if start is not None:
+            runs.append((blocks[start]["id"], blocks[members[-1]]["id"]))
+    if not runs:
+        return
+    sections = _ensure_sections(tr)
+    for first, last in runs:
+        for target in _isolate(tr, sections, layouts, first, last):
+            section = next(x for x in sections if x["id"] == target)
+            _apply(section, layouts.setdefault(target, {}), {"columns": 1})
+            if not layouts[target]:
+                layouts.pop(target)
+    sections = _coalesce(tr, sections, layouts)
+    tr.doc["sections"] = sections
+    ops.repair_sections(tr)
+    _write_layouts(tr, layouts, sections)
 
 
 def reconcile(tr: Tracker) -> None:
     """Keep the extension in step with the sections: drop layouts of sections that are gone and widths that no longer match the column count."""
+    _scripture_sync(tr)
     mine = ((tr.doc.get("extensions") or {}).get(WRITER_EXT) or {})
     if not mine.get(LAYOUTS):
         return

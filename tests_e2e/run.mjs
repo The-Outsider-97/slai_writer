@@ -164,8 +164,7 @@ await scenario("bold and heading formatting are stored in the document", async (
   await page.keyboard.press("Control+b");
   await until(async () => { const b = (await state()).blocks[0]; return (b.spans ?? []).some((s) => s.type === "format" && s.bold && s.start === 0 && s.end === 5); }, "a bold span over Alpha");
   await page.keyboard.press("End"); await page.keyboard.press("Enter"); await page.keyboard.type("Chapter");
-  await page.locator(".etop .searchbtn").click(); await page.getByLabel(/Search the document/).fill("/formatting bar"); await page.keyboard.press("Enter");
-  await page.getByRole("toolbar", { name: "Formatting" }).locator("select").first().selectOption({ label: "Heading 1" });
+  await page.getByRole("toolbar", { name: "Formatting" }).getByLabel("Paragraph style", { exact: true }).selectOption({ label: "Heading 1" });   // the first select is the formatting scope
   await until(async () => (await state()).blocks.some((b) => b.type === "heading" && b.text === "Chapter"), "a Heading 1 block");
 });
 

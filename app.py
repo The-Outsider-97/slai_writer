@@ -69,6 +69,7 @@ PREF_SCHEMA = {
     "show_guides": Pref(bool),
     "spell": Pref(bool),
     "grammar": Pref(bool),
+    "style": Pref(bool),
     "ai_enabled": Pref(bool),
     "ai_cloud": Pref(bool),
     "ai_notes": Pref(bool),
@@ -85,7 +86,7 @@ PREF_SCHEMA = {
 PREF_DEFAULTS: dict[str, Any] = {
     "theme": "system", "scale": 1.0, "motion": "system", "autosave": True, "autosave_seconds": 60, "language": "en", "page_size": "A4",
     "orientation": "portrait", "units": "mm", "zoom": 100, "zoom_mode": "height", "show_rulers": True, "show_guides": True, "spell": True,
-    "grammar": True, "ai_enabled": False, "ai_cloud": False, "ai_notes": False, "ai_budget": 0, "side_panel": False,
+    "grammar": True, "style": False, "ai_enabled": False, "ai_cloud": False, "ai_notes": False, "ai_budget": 0, "side_panel": False,
     "cursor_default": "default", "cursor_drag": "grab", "cursor_draw": "crosshair", "cursor_text": "text", "last_folder": "", "wizard_done": False, "lookup_online": False,
 }
 
@@ -169,6 +170,32 @@ class WriterApp:
     # -------------------------------------------------------------------------------------------------------- state
     def preferences(self) -> dict[str, Any]:
         return {**PREF_DEFAULTS, **self.prefs.snapshot()}
+
+    # ---- the person's own words, kept across documents (a document's own dictionary lives in the document)
+    def user_dictionary(self) -> list[str]:
+        path = self.settings.data_dir / "user_dictionary.txt"
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            return []
+        cached = getattr(self, "_user_words", None)
+        if cached is None or cached[0] != stamp:
+            try:
+                words = [w for w in (line.strip() for line in path.read_text(encoding="utf-8").splitlines()) if w and not w.startswith("#")][:5000]
+            except OSError:
+                words = []
+            self._user_words = cached = (stamp, words)
+        return list(cached[1])
+
+    def add_user_word(self, word: str) -> list[str]:
+        words = sorted({*self.user_dictionary(), word})[:5000]
+        path = self.settings.data_dir / "user_dictionary.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text("\n".join(words) + "\n", encoding="utf-8")
+        tmp.replace(path)
+        self._user_words = None
+        return words
 
     def profile_of(self, req: Request) -> tuple[str, dict[str, Any] | None]:
         """``(profile id, account)``: the signed-in account, or the guest profile."""

@@ -192,24 +192,69 @@ try {
     eq((await layouts() ? Object.values(await layouts())[0].widths_mm : null), [30, 60, 40], "widths kept");
   });
 
-  await scenario("Scripture: style on the passage, two columns around it, one undo each, repeat changes nothing", async () => {
+  const homeTab = async () => { await page.getByRole("tab", { name: "Home" }).click(); await delay(100); };
+  const styleSelect = () => page.locator(".format-ribbon:visible").getByLabel("Paragraph style");
+  const chooseStyle = async (value) => { await homeTab(); await styleSelect().selectOption(value); };
+  const columnsOf = async () => { const st = await state(); const by = Object.fromEntries((st.document.sections ?? []).map((x) => [x.id, x.columns ?? 1])); return st.blocks.map((b) => by[b.section] ?? 1); };
+
+  await scenario("Scripture is a paragraph style on the Home tab; the Layout tab has no Scripture button", async () => {
+    await fresh(6);
+    await para(2).click();
+    await layoutTab();
+    eq(await page.locator(".format-ribbon:visible").getByRole("button", { name: /^Scripture/ }).count(), 0, "no Scripture button in Layout");
+    await homeTab();
+    const options = await styleSelect().locator("option").allTextContents();
+    ok(options.indexOf("Scripture") > options.indexOf("Heading 3") - 1 && options.includes("Normal text") && options.includes("Title") && options.includes("Subtitle"), "Scripture sits with the other paragraph styles: " + options);
+    eq(options.filter((o) => o === "Scripture").length, 1, "listed once");
+  });
+
+  await scenario("Scripture: style on the passage, two columns around it, repeat changes nothing, one style definition", async () => {
     await fresh(6);
     await para(2).click();
     await page.keyboard.down("Shift"); await para(3).click(); await page.keyboard.up("Shift");
-    await layoutTab();
-    await page.getByRole("button", { name: /^Scripture/ }).click();
+    await chooseStyle("scripture");
     await until(async () => (await state()).document.styles?.paragraph?.Scripture, "style defined");
     const st = (await state());
     eq(st.document.styles.paragraph.Scripture, { font_family: "Times New Roman", font_size_pt: 11, italic: true, align: "left" }, "style properties");
     eq(st.blocks.filter((b) => b.style === "Scripture").map((b) => b.id), ["p2", "p3"], "styled paragraphs");
     await until(async () => (await sections()).length === 3, "two-column section around it");
+    eq(await columnsOf(), [1, 1, 2, 2, 1, 1], "columns per paragraph");
     await delay(400);
     const look = await para(2).evaluate((el) => { const c = getComputedStyle(el); return { f: c.fontFamily, s: c.fontSize, i: c.fontStyle, a: c.textAlign, d: c.direction }; });
     ok(/Times New Roman/.test(look.f) && look.i === "italic" && look.d === "ltr", `rendered as Scripture ${JSON.stringify(look)}`);
+    eq(await styleSelect().inputValue(), "scripture", "the style list shows Scripture at the caret");
     const before = JSON.stringify((await state()).blocks) + JSON.stringify(await sections());
-    await page.getByRole("button", { name: /^Scripture/ }).click();
+    await chooseStyle("scripture");
     await delay(600);
     eq(JSON.stringify((await state()).blocks) + JSON.stringify(await sections()), before, "applying it again changes nothing");
+  });
+
+  await scenario("Scripture: keep typing, switch to Normal text and Heading, undo, redo and reopen", async () => {
+    await fresh(6);
+    await para(2).click();
+    await chooseStyle("scripture");
+    await until(async () => (await sections()).length === 3, "section");
+    await para(2).click(); await page.keyboard.press("End"); await page.keyboard.press("Enter"); await delay(300); await page.keyboard.type("Typed after the verse");
+    await until(async () => (await state()).blocks.some((b) => b.text.startsWith("Typed after the verse") && b.style === "Scripture"), "the new paragraph keeps the style").catch(async (e) => { throw new Error(e.message + " " + JSON.stringify((await state()).blocks.map((b) => [b.id, b.text.slice(-30), b.style]))); });
+    eq((await columnsOf()).filter((c) => c === 2).length, 2, "both paragraphs are in the two-column section");
+    // switch the typed paragraph back to Normal text: it leaves the columns, the verse keeps them
+    await chooseStyle("paragraph");
+    await until(async () => !(await state()).blocks.some((b) => b.text.startsWith("Typed after the verse") && b.style === "Scripture"), "style removed");
+    eq(await columnsOf(), [1, 1, 2, 1, 1, 1, 1], "only the verse is in two columns");
+    await page.keyboard.press("Control+z");
+    await until(async () => JSON.stringify(await columnsOf()) === "[1,1,2,2,1,1,1]", "undo brings style and columns back together");
+    await page.keyboard.press("Control+y");
+    await until(async () => JSON.stringify(await columnsOf()) === "[1,1,2,1,1,1,1]", "redo");
+    // a heading
+    await para(2).click(); await chooseStyle("h1");
+    await until(async () => (await state()).blocks[2].type === "heading", "heading");
+    eq(await columnsOf(), [1, 1, 1, 1, 1, 1, 1], "no columns left once nothing is Scripture");
+    eq((await sections()).length, 1, "and no stray sections");
+    await chooseStyle("scripture");
+    await until(async () => (await state()).blocks[2].style === "Scripture", "Scripture again");
+    await page.reload(); await page.locator("#main").waitFor(); await delay(500);
+    eq((await columnsOf())[2], 2, "after reopening");
+    ok((await state()).document.styles.paragraph.Scripture, "definition saved");
   });
 
   await scenario("balance spreads a short text over both columns; right-to-left flow starts at the right", async () => {

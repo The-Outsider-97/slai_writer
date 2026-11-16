@@ -27,7 +27,7 @@ MAX_TABLE_CELLS = 20_000
 WRITER_EXT = "slai.writer"
 SEMANTIC_STYLES = frozenset({"Body Text", "Quote", "Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"}
                              | {f"Heading {n}" for n in range(1, 7)} | {f"TOC Level {n}" for n in range(1, 7)})
-EXT_KEYS = ("guides", "background", "layers", "layer_of", "view", "dictionary", "spell_ignore", "signature_marks", "locks", "versions", "source_status")
+EXT_KEYS = ("guides", "background", "layers", "layer_of", "view", "dictionary", "spell_ignore", "proof_ignore", "signature_marks", "locks", "versions", "source_status")
 _NAME = re.compile(r"^[A-Za-z][A-Za-z0-9 _.-]{0,63}$")
 _COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
 _FONT_FAMILY = re.compile(r"^[^\x00-\x1f\x7f{};<>\\\"'`]{1,100}$")
@@ -517,6 +517,7 @@ def op_block_delete(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
         raise OpError("Choose the blocks to delete")
     for block_id in ids:
         tr.peek(block_id)
+    _guard_textbox_blocks(tr, ids, "deleted")
     removed = set(ids)
     toc_extension = "slai.sldc.toc"
     # A deleted heading must not leave its generated contents entry or a
@@ -621,6 +622,7 @@ def op_move(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     moving = op.get("blocks") if isinstance(op.get("blocks"), list) else [op.get("block")]
     for m in moving:
         tr.peek(m)
+    _guard_textbox_blocks(tr, moving, "moved")
     after = op.get("after")
     if after is not None and after not in ids:
         raise OpError(f"There is no block {after!r}")
@@ -710,6 +712,17 @@ def _check_figure_props(tr: Tracker, block_id: str, props: dict[str, Any]) -> No
             raise OpError("Only a block anchor has a target")
 
 
+def _guard_textbox_blocks(tr: Tracker, ids: list[Any], action: str) -> None:
+    """A pinned text box does not move and a locked one is not moved or deleted, whichever operation asks."""
+    from .shape_validation import SHAPE_KEY
+    for ident in ids:
+        box = ((tr.peek(ident).get("extensions") or {}).get(SHAPE_KEY) or {}).get("textbox") or {}
+        if box.get("locked"):
+            raise OpError(f"This text box is locked, so it cannot be {action}. Unlock it first.")
+        if box.get("pinned") and action == "moved":
+            raise OpError("This text box is pinned, so it cannot be moved. Unpin it first.")
+
+
 @handler("shape_set")
 def op_shape_set(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     """Replace a shape atomically using the existing block transaction and undo machinery."""
@@ -718,6 +731,12 @@ def op_shape_set(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     if block["type"] != "paragraph" or SHAPE_KEY not in block.get("extensions", {}):
         raise OpError("This block is not a vector shape")
     shape = validate_shape(op.get("shape"))
+    old = block["extensions"][SHAPE_KEY]
+    old_box, new_box = (old.get("textbox") or {}), (shape.get("textbox") or {})
+    if old_box.get("locked") and new_box.get("locked") and old != shape:
+        raise OpError("This text box is locked. Unlock it before changing it.")
+    if old_box.get("pinned") and new_box.get("pinned") and old.get("layout") != shape.get("layout"):
+        raise OpError("This text box is pinned. Unpin it before moving it.")
     block["extensions"][SHAPE_KEY] = shape
     return {}
 
@@ -1094,6 +1113,9 @@ def op_ext_set(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
             _check_layer_of(value)
         if value is not None and key == "guides":
             _check_guides(value)
+        if value is not None and key == "proof_ignore":
+            if not isinstance(value, list) or len(value) > 1000 or any(not isinstance(x, str) or not 0 < len(x) <= 160 for x in value):
+                raise OpError("proof_ignore must be a list of up to 1000 short strings")
         if value is None:
             mine.pop(key, None)
         else:

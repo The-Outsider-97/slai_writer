@@ -9,6 +9,8 @@ to Writer's sessions and adds the honest account the person needs: what each for
 """
 from __future__ import annotations
 
+import math
+
 import base64
 import copy
 import io
@@ -140,6 +142,10 @@ class Exchange:
                     shape = (block.get("extensions") or {}).get(SHAPE_KEY)
                     if shape is None:
                         continue
+                    if shape.get("textbox") or (shape.get("outline") or {}).get("style") == "double":
+                        # Paragraph styles, lists and double borders are beyond the native adapters; the measured raster is used.
+                        native = False
+                        break
                     shadows = shape.get("shadows") or []
                     advanced_runs = any(
                         any(key in s for key in ("font_size_pt","font_family","strike","background",
@@ -193,9 +199,19 @@ class Exchange:
                 if text and shape.get("kind") == "line":
                     add("warn", "shape_line_text", "Line labels currently have limited support in visual exports.", block["id"])
                 layout = shape.get("layout") or {}
+                if shape.get("textbox"):
+                    box = shape["textbox"]
+                    text = "\n".join(p["text"] for p in box["paragraphs"])
+                    if target in ("pdf", "docx", "odt", "rtf", "html"):
+                        add("info", "textbox_export", "Text boxes are exported as pictures of their text in this format, so the text there is not editable or searchable. Keep the SLDC source.", block["id"])
+                    if not box.get("auto_expand"):
+                        t = shape["text"]
+                        lines = sum(max(1, math.ceil(len(p["text"]) * float(t["font_size_pt"]) * 0.5 * 0.3528 / max(1.0, float(shape["width_mm"]) - 2 * float(t["padding_mm"])))) for p in box["paragraphs"])
+                        if lines * float(t["font_size_pt"]) * 1.25 * 0.3528 > float(shape["height_mm"]) - 2 * float(t["padding_mm"]):
+                            add("info", "textbox_overflow", "This text box's text may be taller than the box. Enlarge it or turn on Auto-expand.", block["id"])
                 if layout.get("wrap") == "square":
                     add("warn", "shape_square_wrap", "The Writer page layout cannot perform true square wrapping around this shape. Verify foreign-format layout.", block["id"])
-                if text and shape.get("text", {}).get("fit", "keep") == "keep":
+                if text and not shape.get("textbox") and shape.get("text", {}).get("fit", "keep") == "keep":
                     t = shape["text"]
                     # Conservative estimate: actual font metrics and character
                     # widths vary. This reports risk, not verified overflow.

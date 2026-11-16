@@ -19,7 +19,7 @@ SHAPE_KINDS = frozenset({"rectangle", "ellipse", "line", "triangle", "diamond",
                          "pentagon", "hexagon", "star", "arrow", "plus"})
 _HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 _ALLOWED = frozenset({"version", "kind", "width_mm", "height_mm", "rotation_deg", "fill",
-                       "outline", "opacity", "corners_mm", "text", "shadows", "layout", "z_index", "group_id", "flip_horizontal", "flip_vertical"})
+                       "outline", "opacity", "corners_mm", "text", "shadows", "layout", "z_index", "group_id", "flip_horizontal", "flip_vertical", "textbox"})
 
 
 def _object(value: Any, name: str, keys: set[str] | frozenset[str]) -> dict[str, Any]:
@@ -46,6 +46,100 @@ def _color(value: Any, name: str) -> None:
 def _bool(value: Any, name: str) -> None:
     if not isinstance(value, bool):
         raise OpError(f"{name} must be boolean")
+
+
+def _validate_spans(spans: list[Any], content: str, name: str) -> None:
+    """Format spans over ``content``; offsets are UTF-16 code units, like the browser's."""
+    utf16_length = len(content.encode("utf-16-le", errors="surrogatepass")) // 2
+    for index, entry in enumerate(spans):
+        span = _object(entry, f"{name}.spans[{index}]",
+                       {"type", "start", "end", "bold", "italic", "underline", "strike",
+                        "superscript", "subscript", "color", "background",
+                        "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"})
+        if span.get("type") != "format":
+            raise OpError("Shape text supports format spans only")
+        start, end = span.get("start"), span.get("end")
+        if (type(start) is not int or type(end) is not int
+                or not 0 <= start < end <= utf16_length):
+            raise OpError("Shape text formatting span has invalid offsets")
+        for key in ("bold", "italic", "underline", "strike", "superscript", "subscript"):
+            if key in span:
+                _bool(span[key], f"{name}.spans[{index}].{key}")
+        if span.get("superscript") and span.get("subscript"):
+            raise OpError("Shape text cannot be both superscript and subscript")
+        if "color" in span:
+            _color(span["color"], "span color")
+        if "background" in span:
+            _color(span["background"], "span highlight")
+        if "font_family" in span:
+            family = span["font_family"]
+            if not isinstance(family, str) or not 1 <= len(family) <= 100 or any(
+                    ch in family for ch in '\x00\r\n<>;{}'):
+                raise OpError("Invalid shape text font family")
+        if "font_size_pt" in span:
+            _num(span["font_size_pt"], "span font size", 5, 144)
+        for key in ("letter_spacing_pt", "word_spacing_pt"):
+            if key in span:
+                _num(span[key], f"span {key}", -10, 100)
+
+
+TEXTBOX_VERSION = 1
+TEXTBOX_ROLES = ("normal", "heading1", "heading2", "heading3", "quote")
+TEXTBOX_STYLE_PATTERN = re.compile(r"^[^\x00-\x1f\x7f{};<>\\\"'`]{1,100}$")
+TEXTBOX_MAX_PARAGRAPHS = 200
+TEXTBOX_MAX_CHARACTERS = 20000
+
+
+def validate_textbox(box: Any, shape: dict[str, Any]) -> None:
+    """A text box is a rectangle shape whose text is a list of styled paragraphs.
+
+    ``text.content`` stays a plain-text mirror (paragraphs joined by a newline), so a reader that
+    knows shapes but not text boxes still shows the words, and so does the legacy export path.
+    """
+    box = _object(box, "textbox", {"version", "paragraphs", "vertical_align", "auto_expand", "pinned", "locked", "name"})
+    if box.get("version") != TEXTBOX_VERSION or type(box.get("version")) is not int:
+        raise OpError("Unsupported text box schema version")
+    if shape.get("kind") != "rectangle":
+        raise OpError("A text box is always a rectangle")
+    paragraphs = box.get("paragraphs")
+    if not isinstance(paragraphs, list) or not 1 <= len(paragraphs) <= TEXTBOX_MAX_PARAGRAPHS:
+        raise OpError(f"A text box holds between 1 and {TEXTBOX_MAX_PARAGRAPHS} paragraphs")
+    total = 0
+    for index, entry in enumerate(paragraphs):
+        para = _object(entry, f"textbox.paragraphs[{index}]",
+                       {"text", "role", "style", "align", "list", "spans", "line_height", "space_after_pt"})
+        text = para.get("text")
+        if not isinstance(text, str) or "\n" in text or "\r" in text:
+            raise OpError("Text box paragraph text must be a single line of text")
+        total += len(text) + 1
+        if para.get("role", "normal") not in TEXTBOX_ROLES:
+            raise OpError("Unsupported text box paragraph role")
+        if "style" in para and (not isinstance(para["style"], str) or not TEXTBOX_STYLE_PATTERN.fullmatch(para["style"])):
+            raise OpError("Invalid text box paragraph style name")
+        if para.get("align", "left") not in ("left", "center", "right", "justify"):
+            raise OpError("Unsupported text box paragraph alignment")
+        if para.get("list", "none") not in ("none", "bullet", "number"):
+            raise OpError("Unsupported text box list kind")
+        if "line_height" in para:
+            _num(para["line_height"], "textbox line_height", 0.8, 3)
+        if "space_after_pt" in para:
+            _num(para["space_after_pt"], "textbox space_after_pt", 0, 72)
+        spans = para.get("spans", [])
+        if not isinstance(spans, list) or len(spans) > 300:
+            raise OpError("A text box paragraph allows at most 300 formatting spans")
+        _validate_spans(spans, text, f"textbox.paragraphs[{index}]")
+    if total - 1 > TEXTBOX_MAX_CHARACTERS:
+        raise OpError(f"A text box holds at most {TEXTBOX_MAX_CHARACTERS} characters")
+    if box.get("vertical_align", "top") not in ("top", "middle", "bottom"):
+        raise OpError("Unsupported text box vertical alignment")
+    for key in ("auto_expand", "pinned", "locked"):
+        if key in box:
+            _bool(box[key], f"textbox.{key}")
+    if "name" in box and (not isinstance(box["name"], str) or not 1 <= len(box["name"]) <= 80
+                          or any(ord(c) < 32 for c in box["name"])):
+        raise OpError("Text box name must be 1 to 80 printable characters")
+    if shape["text"]["content"] != "\n".join(p["text"] for p in paragraphs):
+        raise OpError("Text box paragraphs and the shape text mirror disagree")
 
 
 def validate_shape(value: Any) -> dict[str, Any]:
@@ -75,7 +169,7 @@ def validate_shape(value: Any) -> dict[str, Any]:
     _num(outline.get("opacity"), "outline.opacity", 0, 1)
     _num(outline.get("width_pt"), "outline.width_pt", 0.1, 72)
     _bool(outline.get("enabled"), "outline.enabled")
-    if outline.get("style") not in ("solid", "dashed", "dotted"):
+    if outline.get("style") not in ("solid", "dashed", "dotted", "double"):
         raise OpError("Unsupported outline style")
 
     corners = shape.get("corners_mm")
@@ -90,7 +184,7 @@ def validate_shape(value: Any) -> dict[str, Any]:
         raise OpError("Corner radii overlap")
 
     text = _object(shape.get("text"), "text",
-                   {"content", "color", "font_size_pt", "bold", "italic", "align", "padding_mm", "spans", "fit"})
+                   {"content", "color", "font_size_pt", "bold", "italic", "align", "padding_mm", "spans", "fit", "font_family"})
     if not isinstance(text.get("content"), str) or len(text["content"]) > 4000:
         raise OpError("Shape text must be at most 4000 characters")
     _color(text.get("color"), "text.color")
@@ -100,42 +194,19 @@ def validate_shape(value: Any) -> dict[str, Any]:
     _bool(text.get("italic"), "text.italic")
     if text.get("align") not in ("left", "center", "right"):
         raise OpError("Unsupported text alignment")
+    if "font_family" in text:
+        family = text["font_family"]
+        if not isinstance(family, str) or not 1 <= len(family) <= 100 or any(ch in family for ch in '\x00\r\n<>;{}'):
+            raise OpError("Invalid shape text font family")
     if text.get("fit", "keep") not in ("keep", "shrink"):
         raise OpError("text.fit must be keep or shrink")
     spans = text.get("spans", [])
     if not isinstance(spans, list) or len(spans) > 300:
         raise OpError("Shape text allows at most 300 formatting spans")
-    utf16_length = len(text["content"].encode("utf-16-le", errors="surrogatepass")) // 2
-    for index, entry in enumerate(spans):
-        span = _object(entry, f"text.spans[{index}]",
-                       {"type", "start", "end", "bold", "italic", "underline", "strike",
-                        "superscript", "subscript", "color", "background",
-                        "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"})
-        if span.get("type") != "format":
-            raise OpError("Shape text supports format spans only")
-        start, end = span.get("start"), span.get("end")
-        if (type(start) is not int or type(end) is not int
-                or not 0 <= start < end <= utf16_length):
-            raise OpError("Shape text formatting span has invalid offsets")
-        for key in ("bold", "italic", "underline", "strike", "superscript", "subscript"):
-            if key in span:
-                _bool(span[key], f"text.spans[{index}].{key}")
-        if span.get("superscript") and span.get("subscript"):
-            raise OpError("Shape text cannot be both superscript and subscript")
-        if "color" in span:
-            _color(span["color"], "span color")
-        if "background" in span:
-            _color(span["background"], "span highlight")
-        if "font_family" in span:
-            family = span["font_family"]
-            if not isinstance(family, str) or not 1 <= len(family) <= 100 or any(
-                    ch in family for ch in '\\x00\\r\\n<>;{}'):
-                raise OpError("Invalid shape text font family")
-        if "font_size_pt" in span:
-            _num(span["font_size_pt"], "span font size", 5, 144)
-        for key in ("letter_spacing_pt", "word_spacing_pt"):
-            if key in span:
-                _num(span[key], f"span {key}", -10, 100)
+    _validate_spans(spans, text["content"], "text")
+
+    if "textbox" in shape:
+        validate_textbox(shape["textbox"], shape)
 
     layout = shape.get("layout")
     if layout is not None:

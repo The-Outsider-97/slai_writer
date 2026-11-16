@@ -46,6 +46,7 @@ try {
   await page.getByRole("button", { name: "New Page" }).first().click();
   await page.getByRole("button", { name: "Create document" }).click();
   await page.locator("#main").waitFor();
+  await page.waitForFunction(() => document.activeElement?.closest?.(".sheets"));   // the page takes the focus a frame after it appears
   await page.keyboard.type("Timeline");
   await page.keyboard.press("Enter");
   await page.keyboard.type("/");

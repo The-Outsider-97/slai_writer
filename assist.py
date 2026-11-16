@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..tools.errors import BadRequest, Conflict, DependencyMissing, Forbidden, NotFound
+from .proofing import Proofreader, split_language
 from .session import DocumentSession, sldc
 from .textmodel import OBJ
 
@@ -65,6 +66,7 @@ class Assist:
         self._spell_error: str | None = None
         self._grammar: Any = None
         self._grammar_error: str | None = None
+        self._proof: Proofreader | None = None
         self._lock = threading.Lock()
         self._grammar_run_lock = threading.RLock()
         self.proposals: dict[str, dict[str, Any]] = {}
@@ -116,42 +118,65 @@ class Assist:
                 raise DependencyMissing(self._spell_error, hint="Spelling is optional; you can keep writing without it.") from exc
             return self._spell
 
-    def spelling(self, session: DocumentSession, blocks: list[str] | None = None, limit: int = 400) -> dict[str, Any]:
-        checker = self._checker()
-        language = (session.doc.get("language") or "en").split("-")[0].lower()
-        supported = str(getattr(checker, "language", "en")).split("-")[0].lower()
-        if language != supported:
-            return {"available": False, "reason": f"SLAI's spell checker has a {supported.upper()} word list; this document is in {language.upper()}, so it was not checked.",
-                    "issues": [], "version": session.version}
+    def _proofreader(self) -> Proofreader:
+        with self._lock:
+            if self._proof is None:
+                self._proof = Proofreader(slai_root=getattr(self.app, "root", None), data_dir=getattr(getattr(self.app, "settings", None), "data_dir", None),
+                                          spell_provider=self._checker, grammar_provider=self._slai_grammar)
+            return self._proof
+
+    def proofread(self, session: DocumentSession, kinds: tuple[str, ...] = ("spelling", "grammar", "style"), blocks: list[str] | None = None, limit: int = 400,
+                  language: str | None = None) -> dict[str, Any]:
+        """Spelling, grammar and style for the document (or the given blocks) in one pass.
+
+        SLAI's spell checker and grammar processor are providers inside Writer's own layer (``proofing.py``): their findings are checked and normalised
+        there before anything is returned, and Writer's own rules keep working when SLAI's components are not installed.
+        """
+        tag = language or session.doc.get("language") or "en"
+        base, _locale = split_language(tag)
+        proof = self._proofreader()
+        want = set(kinds)
+        spell_error: DependencyMissing | None = None
+        if "spelling" in want and base == "en":
+            try:
+                self._checker()
+            except DependencyMissing as exc:
+                spell_error = exc
+                if proof.lexicon("en") is None:
+                    raise                                    # nothing can check spelling: say so (the panel shows the reason), as before
         ext = (session.doc.get("extensions") or {}).get("slai.writer", {}) or {}
-        known = {w.lower() for w in [*ext.get("dictionary", []), *ext.get("spell_ignore", [])] if isinstance(w, str)}
-        issues: list[dict[str, Any]] = []
+        known = [w for w in [*ext.get("dictionary", []), *ext.get("spell_ignore", []), *(getattr(self.app, "user_dictionary", None) or (lambda: []))()] if isinstance(w, str)]
+        ignored = [r for r in ext.get("proof_ignore", []) if isinstance(r, str)]
         with session.lock:
             version = session.version
-            targets = [b for b in session.doc["blocks"] if b["type"] in ("paragraph", "heading", "list_item", "quote") and (not blocks or b["id"] in blocks)]
-            snapshot = [(b["id"], b["text"]) for b in targets]
-        for block_id, text in snapshot:
-            if not text.strip():
-                continue
-            clean = text.replace(OBJ, " ")
-            for match in _WORD.finditer(clean):
-                word = match.group(0)
-                if word.lower() in known or len(word) < 3 or word.isupper() or any(c.isdigit() for c in word):
-                    continue
-                result = checker.check(word)
-                if not getattr(result, "checkable", True) or getattr(result, "is_correct", True):
-                    continue
-                suggestions = [s.word for s in getattr(result, "suggestions", ())][:5]
-                issues.append({"kind": "spelling", "block": block_id, "start": match.start(), "end": match.end(), "text": word, "suggestions": suggestions,
-                               "source": "SLAI spell checker"})
-                if len(issues) >= limit:
-                    return {"available": True, "issues": issues, "version": version, "truncated": True}
-        return {"available": True, "issues": issues, "version": version, "truncated": False}
+            everything = [(b["id"], b["text"], b["type"]) for b in session.doc["blocks"]]
+            wanted = set(blocks) if blocks else None
+            targets = [(i, t, ty) for i, t, ty in everything if ty in ("paragraph", "heading", "list_item", "quote") and (wanted is None or i in wanted)]
+        if "grammar" in want and sum(len(t) for _, t, _ in targets) > 100_000:
+            raise BadRequest("Select a smaller portion for local grammar checking.", details={"limit": 100_000})
+        if base not in ("en", "nl") and (proof.lexicon(base) is None):
+            return {"available": False, "reason": f"Writer can proofread English and Dutch; this document is {base.upper()}, so it was not checked.", "issues": [], "version": version,
+                    "providers": [], "language": tag}
+        with self._grammar_run_lock:
+            result = proof.check(targets[:MAX_BLOCKS * 10] if "grammar" in want and self._gateway is not None else targets, language=tag, all_blocks=everything, kinds=want,
+                                 known_words=known, ignore_rules=ignored, limit=limit)
+        reason = result.reason
+        if spell_error is not None and "spelling" in want:
+            reason = " ".join(x for x in (reason, str(spell_error.message if hasattr(spell_error, "message") else spell_error)) if x)
+        grammar_ran = "SLAI grammar processor" in result.providers
+        return {"available": result.available, "issues": result.issues, "version": version, "truncated": result.truncated, "reason": reason, "providers": result.providers,
+                "skipped": result.skipped, "language": tag, "source": "SLAI grammar processor" if grammar_ran else "Writer proofreading"}
 
-    def add_to_dictionary(self, session: DocumentSession, word: str) -> dict[str, Any]:
+    def spelling(self, session: DocumentSession, blocks: list[str] | None = None, limit: int = 400, language: str | None = None) -> dict[str, Any]:
+        return self.proofread(session, ("spelling",), blocks, limit, language)
+
+    def add_to_dictionary(self, session: DocumentSession, word: str, scope: str = "document") -> dict[str, Any]:
         word = (word or "").strip()
         if not _WORD.fullmatch(word) or len(word) > 64:
             raise BadRequest("Enter one word.")
+        if scope == "user":
+            self.app.add_user_word(word)                                  # kept on this computer, for every document
+            return {"ok": True, "scope": "user", "version": session.version}
         ext = (session.doc.get("extensions") or {}).get("slai.writer", {}) or {}
         words = sorted({*ext.get("dictionary", []), word})[:2000]
         return session.apply({"op": "ext_set", "values": {"dictionary": words}}, None)
@@ -211,21 +236,8 @@ class Assist:
                 raise DependencyMissing(self._grammar_error, hint="Install SLAI's language dependencies; writing remains available.") from exc
             return self._grammar
 
-    def grammar(self, session: DocumentSession, blocks: list[str] | None = None, limit: int = 200) -> dict[str, Any]:
-        # Grammar is an ordinary local editor tool, not an AI proposal. The
-        # opt-in AI/privacy gate continues to apply to generative tasks only.
-        language = (session.doc.get("language") or "en").split("-")[0].lower()
-        if language != "en":
-            return {"available": False, "reason": f"Local grammar rules support English; this document is {language.upper()}.",
-                    "issues": [], "version": session.version}
-        with session.lock:
-            version = session.version
-            snapshot = [(b["id"], b["text"]) for b in session.doc["blocks"]
-                        if b["type"] in ("paragraph", "heading", "list_item", "quote") and b["text"].strip() and (not blocks or b["id"] in blocks)][:MAX_BLOCKS]
-        if sum(len(t) for _, t in snapshot) > 100_000:
-            raise BadRequest("Select a smaller portion for local grammar checking.", details={"limit": 100_000})
-        issues: list[dict[str, Any]] = []
-
+    def _slai_grammar(self, snapshot: list[tuple[str, str]]) -> list[dict[str, Any]]:
+        """SLAI's grammar processor as a provider: raw findings only. Validation, ranking and dedupe happen in ``proofing.py``."""
         def analyse(agent: Any) -> list[dict[str, Any]]:
             found: list[dict[str, Any]] = []
             seen: set[tuple[str, int, int, str]] = set()
@@ -236,9 +248,7 @@ class Assist:
                 deps = list(getattr(result, "dependencies", ()) or [])
                 analysis = agent.grammar_processor.analyze_tokens(tokens, dependencies=deps, full_text_snippet=clean)
                 for issue in getattr(analysis, "issues", ()) or ():
-                    # The grammar processor may emit exploratory or stylistic
-                    # findings. Only render a concrete, localized correction
-                    # backed by sufficiently strong evidence as a grammar mark.
+                    # Only a concrete, localised correction backed by strong evidence is passed on; the rest is exploratory output.
                     confidence = getattr(issue, "confidence", None)
                     replacement = getattr(issue, "replacement", None)
                     if not isinstance(confidence, (int, float)) or confidence < 0.8 or not isinstance(replacement, str) or not replacement.strip():
@@ -259,25 +269,15 @@ class Assist:
                     if marker in seen:
                         continue
                     seen.add(marker)
-                    found.append({"kind": "grammar", "block": block_id, "start": start, "end": end, "message": issue.description,
-                                  "suggestion": issue.suggestion, "replacement": issue.replacement, "severity": issue.severity,
-                                  "confidence": confidence, "rule": rule, "text": clean[start:end]})
+                    found.append({"block": block_id, "start": start, "end": end, "message": issue.description, "replacement": replacement, "confidence": confidence, "rule": rule})
             return found
 
-        try:
-            # Explicit test/integration gateways retain the historical
-            # callback contract. Normal Writer sessions use standalone local
-            # engines, without AgentGateway or permission-setting coupling.
-            # The two analysis stages intentionally share their read-mostly
-            # morphology index.  Serialize their mutable diagnostics/history
-            # bookkeeping across concurrent document requests.
-            with self._grammar_run_lock:
-                issues = self._gateway.call("language", analyse, 90) if self._gateway is not None else analyse(self._grammar_engines())
-        except Exception as exc:  # noqa: BLE001
-            reason = getattr(exc, "details", {}).get("reason") if hasattr(exc, "details") else None
-            raise DependencyMissing(f"Grammar checking is not available: {reason or getattr(exc, 'message', None) or type(exc).__name__}.",
-                                    hint="Writing is not affected. Grammar needs SLAI's language agent and its NLP resources.") from exc
-        return {"available": True, "issues": issues[:limit], "version": version, "source": "SLAI grammar processor"}
+        # Explicit test/integration gateways keep their callback contract; normal sessions use the standalone local engines (no AgentGateway, no AI permission).
+        return self._gateway.call("language", analyse, 90) if self._gateway is not None else analyse(self._grammar_engines())
+
+    def grammar(self, session: DocumentSession, blocks: list[str] | None = None, limit: int = 200, language: str | None = None) -> dict[str, Any]:
+        # Grammar and style are ordinary local editor tools, not AI proposals: the opt-in AI/privacy gate applies to generative tasks only.
+        return self.proofread(session, ("grammar", "style"), blocks, limit, language)
 
     # ------------------------------------------------------------------------------------------------ proposals
     def _budget(self) -> int:

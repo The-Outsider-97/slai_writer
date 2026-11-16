@@ -87,14 +87,19 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
     if not chars:
         return
     spans = [s for s in (text.get("spans") or []) if s.get("type") == "format"]
+    per_char = text.get("per_char")          # text boxes: paragraph alignment, spacing and leading for each character
+    valign = text.get("valign", "middle")
     styles: list[tuple[str, dict[str, Any]]] = []
     offset = 0
     for char in chars:
-        style = {"bold": text.get("bold", False), "italic": text.get("italic", False),
+        style = {"align": None, "gap_pt": 0.0, "leading": 1.25,
+                 "bold": text.get("bold", False), "italic": text.get("italic", False),
                  "color": text.get("color", "#101010"),
                  "font_size_pt": text.get("font_size_pt", 12), "underline": False,
                  "strike": False, "superscript": False, "subscript": False,
                  "background": None, "letter_spacing_pt": 0, "word_spacing_pt": 0}
+        override = per_char[len(styles)] if per_char is not None and len(styles) < len(per_char) else {}
+        style.update(override.get("base", {}))
         for span in spans:
             if span["start"] <= offset < span["end"]:
                 for key in ("bold", "italic", "color", "font_size_pt", "underline",
@@ -102,6 +107,7 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
                             "letter_spacing_pt", "word_spacing_pt"):
                     if key in span:
                         style[key] = span[key]
+        style.update({k: v for k, v in override.items() if k != "base"})
         styles.append((char, style))
         offset += 2 if ord(char) > 0xffff else 1
     fonts: dict[tuple[int, bool, bool], Any] = {}
@@ -113,12 +119,18 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
 
     layer = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer)
-    def layout(factor: float) -> tuple[list[list[tuple[str, Any, dict[str, Any], float]]], float]:
+    def layout(factor: float) -> tuple[list[list[tuple[str, Any, dict[str, Any], float]]], list[dict[str, Any]], float]:
         lines: list[list[tuple[str, Any, dict[str, Any], float]]] = [[]]
+        meta: list[dict[str, Any]] = [{"align": None, "gap": 0.0, "leading": 1.25}]
         current = 0.0
         for char, style in styles:
+            if style.get("align"):
+                meta[-1]["align"] = style["align"]
+            meta[-1]["leading"] = max(meta[-1]["leading"] if lines[-1] else 0.0, float(style.get("leading", 1.25)))
             if char == "\n":
+                meta[-1]["gap"] = float(style.get("gap_pt", 0)) * scale * 25.4 / 72 * factor
                 lines.append([])
+                meta.append({"align": None, "gap": 0.0, "leading": 1.25})
                 current = 0
                 continue
             modifier = .75 if style.get("superscript") or style.get("subscript") else 1
@@ -129,28 +141,38 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
                           + (float(style.get("word_spacing_pt", 0)) if char == " " else 0))
                           * scale * 25.4 / 72)
             if current > 0 and current + advance > width:
-                lines.append([])
-                current = 0.0
+                carry: list[tuple[str, Any, dict[str, Any], float]] = []
+                if char != " ":
+                    # Break at the last space on the line rather than in the middle of a word.
+                    cut = next((i for i in range(len(lines[-1]) - 1, 0, -1) if lines[-1][i][0] == " "), None)
+                    if cut is not None:
+                        carry = lines[-1][cut + 1:]
+                        del lines[-1][cut + 1:]
+                lines.append(carry)
+                meta.append({"align": meta[-1]["align"], "gap": 0.0, "leading": float(style.get("leading", 1.25))})
+                current = sum(item[3] for item in carry)
             lines[-1].append((char, font, style, advance))
             current += advance
-        leading = sum(max([float(font.size) * 1.25 for _, font, _, _ in line] + [12.0])
-                      for line in lines)
-        return lines, leading
+        leading = sum(max([float(font.size) * meta[i]["leading"] for _, font, _, _ in line] + [12.0]) + meta[i]["gap"]
+                      for i, line in enumerate(lines))
+        return lines, meta, leading
 
     factor = 1.0
-    lines, total_height = layout(factor)
+    lines, line_meta, total_height = layout(factor)
     if text.get("fit") == "shrink":
         for _ in range(24):
             if total_height <= height or factor <= .38:
                 break
             factor *= .93
-            lines, total_height = layout(factor)
-    current_y = y + max(0, (height - total_height) / 2)
-    align = text.get("align", "center")
-    for line in lines:
+            lines, line_meta, total_height = layout(factor)
+    spare = max(0, height - total_height)
+    current_y = y + (0 if valign == "top" else spare if valign == "bottom" else spare / 2)
+    default_align = text.get("align", "center")
+    for line_index, line in enumerate(lines):
+        align = line_meta[line_index]["align"] or default_align
         advance = sum(run[3] for run in line)
         current_x = x if align == "left" else x + max(0, width - advance) if align == "right" else x + max(0, (width - advance) / 2)
-        lead = max([float(font.size) * 1.25 for _, font, _, _ in line] + [12.0])
+        lead = max([float(font.size) * line_meta[line_index]["leading"] for _, font, _, _ in line] + [12.0])
         for char, font, style, extent in line:
             if current_y + lead <= y + height + 1:
                 inset = -font.size * .35 if style.get("superscript") else (
@@ -169,7 +191,7 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
                     draw.line([(current_x, strike_y), (current_x+extent, strike_y)],
                               fill=_rgba(style["color"], 1), width=max(1,int(font.size/14)))
             current_x += extent
-        current_y += lead
+        current_y += lead + line_meta[line_index]["gap"]
     # Strict containment: external drawing cannot paint shape text outside
     # the conservative box. The editor signals and preflight warns of overflow.
     left, top, right, bottom = round(x), round(y), round(x + width), round(y + height)
@@ -180,7 +202,73 @@ def _paint_rich_text(canvas: Any, text: dict[str, Any],
     layer.putalpha(ImageChops.multiply(layer.getchannel("A"), mask))
     canvas.alpha_composite(layer)
 
-def render_shape_png(value: dict[str, Any]) -> tuple[bytes, float]:
+ROLE_SCALE = {"heading1": 1.8, "heading2": 1.45, "heading3": 1.2}      # the editor uses the same ratios (shape.ts TEXTBOX_ROLE_SCALE)
+
+
+def resolve_paragraph_style(styles: dict[str, Any] | None, name: str | None) -> dict[str, Any]:
+    """A named paragraph style with its ``based_on`` chain folded in, parent first (as the editor does)."""
+    group = ((styles or {}).get("paragraph") or {}) if isinstance(styles, dict) else {}
+    chain: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    current = name
+    while current and current in group and current not in seen and isinstance(group[current], dict):
+        seen.add(current)
+        chain.insert(0, group[current])
+        current = group[current].get("based_on")
+    if not chain and name == "Scripture":                                # not yet defined in this document: the built-in definition, as the editor uses
+        from .columns import SCRIPTURE_PROPS
+        return dict(SCRIPTURE_PROPS)
+    merged: dict[str, Any] = {}
+    for item in chain:
+        merged.update(item)
+    return merged
+
+
+def textbox_text(shape: dict[str, Any], styles: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The painter's input for a text box: one string, the format spans moved to its offsets, and what each character inherits."""
+    text = shape["text"]
+    box = shape["textbox"]
+    base_size = float(text["font_size_pt"])
+    pieces: list[str] = []
+    spans: list[dict[str, Any]] = []
+    per_char: list[dict[str, Any]] = []
+    offset = 0                                                           # UTF-16 units, as the span offsets are
+    number = 0
+    for index, para in enumerate(box["paragraphs"]):
+        named = resolve_paragraph_style(styles, para.get("style"))
+        role = para.get("role", "normal")
+        size = float(named.get("font_size_pt", base_size * ROLE_SCALE.get(role, 1)))
+        base = {"font_size_pt": size,
+                "bold": bool(named.get("bold", text["bold"] or role.startswith("heading"))),
+                "italic": bool(named.get("italic", text["italic"] or role == "quote")),
+                "color": named.get("color", text["color"]) if isinstance(named.get("color", text["color"]), str) else text["color"]}
+        align = para.get("align") or named.get("align") or text["align"]
+        align = "left" if align == "justify" else align
+        gap = float(para.get("space_after_pt", named.get("space_after_pt", 4 if role != "normal" else 0)))
+        leading = float(para.get("line_height", named.get("line_height", 1.25)))
+        marker = ""
+        if para.get("list") == "bullet":
+            marker = "\u2022 "
+        elif para.get("list") == "number":
+            number += 1
+            marker = f"{number}. "
+        if para.get("list") != "number":
+            number = 0
+        line = marker + para["text"]
+        shift = len(marker.encode("utf-16-le")) // 2
+        for span in para.get("spans", []):
+            spans.append({**span, "start": span["start"] + offset + shift, "end": span["end"] + offset + shift})
+        last = index == len(box["paragraphs"]) - 1
+        full = line if last else line + "\n"
+        pieces.append(full)
+        for _char in full:
+            per_char.append({"base": base, "align": align, "gap_pt": gap, "leading": leading})
+        offset += len((full).encode("utf-16-le")) // 2
+    return {**text, "content": "".join(pieces), "spans": spans, "per_char": per_char,
+            "valign": box.get("vertical_align", "top"), "fit": "keep"}
+
+
+def render_shape_png(value: dict[str, Any], styles: dict[str, Any] | None = None) -> tuple[bytes, float]:
     """Return transparent PNG and its accurate full painted width in millimetres.
 
     Raster resolution is bounded by a 14 MP pixel budget. Rotations and effects
@@ -280,6 +368,11 @@ def render_shape_png(value: dict[str, Any]) -> tuple[bytes, float]:
             kernel = min(151, width_px * 2 + 1)
             eroded = mask.filter(ImageFilter.MinFilter(kernel))
             edge = ImageChops.subtract(mask, eroded)
+            if outline["style"] == "double":
+                # Two lines of the stated width with a gap of the same width between them.
+                def inset(steps: int) -> Any:
+                    return mask.filter(ImageFilter.MinFilter(min(151, width_px * 2 * steps + 1)))
+                edge = ImageChops.add(edge, ImageChops.subtract(inset(2), inset(3)))
         edge = edge.point(lambda v: round(v * outline["opacity"]))
         layer = Image.new("RGBA", canvas.size, _rgba(outline["color"], 1))
         layer.putalpha(edge)
@@ -295,8 +388,10 @@ def render_shape_png(value: dict[str, Any]) -> tuple[bytes, float]:
             canvas = ImageOps.flip(canvas)
 
     text = shape["text"]
+    if shape.get("textbox"):
+        text = textbox_text(shape, styles)
     if text["content"] and kind != "line":
-        rx, ry, rw, rh = _region(kind)
+        rx, ry, rw, rh = (0, 0, 1, 1) if shape.get("textbox") else _region(kind)
         padding = text["padding_mm"] * scale
         bx = x0 + pxw * rx + padding
         by = y0 + pxh * ry + padding
@@ -338,7 +433,7 @@ def prepare_shapes(package: Any, fmt: str, sldc: Any) -> tuple[Any, list[str]]:
         shape = block.get("extensions", {}).get(SHAPE_KEY)
         if shape is None:
             continue
-        raw, display_width = render_shape_png(shape)
+        raw, display_width = render_shape_png(shape, getattr(package, "document", {}).get("styles"))
         asset = sldc.make_asset(raw)
         output.assets[asset.id] = asset
         block["type"] = "figure"
