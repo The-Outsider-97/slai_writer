@@ -1,0 +1,103 @@
+/** The look of a table: the style gallery's rules plus what the person set by hand, resolved to the fill, text and borders of each cell.
+ *
+ *  This is the browser half of table_styles.py; tests/test_table_styles.py and tests_ts/table_styles.test.ts check both against one golden file.
+ *  Borders live on the edges of the grid (one entry per edge, never per cell), so two cells that share an edge cannot disagree about it:
+ *  an edge the person set wins, otherwise the style's rule, otherwise nothing. */
+import { TABLE_STYLES, type BorderRule, type Role } from "./table_styles_data.js";
+import { gridOf } from "./table_geometry.js";
+import type { Block, TableData } from "./types.js";
+
+export const STYLE_KEY = "slai.writer.table_style";
+export const BORDERS_KEY = "slai.writer.table_borders";
+export const CELLS_KEY = "slai.writer.table_cell_styles";
+export const LAYOUT_KEY = "slai.writer.table_layout";
+
+export interface BorderSpec { color: string; width_pt: number; style: "solid" | "dashed" | "dotted" | "double" }
+export interface TableStyleExt { preset?: string; accent?: string; header_row?: boolean; first_column?: boolean; banded_rows?: boolean; banded_columns?: boolean }
+export interface EdgeStore { h?: Record<string, BorderSpec | null>; v?: Record<string, BorderSpec | null> }
+export interface CellLook {
+  fill: string | null; color: string | null; bold: boolean;
+  borders: { top: BorderSpec | null; bottom: BorderSpec | null; left: BorderSpec | null; right: BorderSpec | null };
+}
+export type OptionKey = "header_row" | "first_column" | "banded_rows" | "banded_columns";
+export const OPTION_KEYS: readonly OptionKey[] = ["header_row", "first_column", "banded_rows", "banded_columns"];
+export type CustomStyles = Record<string, TableStyleExt>;
+
+export const GALLERY: ReadonlyArray<{ id: string; label: string; description: string }> =
+  TABLE_STYLES.order.map((id) => ({ id, label: TABLE_STYLES.presets[id]?.label ?? id, description: TABLE_STYLES.presets[id]?.description ?? "" }));
+
+/** Half-up rounding so the browser and the server compute the same colour. */
+const half = (x: number): number => Math.floor(x + 0.5);
+export function mix(colour: string, other: readonly [number, number, number], amount: number): string {
+  const rgb = [1, 3, 5].map((i) => parseInt(colour.slice(i, i + 2), 16));
+  return "#" + rgb.map((a, i) => half(a + ((other[i] as number) - a) * amount).toString(16).toUpperCase().padStart(2, "0")).join("");
+}
+export function resolveColour(spec: string | null | undefined, accent: string): string | null {
+  if (spec === null || spec === undefined) return null;
+  if (spec === "accent") return accent.toUpperCase();
+  if (spec === "accent_light") return mix(accent, [255, 255, 255], 0.85);
+  if (spec === "accent_dark") return mix(accent, [0, 0, 0], 0.35);
+  return spec.toUpperCase();
+}
+
+export interface Options { preset: string; accent: string; header_row: boolean; first_column: boolean; banded_rows: boolean; banded_columns: boolean }
+
+export function styleOptions(style: TableStyleExt | undefined, custom: CustomStyles = {}): Options {
+  let preset = style?.preset ?? "default";
+  let base: TableStyleExt = {};
+  if (preset.startsWith("custom:")) { base = custom[preset.slice(7)] ?? {}; preset = base.preset ?? "default"; }
+  if (!(preset in TABLE_STYLES.presets)) preset = "default";
+  const flags = { ...(TABLE_STYLES.presets[preset] as { defaults: Record<OptionKey, boolean> }).defaults };
+  for (const source of [base, style ?? {}]) for (const key of OPTION_KEYS) if (typeof source[key] === "boolean") flags[key] = source[key] as boolean;
+  return { preset, accent: style?.accent ?? base.accent ?? TABLE_STYLES.accent, ...flags };
+}
+
+const derived = (rule: BorderRule | undefined, accent: string): BorderSpec | null =>
+  rule ? { color: resolveColour(rule.color, accent) as string, width_pt: rule.width_pt, style: rule.style } : null;
+
+export function resolveTable(block: Pick<Block, "table" | "extensions">, custom: CustomStyles = {}): Map<string, CellLook> {
+  const table = block.table as TableData;
+  const ext = block.extensions ?? {};
+  const opt = styleOptions(ext[STYLE_KEY] as TableStyleExt | undefined, custom);
+  const preset = TABLE_STYLES.presets[opt.preset] as (typeof TABLE_STYLES.presets)[string];
+  const grid = gridOf(table);
+  const rows = grid.rows, cols = grid.columns;
+  const header = opt.header_row ? Math.min(table.header_rows ?? 0, rows) : 0;
+  const explicit = (ext[BORDERS_KEY] ?? {}) as EdgeStore;
+  const ownH = explicit.h ?? {}, ownV = explicit.v ?? {};
+  const rules = preset.borders;
+  const hEdge = (line: number, column: number): BorderSpec | null => {
+    const key = `${line},${column}`;
+    if (key in ownH) return ownH[key] ?? null;
+    const rule = line === 0 ? rules.top : line === rows ? rules.bottom : header && line === header ? (rules.header_bottom ?? rules.inside_h) : rules.inside_h;
+    return derived(rule, opt.accent);
+  };
+  const vEdge = (row: number, line: number): BorderSpec | null => {
+    const key = `${row},${line}`;
+    if (key in ownV) return ownV[key] ?? null;
+    return derived(line === 0 ? rules.left : line === cols ? rules.right : rules.inside_v, opt.accent);
+  };
+  const own = (ext[CELLS_KEY] ?? {}) as Record<string, { background?: string }>;
+  const out = new Map<string, CellLook>();
+  for (const cell of grid.cells) {
+    let role: Role = {};
+    let hasRole = false;
+    if (cell.r < header) { role = preset.header; hasRole = true; }
+    else if (opt.first_column && cell.c === 0) { role = preset.first_column; hasRole = true; }
+    let fill = resolveColour(role.fill, opt.accent);
+    const color = resolveColour(role.color, opt.accent);
+    if (!hasRole) {
+      const bodyRow = cell.r - header, bodyCol = cell.c - (opt.first_column ? 1 : 0);
+      if (opt.banded_rows && bodyRow % 2 === 1) fill = resolveColour(preset.band_rows.fill, opt.accent);
+      else if (opt.banded_columns && bodyCol >= 0 && bodyCol % 2 === 1) fill = resolveColour(preset.band_columns.fill, opt.accent);
+    }
+    const key = `${cell.row},${cell.idx}`;
+    const background = own[key]?.background;
+    if (background) fill = background.toUpperCase();
+    out.set(key, { fill, color, bold: Boolean(role.bold),
+      borders: { top: hEdge(cell.r, cell.c), bottom: hEdge(cell.r + cell.rs, cell.c), left: vEdge(cell.r, cell.c), right: vEdge(cell.r, cell.c + cell.cs) } });
+  }
+  return out;
+}
+
+export const borderCss = (b: BorderSpec | null): string => b && b.width_pt > 0 ? `${b.width_pt}pt ${b.style} ${b.color}` : "none";

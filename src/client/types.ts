@@ -22,7 +22,10 @@ export interface Span {
 }
 export interface Cell { text: string; colspan?: number; rowspan?: number; align?: "left" | "center" | "right" | "justify"; spans?: Span[] }
 export interface TableData { columns: number; header_rows?: number; rows: Cell[][] }
-export interface TableLayout { width_mm?: number; column_widths_mm?: number[]; row_heights_mm?: number[]; align?: "left" | "center" | "right" }
+export interface TableLayout {
+  width_mm?: number; column_widths_mm?: number[]; row_heights_mm?: number[]; align?: "left" | "center" | "right"; indent_mm?: number;
+  fit?: "auto" | "content" | "window" | "fixed"; row_height_rule?: "min" | "exact"; keep_rows_together?: boolean; allow_row_split?: boolean; cell_padding_mm?: number;
+}
 export interface TableCellStyle {
   valign?: "top" | "middle" | "bottom"; background?: string; padding_mm?: number;
   border_color?: string; border_width_pt?: number; border_style?: "solid" | "dashed" | "dotted" | "double" | "none"; line_height?: number;
@@ -48,11 +51,19 @@ export interface EmbedDecl {
   id: string; kind: string; schema_version: number; params?: Record<string, unknown>; inputs?: Array<{ ref: string; sha256: string }>;
   output_sha256?: string; capabilities?: unknown; policy_ref?: string; redacted?: boolean;
 }
+/** Writer's own column settings for a section (what the SLDC section fields `columns` and `column_gap_mm` cannot say). */
+export interface ColumnLayout {
+  rule?: { color?: string; width_pt?: number; style?: "solid" | "dashed" | "dotted" | "double" }; widths_mm?: number[]; balance?: boolean; flow?: "ltr" | "rtl";
+  /** The section starts on the page of the one before it (a selection that has its own columns in the middle of a page). */
+  continuous?: boolean;
+}
+export const COLUMN_BREAK = "slai.writer.column_break";
 export interface GuideSet { v?: number[]; h?: number[] }
 export interface WriterExt {
   guides?: GuideSet; background?: { color?: string; asset?: string }; layers?: Array<{ id: string; name: string; visible: boolean; locked?: boolean; custom?: boolean }>;
   /** The layer a block is on when it is not the one its kind belongs to (text on Text, pictures on Illustrations). */
   layer_of?: Record<string, string>;
+  column_layouts?: Record<string, ColumnLayout>;
   view?: Record<string, unknown>; dictionary?: string[]; spell_ignore?: string[]; locks?: Record<string, { label?: string; summary?: string }>;
   source_status?: Record<string, { status: string; date: string; note?: string }>; signature_marks?: unknown;
 }

@@ -133,7 +133,7 @@ export class ShapeTools {
     const sx=e.clientX,sy=e.clientY;
     let proposed=original,modified=false;
     const restore=():void=>{
-      for(const entry of members)entry.node.setAttribute("style",originals.get(entry.id)??"");
+      for(const entry of members)entry.node.style.cssText=originals.get(entry.id)??"";
       this.refresh();
     };
     const preview=(result:typeof original):void=>{

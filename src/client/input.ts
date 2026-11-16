@@ -309,8 +309,13 @@ export function installInput(ed: Editor): () => void {
     const layout = block?.extensions?.["slai.writer.table_layout"] as { column_widths_mm?: number[]; row_heights_mm?: number[] } | undefined;
     const width = hit.table.getBoundingClientRect().width / MM_PX / ed.page.zoom / count;
     const widths = layout?.column_widths_mm?.length === count ? [...layout.column_widths_mm] : Array(count).fill(width) as number[];
-    const rows = Array.from(hit.table.rows);
-    const heights = layout?.row_heights_mm?.length === rows.length ? [...layout.row_heights_mm] : rows.map((tr) => tr.getBoundingClientRect().height / MM_PX / ed.page.zoom);
+    const total = block?.table?.rows.length ?? hit.table.rows.length;      // a table cut across pages is in several pieces: rows are found by their number
+    const rowOf = (r: number): HTMLTableRowElement | null => {
+      for (let c = 0; c < 64; c += 1) { const cell = ed.page.cellEl(hit.block, r, c); if (cell) return cell.closest("tr"); }
+      return null;
+    };
+    const heights = layout?.row_heights_mm?.length === total ? [...layout.row_heights_mm]
+      : Array.from({ length: total }, (_, r) => { const tr = rowOf(r); return tr ? tr.getBoundingClientRect().height / MM_PX / ed.page.zoom : 7; });
     return { ...hit, start, widths, heights };
   };
   const previewGrid = (drag: GridDrag, delta: number): void => {
@@ -330,7 +335,8 @@ export function installInput(ed: Editor): () => void {
       drag.table.style.width = `${drag.widths.reduce((a, b) => a + b, 0)}mm`;
     } else {
       drag.heights[drag.index] = Math.max(4, (drag.heights[drag.index] ?? 4) + delta);
-      const tr = drag.table.rows[drag.index];
+      let tr: HTMLTableRowElement | null = null;
+      for (let c = 0; c < 64 && !tr; c += 1) tr = ed.page.cellEl(drag.block, drag.index, c)?.closest("tr") ?? null;
       if (tr) tr.style.height = `${drag.heights[drag.index]}mm`;
     }
   };

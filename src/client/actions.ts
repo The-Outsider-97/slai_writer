@@ -345,7 +345,7 @@ export async function enter(ed: Editor): Promise<void> {
 }
 
 export function focusCell(ed: Editor, id: string, row: number, col: number, offset?: number): void {
-  const cell = ed.els.get(id)?.querySelector<HTMLElement>(`[data-edit=cell][data-row="${row}"][data-col="${col}"]`);
+  const cell = (ed.page as Editor["page"] | undefined)?.cellEl(id, row, col) ?? ed.els.get(id)?.querySelector<HTMLElement>(`[data-edit=cell][data-row="${row}"][data-col="${col}"]`);
   if (!cell) return;
   cell.focus();
   placeCaret(cell, offset ?? cell.textContent?.length ?? 0);

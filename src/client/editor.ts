@@ -9,12 +9,13 @@
 import { announce, Emitter, uid } from "./kit.js";
 import { Decor } from "./decor.js";
 import { blockIdOf, caretAt, editableOf, placeCaret, pointFor, serialise, type CaretPoint } from "./domtext.js";
+import { columnSpec, pageGroups } from "./column_layout.js";
 import { DocModel, OpQueue, layerOf } from "./model.js";
 import { api, errorText } from "./net.js";
 import { PageView, type LayoutBlock, type PageEvents } from "./page.js";
 import { EDIT_MODE, footnoteNumbers, listMarkers, refreshBlock, renderBlock, syncLayer, type RenderContext } from "./render.js";
 import { cleanInsert, diffText, MM_PX, splitLines, toCodepoints } from "./textops.js";
-import { OBJECT_CHAR, TEXT_TYPES, type Block, type CommentThread, type DocState, type HeaderFooter, type Op, type Patch, type Prefs, type Reference } from "./types.js";
+import { COLUMN_BREAK, OBJECT_CHAR, TEXT_TYPES, type Block, type CommentThread, type DocState, type HeaderFooter, type Op, type Patch, type Prefs, type Reference } from "./types.js";
 
 export type EditorEvent =
   | { type: "patch"; patch: Patch; local: boolean }
@@ -189,7 +190,14 @@ export class Editor {
     if (!field) return wrap.querySelector<HTMLElement>("[data-edit=text]");
     if (field === "cap") return wrap.querySelector<HTMLElement>("[data-edit=caption]");
     const [r, c] = field.split(",");
-    return wrap.querySelector<HTMLElement>(`[data-edit=cell][data-row="${r}"][data-col="${c}"]`);
+    return this.page.cellEl(id, Number(r), Number(c)) ?? wrap.querySelector<HTMLElement>(`[data-edit=cell][data-row="${r}"][data-col="${c}"]`);
+  }
+
+  /** A page break, or a column break (which starts a new page in a section of one column). */
+  private breakFlags(b: Block): { page: boolean; column: boolean } {
+    const column = b.extensions?.[COLUMN_BREAK] !== undefined;
+    const cols = column ? columnSpec(this.model.meta, b.section) : null;
+    return { page: b.attributes?.["page_break_before"] === true || (column && !cols), column: column && cols !== null };
   }
 
   /** Full layout: distribute every block over the sheets. */
@@ -197,11 +205,15 @@ export class Editor {
     const ctx = this.ctx();
     const prefs = this.hooks.prefs();
     const saved = this.saveSelection();
+    const groups = pageGroups(this.model.meta);
     const blocks: LayoutBlock[] = this.model.list().map((b) => {
       const el = this.els.get(b.id) as HTMLElement;
-      el.toggleAttribute("data-break", b.attributes?.["page_break_before"] === true);
+      const cols = columnSpec(this.model.meta, b.section);
+      const flags = this.breakFlags(b);
+      el.toggleAttribute("data-break", flags.page);
+      el.toggleAttribute("data-colbreak", flags.column);
       return {
-        id: b.id, el, section: b.section, pageBreak: b.attributes?.["page_break_before"] === true,
+        id: b.id, el, section: b.section === undefined ? undefined : (groups.get(b.section) ?? b.section), pageBreak: flags.page, cols,
         footnotes: (b.spans ?? []).filter((s) => s.type === "ref" && s.ref && ctx.footnotes.has(s.ref)).map((s) => ({ n: ctx.footnotes.get(s.ref as string) as number, text: referenceText(this.model.meta.references, s.ref as string) })),
       };
     });
@@ -224,10 +236,11 @@ export class Editor {
   /** Exact TOC page labels are non-editable CSS decorations, not serialized text. */
   private paintTocNumbers(): void {
     const labels = this.printLayout?.blockLabels ?? {};
-    const titles = new Map<string, { show_page_numbers?: boolean; leader_dots?: boolean }>();
+    const titles = new Map<string, { show_page_numbers?: boolean; leader_dots?: boolean; leader?: string; align?: string }>();
     for (const block of this.model.list()) {
       const toc = block.extensions?.["slai.sldc.toc"] as { role?: string; id?: string; show_page_numbers?: boolean; leader_dots?: boolean } | undefined;
-      if (toc?.role === "title" && toc.id) titles.set(toc.id, toc);
+      const look = block.extensions?.["slai.writer.toc_style"] as { leader?: string; page_align?: string } | undefined;
+      if (toc?.role === "title" && toc.id) titles.set(toc.id, { ...toc, ...(look?.leader ? { leader: look.leader } : {}), ...(look?.page_align ? { align: look.page_align } : {}) });
     }
     for (const element of this.els.values()) {
       const heading = element.dataset["tocEntry"];
@@ -240,7 +253,9 @@ export class Editor {
       // untouched; page references are decorations on its block wrapper.
       if (label) element.dataset["tocPage"] = label;
       else delete element.dataset["tocPage"];
-      element.toggleAttribute("data-no-leaders", options?.leader_dots === false);
+      element.toggleAttribute("data-no-leaders", options?.leader_dots === false || options?.leader === "none");
+      if (options?.leader && options.leader !== "dots") element.dataset["tocLeader"] = options.leader; else delete element.dataset["tocLeader"];
+      if (options?.align && options.align !== "right") element.dataset["tocAlign"] = options.align; else delete element.dataset["tocAlign"];
     }
   }
 
@@ -580,7 +595,8 @@ export class Editor {
       const wrapper = this.els.get(id);
       if (!wrapper) { this.els.set(id, renderBlock(block, ctx)); this.sigs.set(id, SIG(block)); this.rememberFields(block); relayout = true; continue; }
       const sig = SIG(block);
-      if (wrapper.hasAttribute("data-break") !== (block.attributes?.["page_break_before"] === true)) relayout = true;   // a page break was added or removed: the pages are laid out again
+      const flags = this.breakFlags(block);
+      if (wrapper.hasAttribute("data-break") !== flags.page || wrapper.hasAttribute("data-colbreak") !== flags.column) relayout = true;   // a page or column break was added or removed: the pages are laid out again
       const textBlock = TEXT_TYPES.includes(block.type) && !block.extensions?.["slai.writer.shape"] && wrapper.dataset["type"] === block.type;
       if (textBlock) {
         const el = this.textEl(id);
@@ -626,8 +642,10 @@ export class Editor {
     const saved = this.readSelection();
     const hadFocus = wrapper.contains(document.activeElement);
     const ctx = this.ctx();
+    if (block.type === "table") this.page.dropFragments(id);              // the whole table is drawn again; the next reflow cuts it across pages
     if (!refreshBlock(wrapper, block, ctx)) {
       const fresh = renderBlock(block, ctx);
+      for (const name of ["data-colkey", "data-colbreak", "data-break"]) if (wrapper.hasAttribute(name)) fresh.setAttribute(name, wrapper.getAttribute(name) ?? "");
       wrapper.replaceWith(fresh);
       this.els.set(id, fresh);
     } else syncLayer(wrapper, block, ctx);

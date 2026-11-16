@@ -7,8 +7,13 @@ import { h, s, glyph, openMenu, promptDialog } from "./kit.js";
 import { MM_PX, roman } from "./textops.js";
 import type { PageGeometry } from "./model.js";
 import type { BandTextFormat, GuideSet, HeaderFooter, Margins } from "./types.js";
+import { regionCss, type ColumnSpec } from "./column_layout.js";
 
-export interface LayoutBlock { id: string; el: HTMLElement; section: string | undefined; pageBreak?: boolean; footnotes: Array<{ n: number; text: string }> }
+export interface LayoutBlock {
+  id: string; el: HTMLElement; section: string | undefined; pageBreak?: boolean;
+  /** The columns the block is set in (null or absent: one column). Blocks of one section share one column region. */
+  cols?: ColumnSpec | null;
+  footnotes: Array<{ n: number; text: string }> }
 
 export interface LayoutInput {
   blocks: LayoutBlock[];
@@ -119,6 +124,8 @@ export class PageView {
   sheets: Sheet[] = [];
   zoom = 1;
   private last: LayoutInput | null = null;
+  /** The column settings of the sections that have columns, by section id. */
+  private colSpecs = new Map<string, ColumnSpec>();
   private headerFooter: (section: string | undefined) => { header?: HeaderFooter; footer?: HeaderFooter; role?: string; numbering?: { start?: number; format?: string; show?: boolean } } = () => ({});
 
   constructor(private readonly events: PageEvents, editable: string) {
@@ -150,6 +157,8 @@ export class PageView {
     const keep = this.lineFocus();
     this.last = input;
     this.unit = input.unit ?? "mm";
+    this.mergeFragments();                                   // the rows of a table cut across pages go back into their table before the blocks are laid out again
+    this.colSpecs = new Map(input.blocks.flatMap((b): Array<[string, ColumnSpec]> => (b.cols ? [[b.cols.key, b.cols]] : [])));
     this.host.replaceChildren();
     this.sheets = [];
     let current: Sheet | null = null;
@@ -161,14 +170,23 @@ export class PageView {
       section = sec;
       return sheet;
     };
-    for (const block of input.blocks) {
-      if (!current || block.section !== section || (block.pageBreak && current.blocks.length > 0)) current = open(block.section);
+    for (const first of input.blocks) {
+      if (!current || first.section !== section || (first.pageBreak && current.blocks.length > 0)) current = open(first.section);
+      let block: LayoutBlock = first;
       this.place(current, block);
-      const sheet: Sheet = current;
-      if (sheet.blocks.length > 1 && sheet.body.scrollHeight > sheet.capacity + 1) {
-        this.unplace(sheet, block);
-        current = open(block.section);
-        this.place(current, block);
+      for (let guard = 0; this.overflows(current) && guard < 2000; guard += 1) {
+        const solo = current.blocks.length === 1;
+        const rest = this.tableOf(block.el) ? this.splitTable(current, block.el, solo) : null;
+        if (rest) {                                           // a table that does not fit is cut between two rows; the rest continues on the next sheet
+          current = open(first.section);
+          block = { id: block.id, el: rest, section: first.section, cols: first.cols ?? null, footnotes: [] };
+          this.place(current, block);
+        } else if (solo) break;
+        else {
+          this.unplace(current, block);
+          current = open(first.section);
+          this.place(current, block);
+        }
       }
     }
     if (!this.sheets.length) open(undefined);
@@ -201,20 +219,160 @@ export class PageView {
   }
 
   private place(sheet: Sheet, block: LayoutBlock): void {
-    sheet.body.insertBefore(block.el, sheet.foot);
+    if (block.cols) block.el.dataset["colkey"] = block.cols.key; else delete block.el.dataset["colkey"];
+    this.attach(sheet, block.el, false);
     sheet.blocks.push(block.el);
     for (const note of block.footnotes) {
       const row = h("p", { class: "fn-row", data: { n: String(note.n), owner: block.id } }, h("sup", { text: String(note.n) }), " ", note.text);
       sheet.foot.appendChild(row);
     }
     sheet.foot.toggleAttribute("data-has", sheet.foot.childElementCount > 0);
+    this.fitRegions(sheet);
   }
 
   private unplace(sheet: Sheet, block: LayoutBlock): void {
-    sheet.body.removeChild(block.el);
+    block.el.remove();
+    this.tidy(sheet);
     sheet.blocks.pop();
     for (let i = 0; i < block.footnotes.length; i += 1) sheet.foot.lastElementChild?.remove();
     sheet.foot.toggleAttribute("data-has", sheet.foot.childElementCount > 0);
+    this.fitRegions(sheet);
+  }
+
+  /* ------------------------------------------------------------------------------------------------- columns */
+  /** Put a block into the page body: straight into it, or into the column region of its section (a region is made when the block is the first of its section on this sheet). */
+  private attach(sheet: Sheet, el: HTMLElement, atStart: boolean): void {
+    const key = el.dataset["colkey"];
+    const spec = key ? this.colSpecs.get(key) : undefined;
+    const first = sheet.body.querySelector<HTMLElement>(":scope > .blk, :scope > .cols, :scope > .foot");
+    if (!key || !spec) { sheet.body.insertBefore(el, atStart ? first : sheet.foot); return; }
+    const edge = atStart ? first : sheet.foot.previousElementSibling;
+    let region = edge instanceof HTMLElement && edge.classList.contains("cols") && edge.dataset["key"] === key ? edge : null;
+    if (!region) {
+      region = h("div", { class: "cols", data: { key, flow: spec.rtl ? "rtl" : "ltr" } });
+      for (const [name, value] of Object.entries(regionCss(spec, MM_PX))) region.style.setProperty(name, value);
+      sheet.body.insertBefore(region, atStart ? first : sheet.foot);
+    }
+    if (atStart) region.insertBefore(el, region.firstChild); else region.appendChild(el);
+  }
+
+  /** Take away column regions that have no block left. */
+  private tidy(sheet: Sheet): void { for (const region of Array.from(sheet.body.querySelectorAll<HTMLElement>(":scope > .cols"))) if (!region.childElementCount) region.remove(); }
+
+  /** A region that is the last thing on its sheet is as tall as the space left (the text fills the first column to the bottom of the page, then the next);
+   *  a region with something after it on the sheet, or one set to balance, is as tall as its balanced columns need. */
+  private fitRegions(sheet: Sheet): void {
+    const base = sheet.body.getBoundingClientRect().top;
+    for (const region of Array.from(sheet.body.querySelectorAll<HTMLElement>(":scope > .cols"))) {
+      const spec = this.colSpecs.get(region.dataset["key"] ?? "");
+      if (!spec) continue;
+      const balanced = spec.balance || region.nextElementSibling !== sheet.foot;
+      region.style.setProperty("column-fill", balanced ? "balance" : "auto");
+      region.dataset["fill"] = balanced ? "balance" : "auto";
+      if (balanced) { region.style.removeProperty("height"); continue; }
+      const top = (region.getBoundingClientRect().top - base) / this.zoom;
+      const notes = sheet.foot.childElementCount ? sheet.foot.offsetHeight : 0;
+      region.style.setProperty("height", `${Math.max(24, sheet.capacity - top - notes)}px`);
+    }
+  }
+
+  /** Text that runs out of the last column of a region has nowhere to go but the next page. */
+  private regionsOverflow(sheet: Sheet): boolean {
+    return Array.from(sheet.body.querySelectorAll<HTMLElement>(":scope > .cols[data-fill=auto]")).some((r) => r.scrollWidth > r.clientWidth + 1);
+  }
+
+  /* ------------------------------------------------------------------------------------------------- tables across pages */
+  /** The table of a table block (the whole table, or the part of it that lives on this sheet). */
+  private tableOf(el: HTMLElement): HTMLTableElement | null {
+    return el.classList.contains("b-table") && !el.closest(".cols") ? el.querySelector<HTMLTableElement>(":scope > table.tbl") : null;
+  }
+
+  /** Where a table may be cut: `cuts[k]` is true when the first k rows can stay on this page, i.e. no merged cell reaches over the cut. */
+  private cuts(rows: HTMLTableRowElement[]): boolean[] {
+    const out: boolean[] = [false];
+    let carry: number[] = [];
+    for (const tr of rows) {
+      const occupied = carry.map((v) => v > 0);
+      let column = 0;
+      const next = carry.map((v) => Math.max(v - 1, 0));
+      for (const cell of Array.from(tr.cells)) {
+        while (occupied[column]) column += 1;
+        for (let k = 0; k < cell.colSpan; k += 1) next[column + k] = cell.rowSpan - 1;
+        column += cell.colSpan;
+      }
+      carry = next;
+      out.push(carry.every((v) => v === 0));
+    }
+    return out;
+  }
+
+  /** Cut `el` (a table block placed on `sheet`) so that the part left on the sheet fits. The rows that do not fit move into a new block that is returned (the caller
+   *  places it on the next sheet); it repeats the header rows. With `force` (the table is alone on a fresh sheet) at least one body row stays, so the layout always advances. */
+  private splitTable(sheet: Sheet, el: HTMLElement, force: boolean): HTMLElement | null {
+    const table = this.tableOf(el);
+    if (!table) return null;
+    const rows = Array.from(table.rows).filter((tr) => !tr.hasAttribute("data-repeat"));
+    let heads = 0;
+    while (heads < rows.length && rows[heads]?.hasAttribute("data-header")) heads += 1;
+    if (rows.length - heads < 2 && !(rows.length - heads === 1 && heads > 0 && !force)) return null;
+    const cuts = this.cuts(rows);
+    const together = table.hasAttribute("data-keep-together");
+    if (together && !force && sheet.blocks.length > 1 && el.offsetHeight <= sheet.capacity) return null;   // it fits on a page of its own: move it whole instead
+    const base = sheet.body.getBoundingClientRect().top;
+    const limit = sheet.capacity - (sheet.foot.childElementCount ? sheet.foot.offsetHeight : 0) - 1;
+    let keepRows = 0;
+    for (let k = heads + 1; k <= rows.length - 1; k += 1) {
+      const bottom = ((rows[k - 1] as HTMLElement).getBoundingClientRect().bottom - base) / this.zoom;
+      if (bottom > limit) break;
+      if (cuts[k]) keepRows = k;
+    }
+    if (keepRows === 0) {
+      if (!force) return null;
+      keepRows = cuts.findIndex((ok, k) => ok && k > heads);                // alone on the sheet and still too tall: keep the first row that can stand alone
+      if (keepRows < 0 || keepRows >= rows.length) return null;
+    }
+    const rest = el.cloneNode(false) as HTMLElement;
+    rest.setAttribute("data-continued", "");
+    rest.removeAttribute("data-selected");
+    const shell = table.cloneNode(false) as HTMLTableElement;
+    const columns = table.querySelector(":scope > colgroup");
+    if (columns) shell.appendChild(columns.cloneNode(true));
+    for (const head of rows.slice(0, heads)) {
+      const copy = head.cloneNode(true) as HTMLElement;
+      copy.setAttribute("data-repeat", ""); copy.setAttribute("aria-hidden", "true"); copy.removeAttribute("data-header");
+      copy.querySelectorAll<HTMLElement>("[data-edit]").forEach((cell) => { cell.removeAttribute("data-edit"); cell.setAttribute("contenteditable", "false"); cell.setAttribute("tabindex", "-1"); });
+      shell.appendChild(copy);
+    }
+    for (const tr of rows.slice(keepRows)) shell.appendChild(tr);
+    rest.appendChild(shell);
+    return rest;
+  }
+
+  /** Put every table cut across pages back together (the pieces are re-cut by the next layout or reflow). */
+  mergeFragments(): void {
+    for (const part of Array.from(this.host.querySelectorAll<HTMLElement>(".blk[data-continued]"))) {
+      const id = part.dataset["id"] ?? "";
+      const primary = Array.from(this.host.querySelectorAll<HTMLElement>(".blk[data-id]")).find((x) => x.dataset["id"] === id && !x.hasAttribute("data-continued"));
+      const into = primary ? this.tableOf(primary) : null, from = this.tableOf(part);
+      if (into && from) for (const tr of Array.from(from.rows)) if (!tr.hasAttribute("data-repeat")) into.appendChild(tr);
+      part.remove();
+    }
+    for (const sheet of this.sheets) sheet.blocks = Array.from(sheet.body.querySelectorAll<HTMLElement>(":scope > .blk, :scope > .cols > .blk"));
+  }
+
+  /** Forget the pieces of one table (its block was re-rendered whole). */
+  dropFragments(id: string): void {
+    for (const part of Array.from(this.host.querySelectorAll<HTMLElement>(".blk[data-continued]"))) if (part.dataset["id"] === id) part.remove();
+  }
+
+  /** The element of a table cell, wherever on the pages that part of the table is. */
+  cellEl(id: string, row: number, col: number): HTMLElement | null {
+    for (const wrap of Array.from(this.host.querySelectorAll<HTMLElement>(".blk[data-type=table]"))) {
+      if (wrap.dataset["id"] !== id) continue;
+      const cell = wrap.querySelector<HTMLElement>(`[data-edit=cell][data-row="${row}"][data-col="${col}"]`);
+      if (cell) return cell;
+    }
+    return null;
   }
 
   /* ------------------------------------------------------------------------------------------------- reflow */
@@ -224,16 +382,21 @@ export class PageView {
     const id = el.dataset["id"] ?? "";
     const notes = this.rows(from, id);
     from.blocks.splice(from.blocks.indexOf(el), 1);
-    if (atStart) { to.body.insertBefore(el, to.blocks[0] ?? to.foot); to.blocks.unshift(el); } else { to.body.insertBefore(el, to.foot); to.blocks.push(el); }
+    this.attach(to, el, atStart);
+    if (atStart) to.blocks.unshift(el); else to.blocks.push(el);
     for (const row of notes) { if (atStart) to.foot.insertBefore(row, to.foot.firstChild); else to.foot.appendChild(row); }
     from.foot.toggleAttribute("data-has", from.foot.childElementCount > 0);
     to.foot.toggleAttribute("data-has", to.foot.childElementCount > 0);
+    this.tidy(from);
+    this.fitRegions(from);
+    this.fitRegions(to);
   }
 
-  private overflows(sheet: Sheet): boolean { return sheet.body.scrollHeight > sheet.capacity + 1; }
+  private overflows(sheet: Sheet): boolean { return sheet.body.scrollHeight > sheet.capacity + 1 || this.regionsOverflow(sheet); }
 
   /** Height still free on a sheet: capacity minus the bottom of its last block and its footnote strip. */
   private freeSpace(sheet: Sheet): number {
+    if (sheet.body.querySelector(":scope > .cols")) return Number.POSITIVE_INFINITY;    // columns: the only way to know is to try (the caller checks for overflow afterwards)
     const last = sheet.blocks[sheet.blocks.length - 1];
     const bottom = last ? last.offsetTop + last.offsetHeight : 0;
     return sheet.capacity - bottom - (sheet.foot.childElementCount ? sheet.foot.offsetHeight : 0);
@@ -245,18 +408,22 @@ export class PageView {
     const input = this.last;
     if (!input || !this.sheets.length) return false;
     const before = this.sheets.length;
+    this.mergeFragments();
     for (let i = 0; i < this.sheets.length; i += 1) {
       const sheet = this.sheets[i] as Sheet;
       let guard = 0;
-      while (sheet.blocks.length > 1 && this.overflows(sheet) && guard++ < 500) {
+      while (sheet.blocks.length > 0 && this.overflows(sheet) && guard++ < 500) {
         let next = this.sheets[i + 1];
         const el = sheet.blocks[sheet.blocks.length - 1] as HTMLElement;
+        const rest = this.tableOf(el) ? this.splitTable(sheet, el, sheet.blocks.length === 1) : null;
+        if (!rest && sheet.blocks.length <= 1) break;
         if (!next || next.section !== sheet.section) {
           next = this.newSheet(input, sheet.section, i + 2);
           this.sheets.splice(i + 1, 0, next);
           sheet.el.after(next.el);
         }
-        this.move(sheet, next, el, true);
+        if (rest) { next.body.insertBefore(rest, next.blocks[0] ?? next.foot); next.blocks.unshift(rest); }
+        else this.move(sheet, next, el, true);
       }
       const next = this.sheets[i + 1];
       guard = 0;
