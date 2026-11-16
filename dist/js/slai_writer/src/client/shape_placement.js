@@ -4,8 +4,10 @@ import * as A from "./actions.js";
 import { announce, h, toast } from "./kit.js";
 import { errorText } from "./net.js";
 import { SHAPE_KEY, defaultShape } from "./shape.js";
+import { openTextBoxEditor } from "./textbox_edit.js";
+import { TEXTBOX_MIN_MM } from "./textbox.js";
 import { MM_PX } from "./textops.js";
-export function beginShapePlacement(ctx, kind) {
+export function beginShapePlacement(ctx, kind, options = {}) {
     if (ctx.ed.readOnly)
         return;
     const host = ctx.ed.page.host;
@@ -34,7 +36,7 @@ export function beginShapePlacement(ctx, kind) {
             event.preventDefault();
             event.stopPropagation();
             finish();
-            announce("Shape insertion cancelled");
+            announce(`${options.label ?? "Shape"} insertion cancelled`);
         }
     };
     const onDown = (event) => {
@@ -86,10 +88,15 @@ export function beginShapePlacement(ctx, kind) {
         event.stopImmediatePropagation();
         const state = current;
         const drag = Math.hypot((state.nowX - state.startX) * MM_PX, (state.nowY - state.startY) * MM_PX) * ctx.ed.page.zoom;
-        const shape = defaultShape(kind);
+        const shape = options.template ? structuredClone(options.template) : defaultShape(kind);
         if (drag > 5) {
             shape.width_mm = Math.max(2, Math.min(1000, Math.abs(state.nowX - state.startX)));
             shape.height_mm = Math.max(2, Math.min(1000, Math.abs(state.nowY - state.startY)));
+        }
+        if (shape.textbox) {
+            shape.width_mm = Math.max(TEXTBOX_MIN_MM.width, shape.width_mm);
+            shape.height_mm = Math.max(TEXTBOX_MIN_MM.height, shape.height_mm);
+            shape.text.padding_mm = Math.min(shape.text.padding_mm, shape.width_mm / 4, shape.height_mm / 4);
         }
         const posX = Math.max(0, drag > 5 ? Math.min(state.startX, state.nowX) : state.startX);
         const posY = Math.max(0, drag > 5 ? Math.min(state.startY, state.nowY) : state.startY);
@@ -105,7 +112,9 @@ export function beginShapePlacement(ctx, kind) {
             extensions: { [SHAPE_KEY]: shape } }, target)
             .then(id => { if (id) {
             A.selectBlock(ctx.ed, id);
-            announce(`${kind} inserted`);
+            announce(`${options.label ?? kind} inserted`);
+            if (options.edit)
+                window.setTimeout(() => openTextBoxEditor(ctx.ed, id), 0);
         } })
             .catch(error => toast(errorText(error), { kind: "error" }));
     };
@@ -114,5 +123,5 @@ export function beginShapePlacement(ctx, kind) {
     host.addEventListener("pointerup", onUp, true);
     host.addEventListener("pointercancel", onCancel, true);
     document.addEventListener("keydown", onKey, true);
-    toast(`Click to place a ${kind}, drag to set its size, or press Escape to cancel.`, { kind: "info" });
+    toast(`Click to place a ${options.label?.toLowerCase() ?? kind}, drag to set its size, or press Escape to cancel.`, { kind: "info" });
 }

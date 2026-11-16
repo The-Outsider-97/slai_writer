@@ -3,6 +3,15 @@ import { announce, ApiError, applyAppearance, Emitter, normaliseAppearance, toas
 import { api, errorText, onFailure } from "./net.js";
 const ROUTES = new Set(["startup", "verify", "twofa", "enroll", "reset", "recover", "home", "new", "settings", "plans", "signatures", "profile", "help", "versions", "verify-signature", "sign", "doc"]);
 const NEEDS_DOC = new Set(["doc", "versions", "verify-signature", "sign"]);
+/** How long one try at the server may take, and how many tries start-up makes before it says the server is not answering. */
+export const STARTUP_TRY_MS = 8000;
+export const STARTUP_TRIES = 3;
+function timeoutAfter(work, ms) {
+    return new Promise((resolve, reject) => {
+        const timer = window.setTimeout(() => reject(new ApiError(0, "offline", "The local server did not answer in time.", "Check that SLAI Writer is still running, then try again.")), ms);
+        work.then((value) => { window.clearTimeout(timer); resolve(value); }, (error) => { window.clearTimeout(timer); reject(error); });
+    });
+}
 function readGuest() { try {
     return window.sessionStorage.getItem("writer.guest") === "1";
 }
@@ -29,6 +38,8 @@ export class App {
     lastDoc = null;
     guest = readGuest();
     offline = false;
+    /** Set by the entry point; ignored once the loader screen is gone. */
+    report = () => undefined;
     screen = null;
     mount;
     routing = 0;
@@ -51,7 +62,9 @@ export class App {
     register(name, make, chrome) { this.factories.set(name, { make, chrome }); }
     /* --------------------------------------------------------------------------------------------- start-up */
     async start() {
-        await this.refresh();
+        this.report("Connecting to the local server ...", 0.2);
+        await this.bootstrapWithRetry();
+        this.report("Checking your account and settings ...", 0.5);
         const wanted = this.parse(window.location.hash);
         const first = this.signedIn || this.guest ? wanted : { name: "startup" };
         const open = this.boot.open;
@@ -65,7 +78,28 @@ export class App {
             this.go({ name: "home" }, true);
             return;
         }
+        this.report(first.name === "doc" ? "Opening your document ..." : "Preparing your workspace ...", 0.7);
         await this.render(first);
+        this.report("Ready", 1);
+    }
+    /** The first request of a session. A server that is still coming up (the window can open a moment before it answers) is waited for, a few times,
+     *  and the loader says so; a server that is not there at all ends in an error with a way to try again, never in an endless spinner. */
+    async bootstrapWithRetry() {
+        let last;
+        for (let attempt = 1; attempt <= STARTUP_TRIES; attempt++) {
+            try {
+                return await timeoutAfter(this.refresh(), STARTUP_TRY_MS);
+            }
+            catch (error) {
+                last = error;
+                const transient = error instanceof ApiError && (error.code === "offline" || error.status >= 502);
+                if (!transient || attempt === STARTUP_TRIES)
+                    break;
+                this.report(`Waiting for the local server (try ${attempt + 1} of ${STARTUP_TRIES}) ...`, 0.2);
+                await new Promise((resolve) => window.setTimeout(resolve, 600 * attempt));
+            }
+        }
+        throw last;
     }
     async refresh() {
         this.boot = await api.get("/bootstrap");

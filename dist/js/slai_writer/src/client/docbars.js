@@ -1,4 +1,6 @@
 /** The bars around the page: the top bar (menu, Save, Undo/Redo, open documents, file name, search), the formatting bar and the status bar. */
+import { buildTextBoxRibbon, homeStyleToBox } from "./textbox_ribbon.js";
+import { activeTextBoxId, applyTextBoxAction } from "./textbox_edit.js";
 import { ApiError, announce, glyph, h, openDialog, openMenu, toast } from "./kit.js";
 import { chevron, crossIcon, dico } from "./dico.js";
 import * as A from "./actions.js";
@@ -332,6 +334,12 @@ export function buildFormatBar(ctx) {
             update();
             return;
         }
+        const boxId = activeTextBoxId();
+        if (boxId) {
+            void applyTextBoxAction(ed, boxId, { kind: "format", props: { font_family: value } });
+            void ensureBundledFont(value).then(() => ed.layout()).catch(() => undefined);
+            return;
+        }
         run(async () => {
             await A.setInlineProperty(ed, "font_family", value, activeScope());
             try {
@@ -357,11 +365,28 @@ export function buildFormatBar(ctx) {
             update();
             return;
         }
+        const boxId = activeTextBoxId();
+        if (boxId) {
+            void applyTextBoxAction(ed, boxId, { kind: "format", props: { font_size_pt: value ?? undefined } });
+            return;
+        }
         run(() => A.setInlineProperty(ed, "font_size_pt", value, activeScope()));
     });
-    const style = h("select", { attrs: { "aria-label": "Paragraph style" } }, [["paragraph", "Normal text"], ["style-title", "Title"], ["style-subtitle", "Subtitle"], ["style-slogan", "Slogan"], ["style-author", "Author"], ["style-document-date", "Document Date"], ["style-toc-title", "TOC Title"], ["h1", "Heading 1"], ["h2", "Heading 2"], ["h3", "Heading 3"], ["h4", "Heading 4"], ["h5", "Heading 5"], ["h6", "Heading 6"], ["quote", "Quote"], ["code-block", "Code block"], ["bullets", "Bulleted list"], ["numbered", "Numbered list"]].map(([v, t]) => h("option", { value: v, text: t })));
+    const style = h("select", { attrs: { "aria-label": "Paragraph style" } }, [["paragraph", "Normal text"], ["style-title", "Title"], ["style-subtitle", "Subtitle"], ["style-slogan", "Slogan"], ["style-author", "Author"], ["style-document-date", "Document Date"], ["style-toc-title", "TOC Title"], ["h1", "Heading 1"], ["h2", "Heading 2"], ["h3", "Heading 3"], ["scripture", "Scripture"], ["h4", "Heading 4"], ["h5", "Heading 5"], ["h6", "Heading 6"], ["quote", "Quote"], ["code-block", "Code block"], ["bullets", "Bulleted list"], ["numbered", "Numbered list"]].map(([v, t]) => h("option", { value: v, text: t })));
     style.addEventListener("change", () => {
         const id = style.value;
+        const boxId = activeTextBoxId();
+        if (boxId) {
+            // Inside a text box the style list changes the box's paragraph (typography only: Scripture adds no columns there).
+            const map = homeStyleToBox(id);
+            if (!map) {
+                toast("A text box holds Normal, Heading 1–3, Quote, lists and the named styles (including Scripture).", { kind: "info" });
+                return;
+            }
+            const { list, ...rest } = map;
+            void applyTextBoxAction(ed, boxId, { kind: "paragraph", attrs: { ...rest, ...(list !== undefined ? { list } : id === "paragraph" ? { list: null } : {}) } });
+            return;
+        }
         run(() => id.startsWith("user:") ? A.setParagraphStyle(ed, id.slice(5)) : cmd(id).run(ctx));
     });
     // Native <select> option popups do not expose portable per-option context
@@ -387,7 +412,14 @@ export function buildFormatBar(ctx) {
     const manageStyle = custom("Manage named styles", "Aa", () => { void manageStyles(ctx); });
     const colour = (key, label, value) => {
         const i = h("input", { type: "color", value, attrs: { "aria-label": label, title: label } });
-        i.addEventListener("change", () => run(() => A.setColour(ed, key, i.value, activeScope())));
+        i.addEventListener("change", () => {
+            const boxId = activeTextBoxId();
+            if (boxId) {
+                void applyTextBoxAction(ed, boxId, { kind: "format", props: { [key]: i.value } });
+                return;
+            }
+            run(() => A.setColour(ed, key, i.value, activeScope()));
+        });
         return i;
     };
     const textColour = colour("color", "Font color", "#000000");
@@ -396,6 +428,11 @@ export function buildFormatBar(ctx) {
     const line = h("select", { class: "ribbon-line", attrs: { "aria-label": "Line spacing" } }, [["1", "Single"], ["1.15", "1.15"], ["1.5", "1.5"], ["2", "Double"], ["2.5", "2.5"], ["3", "Triple"]].map(([v, t]) => h("option", { value: v, text: t })));
     line.addEventListener("change", () => {
         const leading = Number(line.value);
+        const boxId = activeTextBoxId();
+        if (boxId) {
+            void applyTextBoxAction(ed, boxId, { kind: "paragraph", attrs: { line_height: leading } });
+            return;
+        }
         run(() => A.setBlockAttribute(ed, { line_height: leading }, "line spacing"));
     });
     const spacing = (key, label) => {
@@ -445,7 +482,7 @@ export function buildFormatBar(ctx) {
     const referenceGroup = (label, ...buttons) => h("div", { class: "ribbon-group" }, h("span", { class: "ribbon-controls" }, ...buttons), h("span", { class: "ribbon-group-label", text: label }));
     const contents = buildContentsGroup(ctx);
     const refs = h("div", { class: "format-ribbon references-ribbon", attrs: { role: "toolbar", "aria-label": "References ribbon" } }, contents.el, referenceGroup("Citations", ribbonButton("Insert citation", fire("citation"), "book")), referenceGroup("Sources", ribbonButton("Add source", () => run(() => sourceDialog(ctx)), "plus"), ribbonButton("Manage sources", fire("sources"), "book")), referenceGroup("Bibliography", ribbonButton("Insert / Update References", () => run(() => bibliographyDialog(ctx)), "book"), ribbonButton("Remove References", () => run(() => removeBibliography(ctx)), "close")), referenceGroup("Citation style", h("span", { class: "ribbon-style-label", text: "APA-style author–date" })));
-    const illustrations = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Insert illustrations" } }, referenceGroup("Illustrations", ribbonButton("Insert Picture", fire("picture"), "image"), ribbonButton("Insert Shape", fire("shape"), "layers")));
+    const illustrations = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Insert illustrations" } }, referenceGroup("Illustrations", ribbonButton("Insert Picture", fire("picture"), "image"), ribbonButton("Insert Shape", fire("shape"), "layers")), referenceGroup("Text", ribbonButton("Text Box", fire("textbox"), "paragraph"), ribbonButton("Draw Text Box", fire("textbox-draw"), "pen")));
     // Contextual shape formatting uses the same canonical shape_set operation as
     // the full dialog; there is no separate undo, document store, or renderer.
     const selectedShape = () => {
@@ -480,10 +517,13 @@ export function buildFormatBar(ctx) {
     const openShape = () => { const pair = selectedShape(); if (pair)
         void editShape(ctx, pair.id); };
     const shapeRibbon = h("div", { class: "format-ribbon references-ribbon", attrs: { role: "toolbar", "aria-label": "Shape Format ribbon" } }, referenceGroup("Fill", fillPicker, fillOff, field("Fill opacity %", fillAlpha)), referenceGroup("Outline", outlinePicker, field("Width (pt)", outlineWidth), borderOff), referenceGroup("Transparency", field("Overall opacity %", overallAlpha)), referenceGroup("Geometry", field("Rotation (°)", rotation), ribbonButton("Size & Corners", openShape, "layers")), referenceGroup("Shape Text", ribbonButton("Edit Shape Text", openShape, "paragraph")), referenceGroup("Effects", ribbonButton("Shadows & Effects", openShape, "sparkle")), referenceGroup("Arrange", ribbonButton("Arrange & Group", openShape, "layers")));
+    const textBoxRibbon = buildTextBoxRibbon(ctx, referenceGroup, ribbonButton);
+    textBoxRibbon.el.hidden = true;
     const home = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Home formatting ribbon" } }, fontGroup, paragraphGroup);
     const homeTab = h("button", { type: "button", class: "ribbon-tab", text: "Home", attrs: { role: "tab", "aria-selected": "true" } });
     const insertTab = h("button", { type: "button", class: "ribbon-tab", text: "Insert", attrs: { role: "tab", "aria-selected": "false" } });
     const shapeTab = h("button", { type: "button", class: "ribbon-tab", text: "Shape Format", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
+    const textTab = h("button", { type: "button", class: "ribbon-tab", text: "Text Box", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
     const refsTab = h("button", { type: "button", class: "ribbon-tab", text: "References", attrs: { role: "tab", "aria-selected": "false" } });
     const tableRibbons = buildTableRibbons(ctx);
     const layoutRibbon = buildLayoutRibbon(ctx);
@@ -493,6 +533,7 @@ export function buildFormatBar(ctx) {
     const tableLayoutTab = h("button", { type: "button", class: "ribbon-tab", text: "Table Layout", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
     let activeTab = "home";
     let hadShape = false;
+    let hadBox = false;
     let hadTable = false;
     const showTab = (which) => {
         activeTab = which;
@@ -500,6 +541,15 @@ export function buildFormatBar(ctx) {
         refs.hidden = which !== "references";
         illustrations.hidden = which !== "insert";
         shapeRibbon.hidden = which !== "shape";
+        textTab.setAttribute("aria-selected", String(which === "textbox"));
+        // The text box ribbon is only in the page while its tab is showing, so its controls never share a label with the Home controls they mirror.
+        if (which === "textbox") {
+            if (!textBoxRibbon.el.isConnected)
+                shapeRibbon.after(textBoxRibbon.el);
+            textBoxRibbon.el.hidden = false;
+        }
+        else
+            textBoxRibbon.el.remove();
         tableRibbons.design.hidden = which !== "tdesign";
         tableRibbons.layout.hidden = which !== "tlayout";
         layoutRibbon.el.hidden = which !== "layout";
@@ -520,9 +570,10 @@ export function buildFormatBar(ctx) {
     insertTab.addEventListener("click", () => showTab("insert"));
     layoutTab.addEventListener("click", () => showTab("layout"));
     shapeTab.addEventListener("click", () => showTab("shape"));
+    textTab.addEventListener("click", () => showTab("textbox"));
     designTab.addEventListener("click", () => showTab("tdesign"));
     tableLayoutTab.addEventListener("click", () => showTab("tlayout"));
-    const el = h("div", { class: "bar writer-ribbon" }, h("div", { class: "ribbon-tabs", attrs: { role: "tablist", "aria-label": "Ribbon tabs" } }, homeTab, insertTab, layoutTab, refsTab, shapeTab, designTab, tableLayoutTab), home, illustrations, layoutRibbon.el, refs, shapeRibbon, tableRibbons.design, tableRibbons.layout);
+    const el = h("div", { class: "bar writer-ribbon" }, h("div", { class: "ribbon-tabs", attrs: { role: "tablist", "aria-label": "Ribbon tabs" } }, homeTab, insertTab, layoutTab, refsTab, shapeTab, textTab, designTab, tableLayoutTab), home, illustrations, layoutRibbon.el, refs, shapeRibbon, tableRibbons.design, tableRibbons.layout);
     showTab("home");
     const GROUPS_KEY = "writer.ribbonGroups.v1";
     const groupRows = [{ id: "font", label: "Font", element: fontGroup }, { id: "paragraph", label: "Paragraph / Alignment", element: paragraphGroup }];
@@ -612,14 +663,23 @@ export function buildFormatBar(ctx) {
         return current;
     };
     const update = () => {
-        const activeShape = selectedShape();
-        const hasShape = Boolean(activeShape);
-        shapeTab.hidden = !hasShape;
-        if (hasShape && !hadShape)
-            showTab("shape");
-        else if (!hasShape && activeTab === "shape")
+        const activeBox = textBoxRibbon.selected();
+        const activeShape = activeBox ? null : selectedShape();
+        const hasShape = Boolean(activeShape) || Boolean(activeBox);
+        shapeTab.hidden = !activeShape;
+        textTab.hidden = !activeBox;
+        if (activeBox && !hadBox)
+            showTab("textbox");
+        else if (!activeBox && activeTab === "textbox")
             showTab("home");
-        hadShape = hasShape;
+        if (activeShape && !hadShape)
+            showTab("shape");
+        else if (!activeShape && activeTab === "shape")
+            showTab("home");
+        hadShape = Boolean(activeShape);
+        hadBox = Boolean(activeBox);
+        if (activeBox)
+            textBoxRibbon.update();
         if (activeTab === "layout")
             layoutRibbon.update();
         if (activeTab === "references")
@@ -702,18 +762,25 @@ export function buildFormatBar(ctx) {
                 if (option.dataset["customStyle"])
                     option.remove();
             for (const name of Object.keys(ed.model.meta.styles?.paragraph ?? {}).sort()) {
-                if (["Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"].includes(name))
-                    continue;
+                if (["Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title", "Scripture"].includes(name))
+                    continue; // Scripture has its own entry above
                 const option = h("option", { value: `user:${name}`, text: name });
                 option.dataset["customStyle"] = "true";
                 style.appendChild(option);
             }
-            const v = block.type === "heading" ? `h${Math.min(6, block.attributes?.level ?? 1)}` : block.type === "list_item" ? (block.attributes?.ordered ? "numbered" : "bullets") : block.type === "quote" ? "quote" : block.type === "code" ? "code-block" : block.style && ["Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"].includes(block.style) ? `style-${block.style.toLowerCase().replaceAll(" ", "-")}` : block.style ? `user:${block.style}` : "paragraph";
+            const v = block.type === "heading" ? `h${Math.min(6, block.attributes?.level ?? 1)}` : block.type === "list_item" ? (block.attributes?.ordered ? "numbered" : "bullets") : block.type === "quote" ? "quote" : block.type === "code" ? "code-block" : block.style === "Scripture" ? "scripture" : block.style && ["Title", "Subtitle", "Slogan", "Author", "Document Date", "TOC Title"].includes(block.style) ? `style-${block.style.toLowerCase().replaceAll(" ", "-")}` : block.style ? `user:${block.style}` : "paragraph";
             if ([...style.options].some((o) => o.value === v))
                 style.value = v;
         }
         const dis = ed.readOnly;
-        el.querySelectorAll("button, select, input").forEach((c) => { c.disabled = dis; });
+        el.querySelectorAll("button, select, input").forEach((c) => {
+            if (c.closest(".textbox-ribbon")) {
+                if (dis)
+                    c.disabled = true;
+                return;
+            } // the text box ribbon decides its own controls (pinned and locked boxes disable some)
+            c.disabled = dis;
+        });
     };
     void bundledFonts().then(async (data) => {
         data.families.forEach((name) => availableFamilies.add(name));

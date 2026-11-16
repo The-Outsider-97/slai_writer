@@ -1,6 +1,8 @@
 import * as A from "./actions.js";
 import { shapeOf } from "./shape.js";
 import { openShapeTextEditor } from "./shape_text_edit.js";
+import { TEXTBOX_MIN_MM, isLocked, isPinned, neededHeightMm, textBoxOf } from "./textbox.js";
+import { openTextBoxEditor, isEditingTextBox } from "./textbox_edit.js";
 import { transformShapeGroup } from "./shapegroup.js";
 import { h } from "./kit.js";
 import { MM_PX } from "./textops.js";
@@ -18,6 +20,8 @@ export class ShapeTools {
             }
             if (e.type === "patch" || e.type === "layout")
                 this.refresh();
+            if (e.type === "patch" && e.local)
+                this.autoFit(Object.keys(e.patch.blocks));
         }));
         ed.page.onPlaced(() => this.refresh());
         const key = (e) => {
@@ -25,6 +29,8 @@ export class ShapeTools {
             const shape = shapeOf(b);
             if (!shape || ed.readOnly || !this.id)
                 return;
+            if (isLocked(shape) || isPinned(shape) || isEditingTextBox(this.id))
+                return; // a pinned or locked box does not move; text keys belong to the text
             if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(e.key) && !e.ctrlKey && !e.metaKey && shape.layout?.mode === "floating") {
                 e.preventDefault();
                 e.stopImmediatePropagation();
@@ -49,6 +55,30 @@ export class ShapeTools {
         };
         ed.host.addEventListener("keydown", key);
         this.off.push(() => ed.host.removeEventListener("keydown", key));
+    }
+    /** A text box with Auto-expand grows when a change (a bigger font, more text, a narrower box) leaves its text taller than the box. */
+    fitting = new Set();
+    autoFit(ids) {
+        if (this.ed.readOnly || !ids.length)
+            return;
+        window.requestAnimationFrame(() => {
+            for (const id of ids) {
+                const shape = shapeOf(this.ed.model.block(id));
+                const box = textBoxOf(shape);
+                if (!shape || !box?.auto_expand || box.locked || isEditingTextBox(id))
+                    continue;
+                const host = this.ed.els.get(id)?.querySelector(".writer-shape");
+                const need = host ? neededHeightMm(host) : null;
+                if (need === null || need <= shape.height_mm + 0.3)
+                    continue;
+                const key = `${id}:${shape.height_mm}`;
+                if (this.fitting.has(key))
+                    continue;
+                this.fitting.add(key);
+                void this.ed.op({ op: "shape_set", block: id, shape: { ...shape, height_mm: Math.min(1000, Math.ceil(need * 10) / 10) }, label: "fit text box" })
+                    .catch(() => { }).finally(() => this.fitting.delete(key));
+            }
+        });
     }
     destroy() { this.off.forEach(x => x()); this.overlay?.remove(); }
     /** Compound selection uses one visual bounding box, not an unrelated handle
@@ -93,11 +123,19 @@ export class ShapeTools {
         o.style.width = `${right - left}px`;
         o.style.height = `${bottom - top}px`;
         o.dataset["group"] = String(members.length > 1);
+        const box = textBoxOf(shape);
+        o.dataset["textbox"] = String(Boolean(box));
+        o.dataset["pinned"] = String(Boolean(box?.pinned));
+        o.dataset["locked"] = String(Boolean(box?.locked));
+        o.dataset["editing"] = String(isEditingTextBox(this.id ?? undefined));
         o.setAttribute("aria-label", members.length > 1 ? `Transform group of ${members.length} vector shapes` : "Vector shape editing handles");
         o.style.setProperty("--s", String(1 / this.ed.page.zoom));
     }
     build() {
         const root = h("div", { class: "imgsel shape-selection", attrs: { role: "group", "aria-label": "Vector shape editing handles" } });
+        // The handles live outside the document, so pressing one would leave the focus on the page body and Ctrl+Z, Delete and the arrow keys would stop reaching the editor.
+        root.addEventListener("pointerdown", () => { if (!isEditingTextBox())
+            this.ed.host.focus({ preventScroll: true }); }, true);
         const surface = h("div", { class: "imgsel-move", attrs: { title: "Drag shape to move; double click to edit its text" } });
         surface.addEventListener("pointerdown", e => this.move(e, surface));
         surface.addEventListener("dblclick", () => { if (this.id)
@@ -107,6 +145,25 @@ export class ShapeTools {
             const handle = h("div", { class: `ih ${corner}`, attrs: { role: "button", tabindex: "0", "aria-label": `Resize shape from ${corner}` } });
             handle.addEventListener("pointerdown", e => this.resize(e, handle, corner));
             root.appendChild(handle);
+        }
+        // Text-box chrome (shown only for text boxes): a four-arrow move handle at the top-left corner and four border strips that also move the box.
+        const grab = h("div", { class: "tb-move", attrs: { role: "button", tabindex: "0", "aria-label": "Move text box", title: "Drag to move the text box" } });
+        grab.append(document.createElementNS("http://www.w3.org/2000/svg", "svg"));
+        const arrows = grab.firstElementChild;
+        arrows.setAttribute("viewBox", "0 0 24 24");
+        arrows.setAttribute("aria-hidden", "true");
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.setAttribute("d", "M12 2l3.2 3.6h-2.2v5.4h5.4V8.8L22 12l-3.6 3.2v-2.2H13v5.4h2.2L12 22l-3.2-3.6H11V13H5.6v2.2L2 12l3.6-3.2V11H11V5.6H8.8z");
+        path.setAttribute("fill", "currentColor");
+        arrows.appendChild(path);
+        grab.addEventListener("pointerdown", e => this.move(e, grab));
+        root.appendChild(grab);
+        for (const side of ["n", "e", "s", "w"]) {
+            const edge = h("div", { class: `tb-edge ${side}`, attrs: { "aria-hidden": "true", title: "Drag the border to move; click the text to edit it" } });
+            edge.addEventListener("pointerdown", e => this.move(e, edge));
+            edge.addEventListener("dblclick", () => { if (this.id)
+                openTextBoxEditor(this.ed, this.id); });
+            root.appendChild(edge);
         }
         const stem = h("div", { class: "imgsel-stem" });
         const rot = h("div", { class: "ih rot", attrs: { role: "button", tabindex: "0", "aria-label": "Rotate shape" } });
@@ -218,6 +275,58 @@ export class ShapeTools {
             return;
         const sx = e.clientX, sy = e.clientY, z = this.ed.page.zoom;
         let w = original.width_mm, h = original.height_mm;
+        const box = textBoxOf(original);
+        if (box) {
+            // Text box: any corner resizes continuously (the text reflows as it is HTML), a west or north corner keeps the opposite
+            // corner still, nothing goes below the minimum size, and an auto-expanding box never ends up shorter than its text.
+            if (box.locked)
+                return;
+            const floating = original.layout?.mode === "floating";
+            const ox = original.layout?.x_mm ?? 0, oy = original.layout?.y_mm ?? 0;
+            const west = corner.endsWith("w"), north = corner.startsWith("n");
+            const was = { width: node.style.width, height: node.style.height, left: node.style.left, top: node.style.top };
+            let x = ox, y = oy;
+            const clamp = (v, lo) => Math.max(lo, Math.min(1000, v));
+            this.gesture(e, handle, ev => {
+                const dx = (ev.clientX - sx) / z / MM_PX, dy = (ev.clientY - sy) / z / MM_PX;
+                w = clamp(original.width_mm + (west ? -dx : dx), TEXTBOX_MIN_MM.width);
+                h = clamp(original.height_mm + (north ? -dy : dy), TEXTBOX_MIN_MM.height);
+                x = floating && west ? ox + (original.width_mm - w) : ox;
+                y = floating && north ? oy + (original.height_mm - h) : oy;
+                node.style.width = `${w}mm`;
+                node.style.height = `${h}mm`;
+                if (floating && original.layout?.wrap !== "top_bottom") {
+                    node.style.left = `${x}mm`;
+                    node.style.top = `${y}mm`;
+                }
+                node.dataset["resizing"] = `${w.toFixed(1)} × ${h.toFixed(1)} mm`;
+                this.refresh();
+            }, (_ev, ok) => {
+                delete node.dataset["resizing"];
+                let finalH = h;
+                if (ok && box.auto_expand) {
+                    const need = neededHeightMm(node);
+                    if (need !== null && need > finalH)
+                        finalH = Math.min(1000, Math.ceil(need * 10) / 10);
+                }
+                node.style.width = was.width;
+                node.style.height = was.height;
+                node.style.left = was.left;
+                node.style.top = was.top;
+                if (ok && (w !== original.width_mm || finalH !== original.height_mm || x !== ox || y !== oy)) {
+                    const round = (v) => Math.round(v * 10) / 10;
+                    const next = { ...original, width_mm: round(w), height_mm: round(finalH),
+                        corners_mm: original.corners_mm.map(c => Math.min(c, w / 2, finalH / 2)),
+                        text: { ...original.text, padding_mm: Math.min(original.text.padding_mm, w / 4, finalH / 4) } };
+                    if (floating && original.layout)
+                        next.layout = { ...original.layout, x_mm: round(x), y_mm: round(y) };
+                    void this.commit(next, "resize text box");
+                }
+                else
+                    this.refresh();
+            });
+            return;
+        }
         this.gesture(e, handle, ev => {
             const signX = corner.endsWith("e") ? 1 : -1, signY = corner.startsWith("s") ? 1 : -1;
             w = Math.max(2, Math.min(1000, original.width_mm + signX * (ev.clientX - sx) / z / MM_PX));
@@ -271,6 +380,8 @@ export class ShapeTools {
         const shape = shapeOf(id ? this.ed.model.block(id) : undefined);
         if (!id || !node || !shape)
             return;
+        if (isLocked(shape) || isPinned(shape))
+            return;
         const compound = this.groupMembers().map(x => x.id);
         const cohort = compound.length > 1 ? compound : shape.group_id ? this.ed.model.list().filter(block => shapeOf(block)?.group_id === shape.group_id).map(block => block.id) : [id];
         const movingIds = new Set(cohort);
@@ -302,7 +413,9 @@ export class ShapeTools {
             target = null;
             if (hit) {
                 const r = hit.getBoundingClientRect();
-                const before = y < r.top + r.height / 2;
+                // A floating box takes no room in the flow, so "before the first block of a page" would leave it at the end of the previous page: drop it after that block instead.
+                const firstOnLaterPage = hit.parentElement?.querySelector(".blk[data-id]:not([data-floating])") === hit && this.ed.page.sheets.findIndex(sh => sh.el.contains(hit)) > 0;
+                const before = y < r.top + r.height / 2 && !firstOnLaterPage;
                 hit.classList.add(before ? "drop-before" : "drop-after");
                 target = { id: hit.dataset["id"], before };
             }

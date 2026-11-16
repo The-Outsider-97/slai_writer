@@ -1,7 +1,9 @@
 import { segments } from "./textops.js";
 import { layoutContourText, shapeContourClip } from "./shape_contour.js";
+import { paintTextBoxBody, textBoxOf } from "./textbox.js";
 export const SHAPE_KEY = "slai.writer.shape";
 export const SHAPE_KINDS = ["rectangle", "ellipse", "line", "triangle", "diamond", "pentagon", "hexagon", "star", "arrow", "plus"];
+export { textBoxOf } from "./textbox.js";
 export function shapeOf(block) {
     if (block?.type !== "paragraph" || block.text !== "")
         return null;
@@ -169,16 +171,31 @@ function paintRuns(shape) {
         root.dataset["overflow"] = "true";
     return root;
 }
-export function paintShape(shape) {
+export function paintShape(shape, styler) {
+    const box = textBoxOf(shape);
     const host = document.createElement("div");
     host.className = "writer-shape";
+    if (box) {
+        host.setAttribute("contenteditable", "false");
+        host.dataset["textbox"] = "true";
+        if (box.pinned)
+            host.dataset["pinned"] = "true";
+        if (box.locked)
+            host.dataset["locked"] = "true";
+    }
     host.style.width = `${shape.width_mm}mm`;
     host.style.height = `${shape.height_mm}mm`;
     host.style.transform = `rotate(${shape.rotation_deg}deg)`;
     host.style.opacity = String(shape.opacity);
     host.style.zIndex = String(shape.z_index ?? 0);
-    host.setAttribute("role", "img");
-    host.setAttribute("aria-label", shape.text.content ? `${shape.kind}: ${shape.text.content}` : `${shape.kind} shape`);
+    if (box) {
+        host.setAttribute("role", "group");
+        host.setAttribute("aria-label", box.name ? `Text box: ${box.name}` : "Text box");
+    }
+    else {
+        host.setAttribute("role", "img");
+        host.setAttribute("aria-label", shape.text.content ? `${shape.kind}: ${shape.text.content}` : `${shape.kind} shape`);
+    }
     const svg = el("svg", { viewBox: "0 0 100 100", width: "100%", height: "100%", preserveAspectRatio: "none", "aria-hidden": "true" });
     svg.style.overflow = "visible";
     const defs = el("defs");
@@ -214,11 +231,28 @@ export function paintShape(shape) {
     body.setAttribute("stroke-opacity", String(shape.outline.opacity));
     body.setAttribute("stroke-width", String(shape.outline.width_pt * physicalStrokePx));
     body.setAttribute("vector-effect", "non-scaling-stroke");
-    if (shape.outline.style !== "solid")
+    if (shape.outline.style === "dashed" || shape.outline.style === "dotted")
         body.setAttribute("stroke-dasharray", shape.outline.style === "dotted" ? "1 3" : "5 3");
     group.appendChild(body);
+    if (shape.outline.style === "double" && shape.outline.enabled && shape.kind === "rectangle") {
+        // Two lines of the stated width with a gap of the same width between them (the export painter draws the same).
+        const line = shape.outline.width_pt * 25.4 / 72, inset = 2 * line;
+        const w = Math.max(1, shape.width_mm - 2 * inset), hh = Math.max(1, shape.height_mm - 2 * inset);
+        const inner = el("path", { d: roundedRectPhysical(shape.corners_mm.map(r => Math.max(0, r - inset)), w, hh) });
+        inner.setAttribute("transform", `translate(${inset * 100 / shape.width_mm} ${inset * 100 / shape.height_mm}) scale(${w / shape.width_mm} ${hh / shape.height_mm})`);
+        inner.setAttribute("fill", "none");
+        inner.setAttribute("stroke", shape.outline.color);
+        inner.setAttribute("stroke-opacity", String(shape.outline.opacity));
+        inner.setAttribute("stroke-width", String(shape.outline.width_pt * physicalStrokePx));
+        inner.setAttribute("vector-effect", "non-scaling-stroke");
+        group.appendChild(inner);
+    }
     svg.appendChild(group);
     host.appendChild(svg);
+    if (box) {
+        host.appendChild(paintTextBoxBody(shape, box, styler));
+        return host;
+    }
     if (shape.text.content && shape.kind !== "line") {
         const text = paintRuns(shape);
         host.appendChild(text);

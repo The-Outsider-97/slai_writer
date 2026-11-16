@@ -94,14 +94,17 @@ export async function removeColumnBreak(ed) {
     }
     return send(ed, { op: "batch", ops: ids.map((id) => ({ op: "column_break", block: id, remove: true })), label: "remove column break" });
 }
-/** The Scripture paragraph style and a two-column section around the selected paragraphs. */
+/** The Scripture paragraph style, chosen from the Home tab's style list: the style on the selected paragraphs and a two-column section around them. */
 export async function applyScripture(ed) {
     const sel = selectedBlocks(ed);
     if (!sel) {
         toast("Select the passage first.", { kind: "info" });
         return false;
     }
+    const before = ed.readSelection() ?? ed.recallSelection();
     const ok = await send(ed, { op: "scripture_apply", block: sel.first, end_block: sel.last, label: "Scripture style" });
+    if (ok && before)
+        ed.restoreSelection(before);
     if (ok)
         announce("Scripture style applied: two columns.");
     return ok;

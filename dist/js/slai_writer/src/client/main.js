@@ -14,11 +14,15 @@ import { signaturesScreen } from "./screens/signatures.js";
 import { signScreen, verifyScreen as verifySignatureScreen } from "./screens/signing.js";
 import { versionsScreen } from "./screens/versions.js";
 import { h } from "./kit.js";
+/** The shared start-up loader (tools/web/startup) shows these stages; once it is gone nobody listens. */
+const reportStartup = (message, progress) => { window.dispatchEvent(new CustomEvent("slai:startup-update", { detail: { message, progress } })); };
+reportStartup("Loading the editor ...", 0.1);
 registerWriterGlyphs();
 const root = document.getElementById("app");
 if (!root)
     throw new Error("The page has no #app element.");
 const app = new App(root);
+app.report = reportStartup;
 app.register("startup", (a) => startupScreen(a), "bare");
 app.register("verify", (a) => verifyScreen(a), "bare");
 app.register("twofa", (a) => twofaScreen(a), "bare");
