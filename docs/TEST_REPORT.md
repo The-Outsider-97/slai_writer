@@ -126,3 +126,51 @@ npm run test:e2e
 * The spell-checker warnings on your computer (`RESOURCE.MISSING structured_wordlist_en.json`, `wordlist_en.txt`, "initialized with 7 words") come from word
   lists and the `metaphone` module missing from your SLAI tree (`src/agents/language/library`); Writer reports spelling as unavailable and does not fix this.
 * `tests/test_sldc.py` in the SLAI core tests was not edited; the page-bands rules are tested in `applications/slai_writer/tests/test_page_bands.py`.
+
+## v2.4 round: tables, page columns, Scripture, table of contents, export
+
+Run at the end of the round, Linux, Python 3.13, Node 22, Chromium (Playwright), LibreOffice (as an independent reader of exported files).
+
+| Suite | Result |
+|---|---|
+| Writer, Python (`python3 -m unittest discover -s applications/slai_writer/tests -t .`) | **331 tests, 328 pass.** The 3 failures are the Reader-import tests (`test_import_text_markdown_html`, `test_sdoc_is_never_silently_reinterpreted`, `test_import_markdown_upload_and_rejections`): the Reader parser engine cannot be loaded in this environment (missing `src.agents` here, a `colorama` error on the Windows machine). They do not touch this round's code. |
+| …of which new this round | 81: tables 26 (`test_table_ops_grid`, `test_table_styles`), columns and Scripture 18, contents looks 10, export layout 21, all features together and old documents 6 |
+| Writer, TypeScript unit (`npx tsx --test tests_ts/*.test.ts`) | **175 tests, all pass** |
+| Browser, tables / columns / contents (`node tests_e2e/{table,column,toc}_features.mjs`) | **10/10, 9/9, 7/7 scenarios pass** (real server, real Chromium) |
+| Browser, the earlier suite (`node tests_e2e/run.mjs`) | **36 of 38 pass.** One failure is a stale scenario: it presses "/formatting bar" to *show* the bar, but the ribbon is now visible by default, so that toggles it off (`screens/doc.ts`, not changed here). The other (first typed letter lost right after creating a document) passed on two single re-runs and failed in two full runs: a timing flake in the first typing scenario. |
+| Type check (`tsc -p tsconfig.json`, `tsconfig.build.json`, `tsconfig.test.json`) | clean, on both the build machine and the Windows folder |
+| Build | `node ../tools/build/build-static.mjs` builds `dist/` |
+| Documaster's own tests (`applications/Documaster/tests_py`) | 184 tests; the same 3 fail with and without this round's writer changes (checked by swapping the original writers back in) |
+
+What the new tests check (and how):
+
+* **Tables.** Row/column insert and delete on plain, merged and header tables, split/merge, a seeded randomized sequence of operations that must keep every
+  invariant (rectangular grid, merged-cell spans, extension keys pointing at cells that exist), undo to the starting document, save and reopen, the 12 styles
+  against a golden file, borders, the layout tab, a table cut across pages (browser).
+* **Columns.** Each scope, selection splitting and merging back, idempotence, column breaks (also in one column: a page break), Scripture (properties, two
+  columns, idempotent, one undo, export), right-to-left, unequal widths, rejected values; in the browser the columns really are laid out (positions of typed
+  text), typing inside the second column, balance, the dialog keeps its values.
+* **Contents.** All 12 looks make a valid document that survives save and reopen; changing the look restyles the same entries (same ids); leader, placement,
+  hyperlinks, numbering, per-level and title formatting; undo; "Update Page Numbers Only" changes nothing in the document; the drawn numbers equal the
+  numbers of the PDF layout; an old table keeps working.
+* **Export (positions read back from the exported files, not from the model).** PDF: words of a selection sit in two or three column bands inside the margins,
+  the text before and after is full width and below/above the region, the separator line is in its colour between the columns, balanced columns end at about the same
+  height, a column break starts the next column, a 60-row table inside the columns is split across them, unequal widths of whole-page columns,
+  leaders and number placement per look, measured pages for headings inside columns. Word and RTF: the section, column, separator, bidi and break
+  markup; LibreOffice (not our code) is then asked to lay the same files out and its column positions, unequal widths and contents leaders are compared with what was written.
+
+### What was NOT done or not verified (this round)
+
+1. **Word itself, Google Docs, Apple Pages and other word processors were not run.** Only LibreOffice read the Word and RTF files back. Word may paginate
+   differently: the page numbers cached in contents entries come from Writer's own PDF layout, and on one test document LibreOffice placed a heading one
+   page earlier (the test accepts a difference of one page and the export says to update the fields). Exact cross-format fidelity is **not** claimed.
+2. **Unequal column widths are stored and exported (PDF whole-page layouts, Word, RTF) but the editor shows equal columns**, and a *selection* in the middle of a
+   PDF page is written with equal columns. The separator's colour, thickness and dashed/dotted style are drawn by the editor and the PDF (solid); Word and RTF draw a thin line.
+3. **A column break inside a selection that shares a page with other text is not written to the PDF** (the region is balanced instead); the export warns.
+   If a page already has several columns, columns of a different count in the middle of it start a new page in the PDF (warned).
+4. **ODT, HTML, Markdown, text and XML** do not carry columns, leaders or page references (ODT states this; the others are not layout formats).
+5. **Tables.** The browser cannot enforce an exact row height by clipping editable cells; a row is never split in the middle; tables inside column regions are
+   not split across pages in the editor (the PDF does split them).
+6. **Windows, Firefox, Safari, screen readers** were not run for these features. The Windows folder received the same files and ran the Python suite and the
+   three type checks (see above); the production build and the browser suites were not run there because this session cannot execute `npm.cmd`.
+7. **Reader / SPlanner / Documaster `.sldc` forward-compatibility** (an earlier request) is not part of this round and was not delivered.

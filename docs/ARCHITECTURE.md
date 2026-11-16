@@ -196,6 +196,24 @@ Every control has an accessible name; dialogs trap and restore focus; menus and 
 alone (text + icon + dot); live regions announce save, search counts, errors and mode changes; Esc closes page panels, menus, palettes and Hide; reduced
 motion and text scaling are honoured; the "contrast" theme raises contrast of page marks and highlights.
 
+## 9a. Tables, columns, Scripture, contents (v2.4 round)
+
+* **No core change.** Page columns use the sections' existing `columns` (1 to 8, Writer offers 1 to 4) and `column_gap_mm`. Everything else is in
+  `slai.writer.*` extensions (block extensions `table_layout`, `table_cell_styles`, `table_borders`, `table_style`, `column_break`, `toc_style`; document
+  extension keys `column_layouts` (per section id: separator, unequal widths, balance, flow, continuous) and `table_styles` (saved styles)) and in paragraph styles (`Scripture`,
+  `TOC Title`, `TOC Level 1..6`). The native `slai.sldc.toc` extension is unchanged, so a table of contents is still one every SLDC reader knows.
+* **Server.** `tableops.py` (grid model, rows/columns/merge/split, styles), `table_styles.py` + `table_styles.json` (the 12 looks, one source for server, client and
+  tests), `columns.py` (scopes, selection → continuous sections, `reconcile` after every operation, `inherit` on section breaks, `group_members` so page set-up
+  stays shared by sections on one sheet), `toc_presets.py` and `academic.py` (looks, ids kept on refresh). All are registered handlers in `ops.py`, so undo/redo,
+  versions, conflict handling and validation are the existing machinery.
+* **Client.** `table_geometry/table_style/table_actions/table_ui.ts`, `column_layout/column_actions/column_ui.ts`, `toc_actions/toc_ui.ts`; generated data files
+  (`table_styles_data.ts`, `toc_presets_data.ts`, from the Python sources by `scripts/gen_*.py`). The page engine lays columns out as real CSS columns inside each
+  sheet and cuts long tables between rows. Page numbers drawn in a contents are the exact ones from the Documaster PDF layout (`/layout`).
+* **Export.** The Documaster writers read the same extensions when present and fall back to the old behaviour when absent. PDF: `BalancedColumns` for a
+  selection on a page (blocks inside are still measured, so contents numbers stay right), frames for whole-page columns, leaders and number placement. Word/RTF:
+  continuous sections, column properties, bookmarks and `PAGEREF` fields. Writer adds the measured page numbers to the converted copy only
+  (`slai.writer.toc_page_labels`), never to the document.
+
 ## 12. Directory map
 
 ```

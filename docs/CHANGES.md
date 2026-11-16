@@ -82,3 +82,29 @@ upgrade); suggested-name conflicts; commands acting before held keys; caret rule
   add background Ctrl+Alt+B, add illustration Ctrl+D (InDesign "Place"). New section, layer and background keys are Writer's own where the other programs have none; the Support page says which.
 * **Return to document** button on Settings, Plans, Support and the other pages opened from a document.
 * **Fix.** `SLDCValidationError: Assets that no figure or cover uses` after deleting a picture.
+
+## v2.4 round: tables, page columns, Scripture style, table of contents
+
+Request: "SLAI Writer v2.4: Advanced Table Editing, Page Columns, Scripture Paragraph Style, and Table of Contents Enhancements".
+Nothing here changes the SLDC core schema. Everything new is stored in sections' existing `columns` / `column_gap_mm`, in blocks' and the document's
+namespaced `slai.writer.*` extensions, and in ordinary paragraph styles, so older files open unchanged and other SLAI programs ignore what they do not know.
+
+* **Tables (`tableops.py`, `table_styles.py`, `table_*.ts`).** Insert/delete rows and columns (one or several, above/below/left/right, from the ribbon, the context
+  menu and the keyboard), with merged cells kept valid; header rows; 12 table styles with previews and a "restore default"; accent colour, banded rows/columns,
+  first column; borders per edge or region; cell colour, alignment, padding; column widths, row heights, AutoFit, table alignment; a table longer than a page is
+  cut between rows with its header repeated. Stored in `slai.writer.table_layout/table_cell_styles/table_borders/table_style` (and the document's `table_styles`).
+* **Page columns (`columns.py`, `column_*.ts`).** 1 to 4 columns for the document, a section or a selection (a selection becomes its own *continuous* section
+  and merges back when nothing tells it apart); equal or unequal widths, gap, separator line, balance, left-to-right or right-to-left flow, column break.
+  Layout tab: Columns (One, Two, Three, Four, Left, Right, More Columns…) and Breaks. The editor lays out real CSS columns.
+* **Scripture style.** One action sets Times New Roman 11 pt italic, left aligned, in two columns, as a paragraph style plus a two-column selection section;
+  repeating it changes nothing; one undo reverses it; it is exported like any paragraph style.
+* **Table of contents (`toc_presets.py`, `academic.py`, `toc_*.ts`).** Twelve looks (Classic, Modern, Minimalist, Academic, Professional Report, Formal, Compact,
+  Elegant, Technical Documentation, Book/Manuscript, Numbered Outline, Custom) with per-level and title formatting, leader (dots, dashes, line, none), page-number
+  placement (right, after the title, before the title), hyperlinks, numbering. Update Page Numbers Only, Update Entire Table, Change Style, Edit Settings, Remove.
+  Entry and title blocks keep their ids when the table is refreshed. A table made by an earlier Writer keeps its look until it is restyled.
+* **Export (Documaster writers; new optional reads of the `slai.writer` data, nothing else changed).**
+  PDF: whole-page columns (unequal widths, separator line, column breaks); a selection in its own columns is *balanced* across equal columns on the same
+  page; contents leaders and number placement. Word: continuous sections, unequal widths, separator (Word's own thin line), right-to-left flow, column breaks;
+  contents entries with a leader tab and a page-reference field to a bookmark on each heading. RTF: the same. ODT, HTML, Markdown: columns are not written
+  (the export dialog says so). Documaster fix: a one-line default for `TrackedParagraph.block_id`.
+* **Known limits.** See `TEST_REPORT.md`, "v2.4 round".
