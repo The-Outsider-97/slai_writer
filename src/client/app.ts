@@ -32,6 +32,19 @@ export type AppEvent =
 const ROUTES: ReadonlySet<string> = new Set<RouteName>(["startup", "verify", "twofa", "enroll", "reset", "recover", "home", "new", "settings", "plans", "signatures", "profile", "help", "versions", "verify-signature", "sign", "doc"]);
 const NEEDS_DOC: ReadonlySet<string> = new Set(["doc", "versions", "verify-signature", "sign"]);
 
+/** Start-up stages, reported to the loader screen: a message and how far along the start is (0 to 1). */
+export type StartupReport = (message: string, progress: number) => void;
+/** How long one try at the server may take, and how many tries start-up makes before it says the server is not answering. */
+export const STARTUP_TRY_MS = 8000;
+export const STARTUP_TRIES = 3;
+
+function timeoutAfter<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new ApiError(0, "offline", "The local server did not answer in time.", "Check that SLAI Writer is still running, then try again.")), ms);
+    work.then((value) => { window.clearTimeout(timer); resolve(value); }, (error: unknown) => { window.clearTimeout(timer); reject(error); });
+  });
+}
+
 function readGuest(): boolean { try { return window.sessionStorage.getItem("writer.guest") === "1"; } catch { return false; } }
 function writeGuest(on: boolean): void { try { if (on) window.sessionStorage.setItem("writer.guest", "1"); else window.sessionStorage.removeItem("writer.guest"); } catch { /* storage may be blocked: the choice then just lasts until the next start */ } }
 
@@ -47,6 +60,8 @@ export class App {
   lastDoc: string | null = null;
   guest = readGuest();
   offline = false;
+  /** Set by the entry point; ignored once the loader screen is gone. */
+  report: StartupReport = () => undefined;
   private screen: Screen | null = null;
   private mount: HTMLElement;
   private routing = 0;
@@ -66,14 +81,35 @@ export class App {
 
   /* --------------------------------------------------------------------------------------------- start-up */
   async start(): Promise<void> {
-    await this.refresh();
+    this.report("Connecting to the local server ...", 0.2);
+    await this.bootstrapWithRetry();
+    this.report("Checking your account and settings ...", 0.5);
     const wanted = this.parse(window.location.hash);
     const first = this.signedIn || this.guest ? wanted : { name: "startup" as RouteName };
     const open = this.boot.open;
     for (const d of open) this.docs.set(d.sid, d);
     if (!this.signedIn && !this.guest && wanted.name !== "startup" && wanted.name !== "signatures") { this.go({ name: "startup" }, true); return; }
     if (first.name === "startup" && (this.signedIn || this.guest)) { this.go({ name: "home" }, true); return; }
+    this.report(first.name === "doc" ? "Opening your document ..." : "Preparing your workspace ...", 0.7);
     await this.render(first);
+    this.report("Ready", 1);
+  }
+
+  /** The first request of a session. A server that is still coming up (the window can open a moment before it answers) is waited for, a few times,
+   *  and the loader says so; a server that is not there at all ends in an error with a way to try again, never in an endless spinner. */
+  private async bootstrapWithRetry(): Promise<Bootstrap> {
+    let last: unknown;
+    for (let attempt = 1; attempt <= STARTUP_TRIES; attempt++) {
+      try { return await timeoutAfter(this.refresh(), STARTUP_TRY_MS); }
+      catch (error) {
+        last = error;
+        const transient = error instanceof ApiError && (error.code === "offline" || error.status >= 502);
+        if (!transient || attempt === STARTUP_TRIES) break;
+        this.report(`Waiting for the local server (try ${attempt + 1} of ${STARTUP_TRIES}) ...`, 0.2);
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 600 * attempt));
+      }
+    }
+    throw last;
   }
 
   async refresh(): Promise<Bootstrap> {

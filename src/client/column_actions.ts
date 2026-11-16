@@ -1,4 +1,4 @@
-/** What the Layout tab does about columns: one server operation each (columns_set, column_break, scripture_apply), so every change is undoable, saved and exported. */
+/** What the Layout tab does about columns: one server operation each (columns_set, column_break; scripture_apply for the Scripture paragraph style), so every change is undoable, saved and exported. */
 import type { Editor } from "./editor.js";
 import { toast, announce } from "./kit.js";
 import { errorText } from "./net.js";
@@ -87,11 +87,13 @@ export async function removeColumnBreak(ed: Editor): Promise<boolean> {
   return send(ed, { op: "batch", ops: ids.map((id) => ({ op: "column_break", block: id, remove: true })), label: "remove column break" });
 }
 
-/** The Scripture paragraph style and a two-column section around the selected paragraphs. */
+/** The Scripture paragraph style, chosen from the Home tab's style list: the style on the selected paragraphs and a two-column section around them. */
 export async function applyScripture(ed: Editor): Promise<boolean> {
   const sel = selectedBlocks(ed);
   if (!sel) { toast("Select the passage first.", { kind: "info" }); return false; }
+  const before = ed.readSelection() ?? ed.recallSelection();
   const ok = await send(ed, { op: "scripture_apply", block: sel.first, end_block: sel.last, label: "Scripture style" });
+  if (ok && before) ed.restoreSelection(before);
   if (ok) announce("Scripture style applied: two columns.");
   return ok;
 }

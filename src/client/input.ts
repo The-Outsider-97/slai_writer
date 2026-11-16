@@ -9,6 +9,9 @@ import { highlightsSupported } from "./decor.js";
 import { analyzeMarkdownTable, MM_PX } from "./textops.js";
 import { objectKind } from "./object_kind.js";
 import { openShapeTextEditor } from "./shape_text_edit.js";
+import { isEditingTextBox, openTextBoxEditor } from "./textbox_edit.js";
+import { shapeOf } from "./shape.js";
+import { textBoxOf } from "./textbox.js";
 import type { TableData } from "./types.js";
 
 interface DropPoint { node: Node; offset: number }
@@ -260,6 +263,7 @@ export function installInput(ed: Editor): () => void {
     }
     if (ed.selectedBlock) {
       if (e.key === "Delete" || e.key === "Backspace") return run(() => A.deleteBlocks(ed, [ed.selectedBlock as string]));
+      if (e.key === "Enter" && textBoxOf(shapeOf(ed.model.block(ed.selectedBlock)))) { e.preventDefault(); openTextBoxEditor(ed, ed.selectedBlock); return; }
       if (e.key === "Enter") return run(() => { const b = ed.model.block(ed.selectedBlock as string); const kind = b ? objectKind(b.type, Boolean(b.extensions?.["slai.writer.shape"])) : null; if (b && kind) ed.events.emit({ type: "open-object", kind, block: b.id }); });
       if (e.key === "Escape") { A.clearBlockSelection(ed); return; }
     }
@@ -398,6 +402,18 @@ export function installInput(ed: Editor): () => void {
     const wrap = wrapperAt(ed, target);
     const type = wrap?.dataset["type"];
     const inField = !!target.closest("[data-edit]");
+    if (wrap && !inField && wrap.querySelector(".writer-shape[data-textbox]")) {
+      // A text box: its border selects it; a click on the text inside edits the text. Neither moves or resizes anything.
+      const id = wrap.dataset["id"] as string;
+      const box = wrap.querySelector<HTMLElement>(".writer-shape[data-textbox]") as HTMLElement;
+      if (isEditingTextBox(id)) return;
+      A.selectBlock(ed, id, e.shiftKey);
+      const r = box.getBoundingClientRect();
+      const band = 7;
+      const onBorder = e.clientX - r.left < band || r.right - e.clientX < band || e.clientY - r.top < band || r.bottom - e.clientY < band;
+      if (!onBorder && !e.shiftKey && target.closest(".tb-body")) openTextBoxEditor(ed, id, { x: e.clientX, y: e.clientY });
+      return;
+    }
     if (wrap && !inField && (wrap.querySelector(".writer-shape") || type === "figure" || type === "equation" || type === "embed" || type === "table")) { A.selectBlock(ed, wrap.dataset["id"] as string, e.shiftKey && !!wrap.querySelector(".writer-shape")); if (type === "embed") ed.events.emit({ type: "open-object", kind: "embed", block: wrap.dataset["id"] as string }); return; }
     if (ed.selectedBlock) A.clearBlockSelection(ed);
   });
@@ -407,6 +423,11 @@ export function installInput(ed: Editor): () => void {
     if(target.closest(".shape-direct-editor"))return;
     const shapeWrap=wrapperAt(ed,target);
     const shapeId=shapeWrap?.dataset["id"];
+    if(shapeId&&shapeWrap?.querySelector(".writer-shape[data-textbox]")){
+      if(isEditingTextBox(shapeId))return;                       // inside the text, the browser selects the word
+      if(!ed.readOnly){e.preventDefault();e.stopPropagation();A.selectBlock(ed,shapeId);openTextBoxEditor(ed,shapeId,{x:e.clientX,y:e.clientY});}
+      return;
+    }
     if(shapeId&&shapeWrap?.querySelector(".writer-shape")&&!ed.readOnly){
       e.preventDefault();e.stopPropagation();openShapeTextEditor(ed,shapeId);return;
     }
@@ -438,6 +459,10 @@ export function installInput(ed: Editor): () => void {
 
   /* ------------------------------------------------------------------------------------------ clipboard */
   const SHAPE_CLIP = "application/x-slai-writer-shape+json";
+  const shapeClipText = (shape: unknown): string => {
+    const box = (shape as { textbox?: { paragraphs?: Array<{ text: string }> } }).textbox;
+    return box?.paragraphs ? box.paragraphs.map((p) => p.text).join("\n") : `Writer ${(shape as { kind: string }).kind} vector shape`;
+  };
   const selectedShape = (): {id:string;shape:unknown}|null => {
     const id=ed.selectedBlock;
     const item=id?ed.model.block(id):undefined;
@@ -451,6 +476,10 @@ export function installInput(ed: Editor): () => void {
       if(shape.version!==1||typeof shape.kind!=="string")throw Error("Not a Writer shape");
       const clone=structuredClone(shape);
       delete clone.group_id;
+      const pasted=clone.textbox as {pinned?:boolean;locked?:boolean}|undefined;
+      if(pasted){pasted.pinned=false;pasted.locked=false;}      // a copy is a new, free text box
+      const place=clone.layout as {mode?:string;x_mm?:number;y_mm?:number}|undefined;
+      if(pasted&&place?.mode==="floating"){place.x_mm=Math.min(5000,(place.x_mm??0)+5);place.y_mm=Math.min(5000,(place.y_mm??0)+5);}
       void A.insertBlock(ed,{type:"paragraph",text:"",extensions:{"slai.writer.shape":clone}})
         .then(id=>{if(id)A.selectBlock(ed,id);})
         .catch(error=>ed.failed(error));
@@ -501,7 +530,7 @@ export function installInput(ed: Editor): () => void {
     if(selected&&e.clipboardData){
       e.preventDefault();
       e.clipboardData.setData(SHAPE_CLIP,JSON.stringify(selected.shape));
-      e.clipboardData.setData("text/plain",`Writer ${(selected.shape as {kind:string}).kind} vector shape`);
+      e.clipboardData.setData("text/plain",shapeClipText(selected.shape));
       return;
     }
     const text = ed.selectionText();
@@ -514,7 +543,7 @@ export function installInput(ed: Editor): () => void {
     if(selected&&e.clipboardData&&!ed.readOnly){
       e.preventDefault();
       e.clipboardData.setData(SHAPE_CLIP,JSON.stringify(selected.shape));
-      e.clipboardData.setData("text/plain",`Writer ${(selected.shape as {kind:string}).kind} vector shape`);
+      e.clipboardData.setData("text/plain",shapeClipText(selected.shape));
       void A.deleteBlocks(ed,[selected.id]);
       return;
     }

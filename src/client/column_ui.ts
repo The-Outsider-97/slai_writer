@@ -1,4 +1,4 @@
-/** The Layout tab of the ribbon (Columns, Breaks, Scripture, Page setup) and the More Columns dialog. */
+/** The Layout tab of the ribbon (Columns, Breaks, Page setup). Scripture is a paragraph style and lives in the Home tab's style list and the More Columns dialog. */
 import { glyph, h, openDialog, openMenu, type MenuEntry } from "./kit.js";
 import * as C from "./column_actions.js";
 import * as A from "./actions.js";
@@ -51,13 +51,11 @@ export function buildLayoutRibbon(ctx: DocCtx): { el: HTMLElement; update(): voi
     "separator",
     { label: "Section break (new section from here)", disabled: readOnly(), run: () => { void A.sectionBreak(ed); } },
   ], "Breaks: page, column and section breaks");
-  const scripture = action("Scripture", () => { void C.applyScripture(ed); }, "book", "Scripture style: Times New Roman 11 pt italic in two columns, for the selected passage");
   const status = h("span", { class: "ribbon-style-label", attrs: { "aria-live": "polite" } });
   const el = h("div", { class: "format-ribbon layout-ribbon", attrs: { role: "toolbar", "aria-label": "Layout ribbon" } },
     group("Page", action("Page setup", () => { void pageSetupDialog(ctx); }, "ruler", "Page size, orientation and margins")),
     group("Columns", columns, action("Column break", () => { void C.insertColumnBreak(ed); }, "page", "Column break: start the next column here"), status),
-    group("Breaks", breaks),
-    group("Styles", scripture));
+    group("Breaks", breaks));
   const update = (): void => {
     const now = C.columnsAtCaret(ed);
     status.textContent = now.spec ? `${now.spec.count} columns${now.spec.widthsMm ? " (unequal)" : ""}` : "One column";

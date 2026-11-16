@@ -3,7 +3,7 @@
  *  re-resolved after every re-render, so they follow edits. Browsers without the API simply show no highlight; the lists still work. */
 import { rangeFor } from "./domtext.js";
 
-export type HighlightKind = "search" | "search-current" | "typo" | "grammar" | "note" | "comment";
+export type HighlightKind = "search" | "search-current" | "typo" | "grammar" | "style" | "note" | "comment";
 export interface Mark { block: string; start: number; end: number; id?: string }
 
 interface Registry { set(name: string, value: unknown): void; delete(name: string): void }

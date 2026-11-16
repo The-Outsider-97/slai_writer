@@ -64,7 +64,7 @@ export interface WriterExt {
   /** The layer a block is on when it is not the one its kind belongs to (text on Text, pictures on Illustrations). */
   layer_of?: Record<string, string>;
   column_layouts?: Record<string, ColumnLayout>;
-  view?: Record<string, unknown>; dictionary?: string[]; spell_ignore?: string[]; locks?: Record<string, { label?: string; summary?: string }>;
+  view?: Record<string, unknown>; dictionary?: string[]; spell_ignore?: string[]; proof_ignore?: string[]; locks?: Record<string, { label?: string; summary?: string }>;
   source_status?: Record<string, { status: string; date: string; note?: string }>; signature_marks?: unknown;
 }
 export interface DocMeta {
@@ -102,7 +102,7 @@ export type Op = { op: string; label?: string; [k: string]: unknown };
 export interface Prefs {
   theme: "system" | "light" | "dark" | "contrast"; scale: number; motion: "system" | "reduce"; autosave: boolean; autosave_seconds: number; language: string;
   page_size: string; orientation: string; units: "mm" | "in"; zoom: number; zoom_mode: "custom" | "height" | "width"; show_rulers: boolean; show_guides: boolean;
-  spell: boolean; grammar: boolean; ai_enabled: boolean; ai_cloud: boolean; ai_notes: boolean; ai_budget: number; side_panel: boolean;
+  spell: boolean; grammar: boolean; style: boolean; ai_enabled: boolean; ai_cloud: boolean; ai_notes: boolean; ai_budget: number; side_panel: boolean;
   cursor_default: string; cursor_drag: string; cursor_draw: string; cursor_text: string; last_folder: string; wizard_done: boolean; lookup_online: boolean;
 }
 export interface AccountPublic {

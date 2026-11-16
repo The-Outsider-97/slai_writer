@@ -18,6 +18,9 @@ import { paragraphFontDialog } from "./typography.js";
 import { editShape } from "./shape_ui.js";
 import { shapeOf, SHAPE_KEY } from "./shape.js";
 import { insertShape } from "./shape_ui.js";
+import { addTextBox, drawTextBox, insertTextBox } from "./textbox_ui.js";
+import { activeTextBoxId, applyTextBoxAction, changeTextBox, openTextBoxEditor, type TextBoxAction } from "./textbox_edit.js";
+import { textBoxOf } from "./textbox.js";
 import * as T from "./table_actions.js";
 import { insertMultipleDialog, splitCellDialog, tableBordersDialog, tablePropertiesDialog } from "./table_ui.js";
 
@@ -117,6 +120,9 @@ export const COMMANDS: Command[] = [
   { id: "shape-format", label: "Shape Format…", group: "Insert", icon: "layers", keywords: "shape text fill outline shadow rotate arrange group", 
     unavailable: c => EDITING(c) ?? (shapeOf(c.ed.model.block(c.ed.selectedBlock ?? "")) ? null : "Select a shape first."),
     run: c => c.ed.selectedBlock ? editShape(c,c.ed.selectedBlock) : undefined },
+  { id: "textbox", label: "Text Box…", group: "Insert", icon: "paragraph", keywords: "text box textbox callout sidebar pull quote frame floating", unavailable: EDITING, run: (c) => insertTextBox(c) },
+  { id: "textbox-draw", label: "Draw Text Box", group: "Insert", icon: "pen", keywords: "text box textbox draw drag", unavailable: EDITING, run: (c) => drawTextBox(c) },
+  { id: "textbox-default", label: "Text Box (default size)", group: "Insert", icon: "paragraph", keywords: "text box textbox default quick", unavailable: EDITING, run: async (c) => { await addTextBox(c); } },
   { id: "shape", label: "Insert Shape…", group: "Insert", icon: "layers", keywords: "vector rectangle ellipse line star arrow triangle diamond pentagon hexagon cross", unavailable: EDITING, run: (c) => insertShape(c) },
   { id: "picture", label: "Add illustration (picture)…", group: "Insert", icon: "image", keywords: "image photo figure illustration place", shortcut: "Ctrl+D", unavailable: EDITING, run: (c) => pickPicture(c) },
   { id: "equation", label: "Equation (block)…", group: "Insert", icon: "sigma", keywords: "math formula latex", unavailable: EDITING, run: (c) => equationDialog(c) },
@@ -145,7 +151,7 @@ export const COMMANDS: Command[] = [
   ...[1, 2, 3, 4].map((n): Command => ({ id: `columns-${n}`, label: n === 1 ? "One column" : `${n} columns`, group: "Document", icon: "layout", keywords: "columns layout", unavailable: EDITING,
     run: async (c) => { await C.setColumns(c.ed, C.defaultScope(c.ed), { columns: n, widths_mm: null }); } })),
   { id: "column-break", label: "Column break", group: "Insert", icon: "page", keywords: "next column break", unavailable: needsCaret, run: async (c) => { await C.insertColumnBreak(c.ed); } },
-  { id: "scripture", label: "Scripture style (two columns, italic)", group: "Paragraph", icon: "book", keywords: "scripture verse passage bible quote columns", unavailable: needsCaret, run: async (c) => { await C.applyScripture(c.ed); } },
+  { id: "scripture", label: "Scripture paragraph style", group: "Paragraph", icon: "book", keywords: "scripture verse passage bible quote columns", unavailable: needsCaret, run: async (c) => { await C.applyScripture(c.ed); } },
   { id: "header-footer", label: "Header and footer…", group: "Document", icon: "layout", keywords: "page number running head", unavailable: EDITING, run: (c) => headerFooterDialog(c) },
   { id: "page-setup", label: "Page dimensions and margins…", group: "Document", icon: "ruler", keywords: "size paper a4 letter orientation margins", unavailable: EDITING, run: (c) => pageSetupDialog(c) },
   { id: "background", label: "Add background (page colour)…", group: "Document", icon: "background", keywords: "page colour color", shortcut: "Ctrl+Alt+B", unavailable: EDITING, run: (c) => backgroundDialog(c) },
@@ -186,6 +192,25 @@ export const COMMANDS: Command[] = [
   { id: "signatures", label: "Signature graphics library", group: "Sign and share", icon: "signature", run: (c) => { c.app.go({ name: "signatures" }); } },
   { id: "settings", label: "Settings", group: "Document", icon: "settings", run: (c) => { c.app.go({ name: "settings" }); } },
 ];
+
+/** While the text inside a text box is being edited, the ordinary formatting commands (ribbon buttons, shortcuts, palette) format that text. */
+const BOX_ROUTES: Record<string, TextBoxAction> = {
+  bold: { kind: "toggle", key: "bold" }, italic: { kind: "toggle", key: "italic" }, underline: { kind: "toggle", key: "underline" },
+  strike: { kind: "toggle", key: "strike" }, superscript: { kind: "toggle", key: "superscript" }, subscript: { kind: "toggle", key: "subscript" },
+  "align-left": { kind: "paragraph", attrs: { align: "left" } }, "align-center": { kind: "paragraph", attrs: { align: "center" } },
+  "align-right": { kind: "paragraph", attrs: { align: "right" } }, "align-justify": { kind: "paragraph", attrs: { align: "justify" } },
+  bullets: { kind: "paragraph", attrs: { list: "bullet" } }, numbered: { kind: "paragraph", attrs: { list: "number" } },
+  quote: { kind: "paragraph", attrs: { role: "quote", style: null } },
+};
+for (const command of COMMANDS) {
+  const route = BOX_ROUTES[command.id];
+  if (!route) continue;
+  const original = command.run.bind(command);
+  const gate = command.unavailable?.bind(command);
+  command.run = (ctx) => { const id = activeTextBoxId(); return id ? applyTextBoxAction(ctx.ed, id, route) : original(ctx); };
+  command.unavailable = (ctx) => (activeTextBoxId() ? null : gate ? gate(ctx) : null);
+}
+
 
 /* Keys typed just before a command was chosen may still be waiting for the server (see input.ts); a command runs after them, on the text the person sees. */
 for (const command of COMMANDS) {
@@ -330,10 +355,29 @@ export function contextMenu(ctx: DocCtx, x: number, y: number, restore: () => vo
     const duplicate = (): void => {
       const next = structuredClone(shape);
       delete next.group_id;
+      if (next.textbox) { next.textbox.pinned = false; next.textbox.locked = false; if (next.layout?.mode === "floating") { next.layout.x_mm = (next.layout.x_mm ?? 0) + 6; next.layout.y_mm = (next.layout.y_mm ?? 0) + 6; } }
       void A.insertBlock(ctx.ed,{type:"paragraph",text:"",extensions:{[SHAPE_KEY]:next}},selected)
         .then(id=>{if(id)A.selectBlock(ctx.ed,id);})
         .catch(err=>toast(errorText(err),{kind:"error"}));
     };
+    const box=textBoxOf(shape);
+    if(box){
+      const flip=(key:"pinned"|"locked",label:string)=>(): void => void changeTextBox(ctx.ed,selected,s=>{const b=s.textbox as NonNullable<typeof s.textbox>;b[key]=!b[key];},label);
+      const z=(delta:number)=>(): void => void changeTextBox(ctx.ed,selected,s=>{s.z_index=Math.max(-1000,Math.min(1000,(s.z_index??0)+delta));},"text box order");
+      menuAt(x,y,[
+        {label:"Edit Text",icon:"paragraph",disabled:ctx.ed.readOnly||Boolean(box.locked),run:()=>openTextBoxEditor(ctx.ed,selected)},
+        {label:box.pinned?"Unpin Position":"Pin Position",icon:"pin",disabled:ctx.ed.readOnly||Boolean(box.locked),run:flip("pinned","pin text box")},
+        {label:box.locked?"Unlock Object":"Lock Object",icon:"lock",disabled:ctx.ed.readOnly,run:flip("locked","lock text box")},
+        "separator",
+        {label:"Bring Forward",icon:"arrow-up",disabled:ctx.ed.readOnly||Boolean(box.locked),run:z(1)},
+        {label:"Send Backward",icon:"arrow-down",disabled:ctx.ed.readOnly||Boolean(box.locked),run:z(-1)},
+        {label:"Duplicate Text Box",icon:"copy",disabled:ctx.ed.readOnly,run:duplicate},
+        {label:"Delete Text Box",icon:"trash",disabled:ctx.ed.readOnly||Boolean(box.locked),run:()=>{void A.deleteBlocks(ctx.ed,[selected]);}},
+        "separator",
+        entry("shape-format"),entry("textbox"),
+      ],"Text box actions");
+      return;
+    }
     menuAt(x,y,[
       {label:"Edit Text…",icon:"paragraph",disabled:ctx.ed.readOnly,run:()=>void editShape(ctx,selected)},
       entry("shape-format"),

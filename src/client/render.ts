@@ -5,6 +5,8 @@ import { plaintextOnlySupported } from "./domtext.js";
 import { segments, MM_PX, type Segment } from "./textops.js";
 import { paintFigure } from "./figlayout.js";
 import { shapeOf, paintShape } from "./shape.js";
+import type { ParagraphStyler } from "./textbox.js";
+import { FRONT_MATTER_STYLES } from "./named_styles.js";
 import { resolveTable, borderCss, CELLS_KEY, LAYOUT_KEY, type CellLook, type CustomStyles } from "./table_style.js";
 import type { Block, DocMeta, EmbedDecl, Reference, TableCellStyle, TableLayout } from "./types.js";
 
@@ -72,6 +74,15 @@ export function applyStyle(el: HTMLElement, props: StyleProps, paragraph: boolea
   if (typeof props["space_after_pt"] === "number") set("margin-bottom", `${props["space_after_pt"]}pt`);
   if (typeof props["indent_mm"] === "number") set("padding-left", `${props["indent_mm"]}mm`);
   if (typeof props["first_line_indent_mm"] === "number") set("text-indent", `${props["first_line_indent_mm"]}mm`);
+}
+
+/** Applies a named paragraph style inside a text box, from the document's own definitions (Scripture, Title and so on are defined once). */
+export function paragraphStyler(meta: DocMeta): ParagraphStyler {
+  return (el, name) => {
+    let props = resolveStyle(meta, "paragraph", name);
+    if (!Object.keys(props).length && FRONT_MATTER_STYLES[name]) props = FRONT_MATTER_STYLES[name] as StyleProps;
+    applyStyle(el, props, true);
+  };
 }
 
 const SAFE_LINK = /^(https?:|mailto:)/i;
@@ -337,7 +348,7 @@ export function renderBlock(block: Block, ctx: RenderContext): HTMLElement {
     default: {
       const shape = shapeOf(block);
       if(shape){
-        const node=paintShape(shape);
+        const node=paintShape(shape,paragraphStyler(ctx.meta));
         if(shape.layout?.mode==="floating"){
           if(shape.layout.wrap==="top_bottom"){
             // A top-and-bottom shape consumes normal block-flow space,

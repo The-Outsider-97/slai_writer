@@ -35,10 +35,16 @@ function setBarPref(on: boolean): void { try { window.localStorage.setItem(BAR_K
 
 export async function docScreen(app: App, route: Route): Promise<Screen> {
   const sid = route.sid ?? "";
-  const state = await api.get<DocState>(`/docs/${encodeURIComponent(sid)}`);
+  // The document is the only thing the editor needs before it can open. The list of open documents and the custom cursors are asked for at the same
+  // time, and either one failing leaves the editor usable (the list is refreshed by the next event, the cursors fall back to the built-in ones).
+  app.report("Reading the document ...", 0.78);
+  const [state, , cursors] = await Promise.all([
+    api.get<DocState>(`/docs/${encodeURIComponent(sid)}`),
+    app.openDocs().catch(() => undefined),
+    api.get<{ custom: Array<{ id: string; hotspot: number[] }> }>("/cursors").catch(() => ({ custom: [] })),
+  ]);
   app.remember(state);
-  await app.openDocs().catch(() => undefined);
-  const cursors = await api.get<{ custom: Array<{ id: string; hotspot: number[] }> }>("/cursors").catch(() => ({ custom: [] }));
+  app.report("Laying out the pages ...", 0.9);
 
   const ed = new Editor(state, { prefs: () => app.prefs });
   const uninstall = installInput(ed);

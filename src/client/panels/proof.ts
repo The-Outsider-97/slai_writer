@@ -6,12 +6,20 @@ import { ApiError, announce, clear, h, labelled, toast } from "../kit.js";
 import type { DocCtx, Panel } from "../docctx.js";
 import { api, errorText } from "../net.js";
 import type { DocState, Patch } from "../types.js";
-import { button, fill, notice, selectField, statusBadge } from "../widgets.js";
+import { button, checkbox, fill, notice, selectField, statusBadge } from "../widgets.js";
 import { ProofStatus } from "../proof_status.js";
 
-interface SpellIssue { kind: "spelling"; block: string; start: number; end: number; text: string; suggestions: string[]; source: string }
-interface GrammarIssue { kind: "grammar"; block: string; start: number; end: number; text: string; message: string; suggestion?: string; replacement?: string; severity?: string; rule?: string }
-type Issue = SpellIssue | GrammarIssue;
+/** One finding, as Writer's proofreading layer returns it: category, exact range, explanation, replacements, confidence and provider. */
+interface Issue {
+  id: string; kind: "spelling" | "grammar" | "style"; category: string; block: string; start: number; end: number; text: string; message?: string;
+  suggestions: string[]; replacement?: string | null; severity?: string; confidence?: number; rule?: string; provider?: string;
+}
+type ProofResponse = { available: boolean; reason?: string | null; issues: Issue[]; version: number; truncated?: boolean; providers?: string[]; skipped?: Array<{ block: string; reason: string }> };
+const CATEGORY: Record<string, { label: string; tone: "danger" | "warn" | "idle" }> = {
+  spelling: { label: "Spelling", tone: "danger" }, grammar: { label: "Grammar", tone: "warn" }, agreement: { label: "Agreement", tone: "warn" }, usage: { label: "Word choice", tone: "warn" },
+  punctuation: { label: "Punctuation", tone: "warn" }, capitalization: { label: "Capital letters", tone: "warn" }, style: { label: "Style", tone: "idle" },
+};
+const LANGUAGES: Array<[string, string]> = [["en", "English (either spelling)"], ["en-US", "English (US)"], ["en-GB", "English (UK)"], ["nl", "Nederlands"]];
 interface Hunk { id: string; block: string; start: number; end: number; original: string; replacement: string; status: string; unverified: string[]; label: string }
 interface Proposal { id: string; hunks: Hunk[]; notes: string[]; label: string; task: string }
 interface Job { id: string; state: "running" | "ready" | "failed" | "cancelled"; progress: number; total: number; error: string | null; proposal: Proposal | null; hint?: string }
@@ -30,12 +38,18 @@ export function createProofPanel(ctx: DocCtx): Panel {
   let checkedVersion = -1;
   let ours = false;                    // true while a patch is our own accepted suggestion, so its marks are kept
   let autoTimer: number | undefined;
+  let current = -1;                    // the issue Next / Previous last went to
   const pendingBlocks = new Set<string>();
   const status = new ProofStatus();   // checks that said they cannot run, and why
+  const notes = new Map<string, string>();   // reasons a check ran only in part (an optional provider is missing, a paragraph was in another language)
+  const ignoredOnce = new Set<string>();     // ids of findings the person dismissed; kept for this session so a recheck does not bring them back
+  const sequence = { spell: 0, grammar: 0 };
+  const KINDS = { spell: ["spelling"], grammar: ["grammar", "style"] } as const;
 
   const marks = (): void => {
-    ed.decor.set("typo", issues.filter((i) => i.kind === "spelling").map((i) => ({ block: i.block, start: i.start, end: i.end })));
-    ed.decor.set("grammar", issues.filter((i) => i.kind === "grammar").map((i) => ({ block: i.block, start: i.start, end: i.end })));
+    for (const kind of ["spelling", "grammar", "style"] as const) {
+      ed.decor.set(kind === "spelling" ? "typo" : kind, issues.filter((i) => i.kind === kind).map((i) => ({ block: i.block, start: i.start, end: i.end, id: i.id })));
+    }
   };
 
   /** Blocks to check: the paragraphs the selection touches, or the whole document when nothing is selected. */
@@ -50,10 +64,12 @@ export function createProofPanel(ctx: DocCtx): Panel {
     for (const i of issues) if (i !== done && i.block === done.block && i.start >= done.end) { i.start += delta; i.end += delta; }
   };
 
+  const ordered = (): Issue[] => [...issues].sort((x, y) => ed.model.indexOf(x.block) - ed.model.indexOf(y.block) || x.start - y.start);
+
   const accept = async (issue: Issue, replacement: string): Promise<void> => {
     try {
       ours = true;
-      await ed.op({ op: "text", block: issue.block, start: issue.start, end: issue.end, insert: replacement, expect: issue.text, label: issue.kind === "spelling" ? "spelling correction" : "grammar correction" });
+      await ed.op({ op: "text", block: issue.block, start: issue.start, end: issue.end, insert: replacement, expect: issue.text, label: issue.kind === "spelling" ? "spelling correction" : issue.kind === "style" ? "style suggestion" : "grammar correction" });
       shiftAfter(issue, replacement.length - (issue.end - issue.start));
       issues = issues.filter((i) => i !== issue);
       marks(); paintIssues();
@@ -61,71 +77,124 @@ export function createProofPanel(ctx: DocCtx): Panel {
     } catch (e) { toast(`${errorText(e)} Check again to refresh the marks.`, { kind: "error" }); } finally { ours = false; }
   };
 
+  const ext = (): { dictionary?: string[]; spell_ignore?: string[]; proof_ignore?: string[] } => (ed.model.meta.extensions?.["slai.writer"] ?? {}) as { dictionary?: string[]; spell_ignore?: string[]; proof_ignore?: string[] };
+
+  const ignoreAll = async (issue: Issue): Promise<void> => {
+    try {
+      if (issue.kind === "spelling") {
+        const ignored = [...new Set([...(ext().spell_ignore ?? []), issue.text.toLowerCase()])].sort();
+        await ed.op({ op: "ext_set", values: { spell_ignore: ignored }, label: "ignore spelling in this document" });
+      } else {
+        const rules = [...new Set([...(ext().proof_ignore ?? []), `${issue.rule ?? issue.kind}|${issue.text.toLowerCase()}`])].sort();
+        await ed.op({ op: "ext_set", values: { proof_ignore: rules }, label: "ignore this suggestion in this document" });
+      }
+      issues = issues.filter((i) => !(i.kind === issue.kind && i.text.toLowerCase() === issue.text.toLowerCase() && (i.rule ?? "") === (issue.rule ?? "")));
+      marks(); paintIssues();
+    } catch (error) { toast(errorText(error), { kind: "error" }); }
+  };
+
+  const addToDictionary = async (issue: Issue, scope: "document" | "user"): Promise<void> => {
+    try {
+      if (scope === "user") await api.post(`/docs/${encodeURIComponent(ctx.sid)}/dictionary`, { word: issue.text, scope });     // kept on this computer; the document is not changed
+      else await ed.call(() => api.post<Patch>(`/docs/${encodeURIComponent(ctx.sid)}/dictionary`, { word: issue.text, scope }), (patch) => patch);
+      issues = issues.filter((i) => !(i.kind === "spelling" && i.text.toLowerCase() === issue.text.toLowerCase()));
+      marks(); paintIssues();
+      announce(scope === "user" ? `“${issue.text}” added to your dictionary.` : `“${issue.text}” added to this document's dictionary.`);
+    } catch (e) { toast(errorText(e), { kind: "error" }); }
+  };
+
+  const go = (delta: 1 | -1): void => {
+    const list = ordered();
+    if (!list.length) return;
+    const sel = ed.recallSelection();
+    let index: number;
+    if (current >= 0 && current < list.length && !(sel && !sel.collapsed)) index = (current + delta + list.length) % list.length;
+    else if (sel) {
+      const here = ed.model.indexOf(sel.start.block);
+      const after = list.findIndex((i) => ed.model.indexOf(i.block) > here || (ed.model.indexOf(i.block) === here && i.start > sel.start.offset));
+      index = delta > 0 ? (after < 0 ? 0 : after) : ((after < 0 ? list.length : after) - 1 + list.length) % list.length;
+    } else index = delta > 0 ? 0 : list.length - 1;
+    current = index;
+    const issue = list[index] as Issue;
+    ed.scrollToBlock(issue.block, issue.start);
+    paintIssues();
+    announce(`${CATEGORY[issue.category]?.label ?? "Suggestion"}: “${issue.text}”. ${index + 1} of ${list.length}.`);
+  };
+
   const paintIssues = (): void => {
     clear(issuesBox);
     for (const n of status.notices({ spell: app.prefs.spell, grammar: app.prefs.grammar })) issuesBox.appendChild(notice(n.reason, "warn", n.title));
+    for (const [, reason] of notes) issuesBox.appendChild(notice(reason, "info"));
     if (checkedVersion < 0) { issuesBox.appendChild(h("p", { class: "fine", text: "Proofreading checks nearby text automatically when available. You can also check the selection or entire document using the buttons above." })); return; }
     if (checkedVersion !== ed.model.version && !ours) issuesBox.appendChild(notice("The text has changed since this check. Each suggestion is still verified against the current text before it is applied, but check again for a fresh list.", "info"));
     if (!issues.length) { issuesBox.appendChild(notice("No problems found in what was checked.", "ok")); return; }
+    const list = ordered();
+    const nav = h("div", { class: "actions" },
+      button("Previous", () => go(-1)), button("Next", () => go(1)),
+      h("span", { class: "fine", text: `${list.length} suggestion${list.length === 1 ? "" : "s"}` }));
+    issuesBox.appendChild(nav);
     const ul = h("ul", { class: "panel-list" });
-    for (const issue of issues) {
-      const replacements = issue.kind === "spelling" ? issue.suggestions : issue.replacement ? [issue.replacement] : [];
-      const dict = issue.kind === "spelling" ? h("button", { class: "btn small", type: "button", text: "Add to dictionary" }) : null;
-      dict?.addEventListener("click", () => { void (async () => {
-        try { await ed.call(() => api.post<Patch>(`/docs/${encodeURIComponent(ctx.sid)}/dictionary`, { word: issue.text }), (patch) => patch); issues = issues.filter((i) => !(i.kind === "spelling" && i.text.toLowerCase() === issue.text.toLowerCase())); marks(); paintIssues(); } catch (e) { toast(errorText(e), { kind: "error" }); }
-      })(); });
-      const ignore = h("button", { class: "btn small", type: "button", text: "Ignore" });
-      ignore.addEventListener("click", () => { issues = issues.filter((i) => i !== issue); marks(); paintIssues(); });
-      const ignoreAll = issue.kind === "spelling" ? h("button", { class: "btn small", type: "button", text: "Ignore all" }) : null;
-      ignoreAll?.addEventListener("click", () => { void (async () => {
-        try {
-          const ext = (ed.model.meta.extensions?.["slai.writer"] ?? {}) as { spell_ignore?: string[] };
-          const ignored = [...new Set([...(ext.spell_ignore ?? []), issue.text.toLowerCase()])].sort();
-          await ed.op({ op: "ext_set", values: { spell_ignore: ignored }, label: "ignore spelling in this document" });
-          issues = issues.filter((i) => !(i.kind === "spelling" && i.text.toLowerCase() === issue.text.toLowerCase()));
-          marks(); paintIssues();
-        } catch (error) { toast(errorText(error), { kind: "error" }); }
-      })(); });
-      const go = h("button", { class: "linkbtn", type: "button", text: `“${issue.text}”` });
-      go.addEventListener("click", () => ed.scrollToBlock(issue.block, issue.start));
-      ul.appendChild(h("li", {},
-        h("div", {}, statusBadge(issue.kind === "spelling" ? "Spelling" : "Grammar", issue.kind === "spelling" ? "danger" : "warn"), " ", go),
-        issue.kind === "grammar" ? h("p", { text: issue.message }) : null,
-        issue.kind === "grammar" && issue.suggestion ? h("p", { class: "fine", text: `Suggestion: ${issue.suggestion}` }) : null,
-        h("p", { class: "fine", text: issue.kind === "spelling" ? "Source: SLAI spell checker. Suggestions are ranked guesses, not facts." : "Source: SLAI grammar processor on this computer." }),
-        h("div", { class: "actions" }, replacements.slice(0, 5).map((r) => { const b = h("button", { class: "btn small", type: "button", text: `Accept: ${r}`, disabled: ed.readOnly }); b.addEventListener("click", () => { void accept(issue, r); }); return b; }), dict, ignore, ignoreAll)));
-    }
+    list.forEach((issue, position) => {
+      const replacements = issue.suggestions.length ? issue.suggestions : issue.replacement ? [issue.replacement] : [];
+      const cat = CATEGORY[issue.category] ?? CATEGORY["grammar"] as { label: string; tone: "warn" };
+      const jump = h("button", { class: "linkbtn", type: "button", text: `“${issue.text.trim() || issue.text}”` });
+      jump.addEventListener("click", () => { current = position; ed.scrollToBlock(issue.block, issue.start); paintIssues(); });
+      const make = (label: string, run: () => void, title?: string): HTMLButtonElement => { const b = h("button", { class: "btn small", type: "button", text: label, attrs: title ? { title } : {} }); b.addEventListener("click", run); return b; };
+      const accepts = replacements.slice(0, 5).map((r, n) => { const b = h("button", { class: n === 0 ? "btn small primary" : "btn small", type: "button", text: `Accept: ${r.trim() === "" ? "(space)" : r}`, disabled: ed.readOnly }); b.addEventListener("click", () => { void accept(issue, r); }); return b; });
+      const li = h("li", { attrs: position === current ? { "aria-current": "true" } : {} },
+        h("div", {}, statusBadge(cat.label, cat.tone), " ", jump,
+          issue.confidence !== undefined && issue.confidence < 0.75 ? h("span", { class: "fine", text: " (less certain)" }) : null),
+        issue.message ? h("p", { text: issue.message }) : null,
+        h("p", { class: "fine", text: `Source: ${issue.provider ?? "Writer"}, on this computer.${issue.kind === "spelling" ? " Suggestions are ranked guesses, not facts." : ""}` }),
+        h("div", { class: "actions" }, accepts,
+          make("Ignore once", () => { ignoredOnce.add(issue.id); issues = issues.filter((i) => i !== issue); marks(); paintIssues(); }),
+          make("Ignore all", () => { void ignoreAll(issue); }, "Ignore this in the whole document"),
+          issue.kind === "spelling" ? make("Add to dictionary", () => { void addToDictionary(issue, "document"); }, "Remember this word in this document") : null,
+          issue.kind === "spelling" ? make("Add to my dictionary", () => { void addToDictionary(issue, "user"); }, "Remember this word for every document on this computer") : null));
+      ul.appendChild(li);
+    });
     issuesBox.appendChild(ul);
   };
 
-  const check = async (what: "spell" | "grammar", btn?: HTMLButtonElement, changed?: string[]): Promise<void> => {
+  /** One request per kind of check; a response is used only for the blocks whose text is still what was sent. */
+  const check = async (what: "spell" | "grammar", btn?: HTMLButtonElement, changed?: string[], whole = false): Promise<void> => {
     if (!app.prefs[what === "spell" ? "spell" : "grammar"]) return;
     if (btn) btn.disabled = true;
+    const mine = ++sequence[what];
     try {
       await ed.whenIdle();
-      const blocks = changed ?? targets();
-      const out = await api.post<{ available: boolean; reason?: string; issues: Issue[]; version: number; truncated?: boolean }>(`/docs/${encodeURIComponent(ctx.sid)}/${what === "spell" ? "spell" : "grammar"}`, blocks ? { blocks } : {});
-      const kind = what === "spell" ? "spelling" : "grammar";
+      const blocks = changed ?? (whole ? undefined : targets());
+      const sent = new Map<string, string>();
+      for (const id of blocks ?? ed.model.order) sent.set(id, ed.model.block(id)?.text ?? "");
+      const kinds: string[] = [...KINDS[what]].filter((k) => k !== "style" || app.prefs.style);
+      const out = await api.post<ProofResponse>(`/docs/${encodeURIComponent(ctx.sid)}/proof`, { ...(blocks ? { blocks } : {}), kinds });
+      if (mine !== sequence[what]) { for (const id of blocks ?? []) pendingBlocks.add(id); return; }          // a newer check superseded this one
       if (!out.available) {
         status.report(what, out.reason ?? "This check is not available.");
-        issues = issues.filter((i) => i.kind !== kind);          // marks from before the checker became unavailable would be stale
+        issues = issues.filter((i) => !(kinds as string[]).includes(i.kind));          // marks from before the checker became unavailable would be stale
         marks(); paintIssues();
         if (btn) toast(out.reason ?? "This check is not available.", { kind: "info", timeoutMs: 9000 });
         return;
       }
       status.report(what, null);
-      // Never attach old offsets to text changed during an asynchronous check.
-      if (out.version !== ed.model.version) return;
-      issues = [...issues.filter((i) => i.kind !== kind || (changed !== undefined && !changed.includes(i.block))), ...out.issues];
-      checkedVersion = out.version;
+      if (out.reason) notes.set(what, out.reason); else notes.delete(what);
+      // Never attach old offsets to text changed during the check: keep the result for the blocks that are unchanged, queue the rest again.
+      const fresh = (id: string): boolean => (ed.model.block(id)?.text ?? "") === sent.get(id);
+      const stale = [...sent.keys()].filter((id) => !fresh(id));
+      for (const id of stale) pendingBlocks.add(id);
+      const covered = new Set([...sent.keys()].filter(fresh));
+      issues = [...issues.filter((i) => !(kinds as string[]).includes(i.kind) || !covered.has(i.block)),
+        ...out.issues.filter((i) => covered.has(i.block) && !ignoredOnce.has(i.id))];
+      checkedVersion = ed.model.version;
       marks(); paintIssues();
-      if (btn) announce(`${out.issues.length} ${what === "spell" ? "spelling" : "grammar"} suggestion${out.issues.length === 1 ? "" : "s"}.`);
+      if (stale.length) scheduleAutomatic([]);
+      if (btn) announce(`${out.issues.length} ${what === "spell" ? "spelling" : "grammar and style"} suggestion${out.issues.length === 1 ? "" : "s"}.`);
       if (btn && out.truncated) toast("Only the first suggestions are shown. Fix these, then check again.", { kind: "info" });
     } catch (e) {
       const why = unavailable(e);
       if (why) {
         status.report(what, why);
-        issues = issues.filter((i) => i.kind !== (what === "spell" ? "spelling" : "grammar"));
+        issues = issues.filter((i) => !(KINDS[what] as readonly string[]).includes(i.kind));
         marks(); paintIssues();
       } else if (btn) {
         clear(issuesBox);
@@ -135,7 +204,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
     } finally { if (btn) btn.disabled = false; }
   };
 
-  const clearMarks = (): void => { issues = []; checkedVersion = -1; status.reset(); marks(); paintIssues(); };
+  const clearMarks = (): void => { issues = []; checkedVersion = -1; current = -1; notes.clear(); status.reset(); marks(); paintIssues(); };
 
   const scheduleAutomatic = (blocks: string[]): void => {
     for (const id of blocks) {
@@ -268,11 +337,22 @@ export function createProofPanel(ctx: DocCtx): Panel {
   /* -------------------------------------------------------------------------------------------------- layout */
   const spellBtn = button("Check spelling", () => check("spell", spellBtn), "", "spell");
   const grammarBtn = button("Check grammar", () => check("grammar", grammarBtn), "", "check");
+  const recheckBtn = button("Recheck document", async () => { recheckBtn.disabled = true; ignoredOnce.clear(); try { status.reset(); await Promise.all([check("spell", undefined, undefined, true), check("grammar", undefined, undefined, true)]); } finally { recheckBtn.disabled = false; } }, "", "refresh");
   const clearBtn = button("Clear marks", () => { clearMarks(); }, "", "close");
+  const setPref = (patch: Partial<typeof app.prefs>): void => { void app.setPrefs(patch).catch((e) => toast(errorText(e), { kind: "error" })); };
+  const spellToggle = checkbox("Spelling (red wavy line)", app.prefs.spell, (v) => setPref({ spell: v }));
+  const grammarToggle = checkbox("Grammar (orange wavy line)", app.prefs.grammar, (v) => setPref({ grammar: v }));
+  const styleToggle = checkbox("Style suggestions (blue dotted line)", app.prefs.style, (v) => setPref({ style: v }));
+  const docLanguage = ((): string => { const l = ed.model.meta.language || "en"; return LANGUAGES.some(([v]) => v === l) ? l : LANGUAGES.some(([v]) => v === l.split("-")[0]) ? l.split("-")[0] as string : l; })();
+  const languageOptions: Array<[string, string]> = LANGUAGES.some(([v]) => v === docLanguage) ? LANGUAGES : [...LANGUAGES, [docLanguage, `${docLanguage} (no proofing tools)`]];
+  const language = selectField("Document language", languageOptions, docLanguage, (v) => { void ed.op({ op: "meta", set: { language: v }, label: "document language" }).catch((e) => toast(errorText(e), { kind: "error" })); });
   fill(root,
     h("h2", { text: "Proofing" }),
-    h("p", { class: "fine", text: "Typos are marked in red and grammar in orange. A mark is a suggestion: you decide." }),
-    h("div", { class: "actions" }, spellBtn, grammarBtn, clearBtn), issuesBox,
+    h("p", { class: "fine", text: "Spelling is marked in red, grammar in orange and optional style suggestions in blue. A mark is a suggestion: you decide. Checking runs on this computer; the text of your document is not sent anywhere." }),
+    h("div", { class: "actions" }, spellBtn, grammarBtn, recheckBtn, clearBtn),
+    h("div", { class: "stack" }, spellToggle.root, grammarToggle.root, styleToggle.root, language.root,
+      h("p", { class: "fine", text: "The language applies to the whole document: a selection cannot carry its own language yet." })),
+    issuesBox,
     h("h3", { text: "Synonyms" }), h("p", { class: "fine", text: "Not available: no thesaurus is installed, so Writer does not offer synonyms. Spelling suggestions appear for misspelled words." }),
     h("h2", { text: "AI Assistant" }), aiBox);
   paintIssues();
@@ -292,7 +372,8 @@ export function createProofPanel(ctx: DocCtx): Panel {
       if (e.type === "prefs") {
         status.reset();
         paintAi();
-        issues = issues.filter((i) => i.kind === "spelling" ? app.prefs.spell : app.prefs.grammar);
+        issues = issues.filter((i) => i.kind === "spelling" ? app.prefs.spell : i.kind === "style" ? app.prefs.style && app.prefs.grammar : app.prefs.grammar);
+        spellToggle.input.checked = app.prefs.spell; grammarToggle.input.checked = app.prefs.grammar; styleToggle.input.checked = app.prefs.style;
         marks(); paintIssues();
         scheduleAutomatic(ed.model.order.slice(0, 100));
       }
@@ -300,5 +381,5 @@ export function createProofPanel(ctx: DocCtx): Panel {
   ];
   // Check a bounded initial window; subsequent document edits are incremental.
   scheduleAutomatic(ed.model.order.slice(0, 100));
-  return { el: root, refresh: () => { paintAi(); }, destroy: () => { window.clearTimeout(autoTimer); stop(); off.forEach((f) => f()); ed.decor.clear("typo"); ed.decor.clear("grammar"); } };
+  return { el: root, refresh: () => { paintAi(); }, destroy: () => { window.clearTimeout(autoTimer); stop(); off.forEach((f) => f()); ed.decor.clear("typo"); ed.decor.clear("grammar"); ed.decor.clear("style"); } };
 }

@@ -264,6 +264,7 @@ sup.fn { color: #1d4ed8; cursor: pointer; font-size: .7em; }
 /* Proofreading points out exact characters, without painting whole passages. */
 ::highlight(w-typo) { background-color: transparent; text-decoration: underline wavy #d33; }
 ::highlight(w-grammar) { background-color: transparent; text-decoration: underline wavy #e07000; }
+::highlight(w-style) { background-color: transparent; text-decoration: underline dotted #2f6fdd; text-decoration-thickness: 2px; }
 ::highlight(w-note) { background-color: var(--hl-note); }
 ::highlight(w-comment) { background-color: var(--hl-comment); }
 .sheets[data-cur-text] .txt { cursor: var(--cur-text, text); }
@@ -429,3 +430,35 @@ table.tbl .cell { height: 7mm; }
   right:-2px; bottom:-12px; padding:1px 3px; background:#9c2222; color:white;
   border-radius:3px; font:9px system-ui,sans-serif; pointer-events:none; }
 @media print { .writer-shape[data-text-overflow="true"]::after { display:none; } }
+
+/* ---------------------------------------------------------------------------------------------- text boxes
+   A text box is a rectangle shape with a text area (.tb-body). Selection chrome lives in the page overlay (.imgsel), never here, so nothing
+   below is selection UI and everything below prints. */
+.writer-shape[data-textbox] { cursor: text; }
+.writer-shape[data-textbox][data-locked="true"] { cursor: default; }
+.writer-shape .tb-body { position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; overflow: hidden;
+  white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.25; outline: none; }
+.writer-shape .tb-para { margin: 0; min-height: 1.25em; }
+.writer-shape .tb-para[data-list] { padding-left: 1.4em; text-indent: -1.4em; }
+.writer-shape .tb-para[data-list="bullet"]::before { content: "\2022"; display: inline-block; width: 1.4em; text-indent: 0; }
+.writer-shape .tb-body { counter-reset: tbn; }
+.writer-shape .tb-para[data-list="number"] { counter-increment: tbn; }
+.writer-shape .tb-para:not([data-list="number"]) { counter-reset: tbn; }
+.writer-shape .tb-para[data-list="number"]::before { content: counter(tbn) "."; display: inline-block; width: 1.4em; text-indent: 0; }
+.writer-shape .tb-body[data-empty="true"]:not([data-editing]) .tb-para::after,
+.writer-shape .tb-body[data-empty="true"][data-editing] .tb-para::after { content: "Type here"; opacity: .42; font-style: italic; pointer-events: none; }
+.writer-shape .tb-body[data-empty="true"][data-editing]:focus .tb-para::after { content: ""; }
+@media print { .writer-shape .tb-body[data-empty="true"] .tb-para::after { content: none; } }
+.writer-shape[data-editing="true"] .tb-body { cursor: text; user-select: text; }
+.blk[data-selected] > .writer-shape[data-textbox] { outline: none; }
+.writer-shape[data-resizing]::after { content: attr(data-resizing); position: absolute; left: 50%; bottom: -24px; transform: translateX(-50%); padding: 1px 6px;
+  font: 600 11px/1.5 system-ui, sans-serif; color: #fff; background: #333; border-radius: 6px; white-space: nowrap; z-index: 9; }
+@media print { .writer-shape[data-resizing]::after { display: none; } }
+
+/* Insert → Text Box gallery */
+.tb-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.tb-gallery-item { display: grid; gap: 4px; padding: 8px; text-align: left; border: 1px solid var(--line, #c9c9c9); border-radius: 8px; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.tb-gallery-item:hover, .tb-gallery-item:focus-visible { border-color: var(--focus, #3b82f6); outline: none; box-shadow: 0 0 0 2px rgba(59, 130, 246, .35); }
+.tb-gallery-sample { height: 46px; padding: 6px 8px; font-size: 14px; overflow: hidden; box-sizing: border-box; }
+.tb-gallery-name { font-weight: 600; }
+.tb-gallery-hint { font-size: 12px; opacity: .75; }
