@@ -2,6 +2,10 @@
  *  context menu all draw from it, so a function exists once and is found the same way everywhere. A command that cannot run says why. */
 import { announce, h, openMenu, toast } from "./kit.js";
 import * as A from "./actions.js";
+import * as C from "./column_actions.js";
+import * as TOC from "./toc_actions.js";
+import { tocGalleryDialog, tocSettingsDialog } from "./toc_ui.js";
+import { columnsDialog } from "./column_ui.js";
 import { backgroundDialog, commentDialog, equationDialog, headerFooterDialog, linkDialog, pageSetupDialog, pictureDialog, tableDialog, tableToolsDialog } from "./dialogs.js";
 import { exportFlow, printFlow, importFlow, renameDialog } from "./fileops.js";
 import { api, errorText } from "./net.js";
@@ -13,6 +17,9 @@ import { paragraphFontDialog } from "./typography.js";
 import { editShape } from "./shape_ui.js";
 import { shapeOf, SHAPE_KEY } from "./shape.js";
 import { insertShape } from "./shape_ui.js";
+import * as T from "./table_actions.js";
+import { insertMultipleDialog, splitCellDialog, tableBordersDialog, tablePropertiesDialog } from "./table_ui.js";
+const tocNeeded = (ctx) => (ctx.ed.readOnly ? "This document is read-only." : TOC.tocTarget(ctx.ed) ? null : TOC.allTocs(ctx.ed).length ? "Place the cursor in the table of contents first." : "There is no table of contents yet.");
 const EDITING = (ctx) => (ctx.ed.readOnly ? "This document is read-only." : null);
 const needsCaret = (ctx) => EDITING(ctx) ?? (ctx.ed.recallSelection() ? null : "Place the cursor in the text first.");
 const AI_NOTE = "AI is off or unavailable; writing works without it.";
@@ -26,6 +33,28 @@ async function embedNew(ctx) {
 }
 function toggleView(ctx, key) {
     void ctx.app.setPrefs({ [key]: !ctx.app.prefs[key] }).then(() => ctx.ed.layout()).catch((e) => toast(errorText(e), { kind: "error" }));
+}
+const IN_TABLE = (ctx) => EDITING(ctx) ?? (T.tableTarget(ctx.ed) ? null : "Place the cursor in a table first.");
+function tableCommands() {
+    const t = (id, label, keywords, run, icon = "table") => ({ id, label, group: "Insert", icon, keywords: `table ${keywords}`, unavailable: IN_TABLE, run });
+    return [
+        t("table-row-above", "Insert row above", "add", (c) => T.insertRows(c.ed, "above")),
+        t("table-row-below", "Insert row below", "add", (c) => T.insertRows(c.ed, "below")),
+        t("table-col-left", "Insert column left", "add", (c) => T.insertColumns(c.ed, "left")),
+        t("table-col-right", "Insert column right", "add", (c) => T.insertColumns(c.ed, "right")),
+        t("table-insert-multiple", "Insert several rows or columns…", "add many multiple", (c) => insertMultipleDialog(c)),
+        t("table-delete-rows", "Delete selected rows", "remove", (c) => T.deleteRows(c.ed), "trash"),
+        t("table-delete-cols", "Delete selected columns", "remove", (c) => T.deleteColumns(c.ed), "trash"),
+        t("table-delete", "Delete table", "remove", (c) => T.deleteTable(c.ed), "trash"),
+        t("table-merge", "Merge cells", "join span", (c) => T.mergeCells(c.ed)),
+        t("table-split", "Split cell…", "divide unmerge", (c) => splitCellDialog(c)),
+        t("table-borders", "Table borders and shading…", "border line colour color", (c) => tableBordersDialog(c)),
+        t("table-properties", "Table properties…", "width alignment header repeat padding", (c) => tablePropertiesDialog(c)),
+        t("table-autofit", "AutoFit table to contents", "width fit", (c) => T.autoFit(c.ed, "content")),
+        t("table-distribute-rows", "Distribute rows evenly", "height", (c) => T.distribute(c.ed, "rows")),
+        t("table-distribute-cols", "Distribute columns evenly", "width", (c) => T.distribute(c.ed, "columns")),
+        t("table-style-default", "Restore default table formatting", "reset style", (c) => T.restoreDefaultStyle(c.ed)),
+    ];
 }
 export const COMMANDS = [
     /* text */
@@ -68,6 +97,7 @@ export const COMMANDS = [
     { id: "table", label: "Table…", group: "Insert", icon: "table", keywords: "grid rows columns", unavailable: EDITING, run: (c) => tableDialog(c) },
     { id: "markdown-table", label: "Convert Markdown text to table", group: "Insert", icon: "table", keywords: "markdown gfm pipe paste text to table convert", unavailable: EDITING, run: (c) => A.convertMarkdownToTable(c.ed) },
     { id: "table-tools", label: "Table tools: rows, columns, header rows…", group: "Insert", icon: "table", keywords: "add delete row column", unavailable: (c) => EDITING(c) ?? (tableAtCaret(c) ? null : "Place the cursor in a table first."), run: (c) => { const id = tableAtCaret(c); return id ? tableToolsDialog(c, id) : undefined; } },
+    ...tableCommands(),
     { id: "shape-format", label: "Shape Format…", group: "Insert", icon: "layers", keywords: "shape text fill outline shadow rotate arrange group",
         unavailable: c => EDITING(c) ?? (shapeOf(c.ed.model.block(c.ed.selectedBlock ?? "")) ? null : "Select a shape first."),
         run: c => c.ed.selectedBlock ? editShape(c, c.ed.selectedBlock) : undefined },
@@ -89,6 +119,19 @@ export const COMMANDS = [
     { id: "embed", label: "EMBED component…", group: "Insert", icon: "layers", keywords: "declarative component calculation", unavailable: EDITING, run: (c) => embedNew(c) },
     { id: "signature-graphic", label: "Signature graphic…", group: "Sign and share", icon: "signature", keywords: "visual mark picture", unavailable: EDITING, run: (c) => signatureGraphicsDialog(c) },
     /* document */
+    { id: "toc-insert", label: "Table of contents…", group: "Insert", icon: "list", keywords: "contents toc headings leaders page numbers style gallery", unavailable: EDITING, run: (c) => tocGalleryDialog(c) },
+    { id: "toc-update-pages", label: "Update table of contents page numbers", group: "Document", icon: "refresh", keywords: "toc contents pages", unavailable: (c) => tocNeeded(c), run: (c) => { TOC.updatePageNumbers(c.ed); } },
+    { id: "toc-update", label: "Update entire table of contents", group: "Document", icon: "refresh", keywords: "toc contents refresh headings", unavailable: (c) => tocNeeded(c), run: async (c) => { const t = TOC.tocTarget(c.ed); if (t)
+            await TOC.updateToc(c.ed, t.id); } },
+    { id: "toc-style", label: "Change table of contents style…", group: "Document", icon: "layers", keywords: "toc contents classic modern academic formal", unavailable: (c) => tocNeeded(c), run: (c) => { const t = TOC.tocTarget(c.ed); return t ? tocGalleryDialog(c, t) : undefined; } },
+    { id: "toc-settings", label: "Table of contents settings…", group: "Document", icon: "gear", keywords: "toc contents leaders levels links numbering", unavailable: (c) => tocNeeded(c), run: (c) => { const t = TOC.tocTarget(c.ed); return t ? tocSettingsDialog(c, t) : undefined; } },
+    { id: "toc-remove", label: "Remove table of contents", group: "Document", icon: "close", keywords: "toc contents delete", unavailable: (c) => tocNeeded(c), run: async (c) => { const t = TOC.tocTarget(c.ed); if (t)
+            await TOC.removeToc(c.ed, t.id); } },
+    { id: "columns-more", label: "Columns…", group: "Document", icon: "layout", keywords: "more columns newspaper two three four gap line between balance", unavailable: EDITING, run: (c) => columnsDialog(c) },
+    ...[1, 2, 3, 4].map((n) => ({ id: `columns-${n}`, label: n === 1 ? "One column" : `${n} columns`, group: "Document", icon: "layout", keywords: "columns layout", unavailable: EDITING,
+        run: async (c) => { await C.setColumns(c.ed, C.defaultScope(c.ed), { columns: n, widths_mm: null }); } })),
+    { id: "column-break", label: "Column break", group: "Insert", icon: "page", keywords: "next column break", unavailable: needsCaret, run: async (c) => { await C.insertColumnBreak(c.ed); } },
+    { id: "scripture", label: "Scripture style (two columns, italic)", group: "Paragraph", icon: "book", keywords: "scripture verse passage bible quote columns", unavailable: needsCaret, run: async (c) => { await C.applyScripture(c.ed); } },
     { id: "header-footer", label: "Header and footer…", group: "Document", icon: "layout", keywords: "page number running head", unavailable: EDITING, run: (c) => headerFooterDialog(c) },
     { id: "page-setup", label: "Page dimensions and margins…", group: "Document", icon: "ruler", keywords: "size paper a4 letter orientation margins", unavailable: EDITING, run: (c) => pageSetupDialog(c) },
     { id: "background", label: "Add background (page colour)…", group: "Document", icon: "background", keywords: "page colour color", shortcut: "Ctrl+Alt+B", unavailable: EDITING, run: (c) => backgroundDialog(c) },
@@ -318,6 +361,7 @@ export function contextMenu(ctx, x, y, restore) {
         ], "Shape actions");
         return;
     }
+    const inTable = T.tableTarget(ctx.ed) !== null;
     const hasText = !!ctx.ed.selectionText();
     const clip = (cmd) => () => { restore(); document.execCommand(cmd); };
     const paste = () => {
@@ -328,6 +372,22 @@ export function contextMenu(ctx, x, y, restore) {
         }
         void navigator.clipboard.readText().then((t) => A.insertText(ctx.ed, t)).catch(() => toast("The browser did not allow reading the clipboard. Use Ctrl+V to paste.", { kind: "info" }));
     };
+    if (inTable) {
+        menuAt(x, y, [
+            { label: "Cut", icon: "scissors", disabled: !hasText || ctx.ed.readOnly, run: clip("cut") },
+            { label: "Copy", icon: "copy", disabled: !hasText, run: clip("copy") },
+            { label: "Paste", disabled: ctx.ed.readOnly, run: paste },
+            "separator",
+            entry("table-row-above"), entry("table-row-below"), entry("table-col-left"), entry("table-col-right"), entry("table-insert-multiple"),
+            "separator",
+            entry("table-delete-rows"), entry("table-delete-cols"), entry("table-delete"),
+            "separator",
+            entry("table-merge"), entry("table-split"),
+            "separator",
+            entry("table-borders"), entry("table-properties"), entry("table-autofit"),
+        ], "Table actions");
+        return;
+    }
     menuAt(x, y, [
         { label: "Cut", icon: "scissors", disabled: !hasText || ctx.ed.readOnly, run: clip("cut") },
         { label: "Copy", icon: "copy", disabled: !hasText, run: clip("copy") },

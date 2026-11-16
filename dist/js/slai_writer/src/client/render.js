@@ -5,6 +5,7 @@ import { plaintextOnlySupported } from "./domtext.js";
 import { segments, MM_PX } from "./textops.js";
 import { paintFigure } from "./figlayout.js";
 import { shapeOf, paintShape } from "./shape.js";
+import { resolveTable, borderCss, CELLS_KEY, LAYOUT_KEY } from "./table_style.js";
 export const EDIT_MODE = plaintextOnlySupported() ? "plaintext-only" : "true";
 /** A style with its `based_on` chain folded in (parent first). */
 export function resolveStyle(meta, kind, name) {
@@ -166,13 +167,34 @@ function defaultStyle(block) {
         return "Quote";
     return block.type === "paragraph" || block.type === "list_item" ? "Body Text" : undefined;
 }
+/** Dark or light text for a cell fill, whatever the page colour is (a shaded cell must stay readable on a dark page). */
+function contrastInk(fill) {
+    const n = parseInt(fill.slice(1), 16);
+    const lin = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; });
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2] < 0.35 ? "#F4F4F4" : "#1B1B1B";
+}
+/** The table styles the person saved in this document (they are used by name: "custom:Name"). */
+export function customTableStyles(meta) {
+    const mine = meta.extensions?.["slai.writer"];
+    return mine?.table_styles ?? {};
+}
 function tableElement(block, ctx) {
     const data = block.table;
     const table = h("table", { class: "tbl", attrs: { role: "table" } });
-    const layout = block.extensions?.["slai.writer.table_layout"];
-    const cellStyles = block.extensions?.["slai.writer.table_cell_styles"];
-    if (layout?.width_mm)
+    const layout = block.extensions?.[LAYOUT_KEY];
+    const cellStyles = block.extensions?.[CELLS_KEY];
+    const looks = data ? resolveTable(block, customTableStyles(ctx.meta)) : new Map();
+    const fit = layout?.fit ?? "auto";
+    const columnWidths = layout?.column_widths_mm;
+    const hasWidths = Boolean(columnWidths && columnWidths.length === data?.columns);
+    if (fit === "content" && !hasWidths) {
+        table.style.tableLayout = "auto";
+        table.style.width = "auto";
+    }
+    if (layout?.width_mm && fit !== "window")
         table.style.width = `${layout.width_mm}mm`;
+    if (fit === "window")
+        table.style.width = "100%";
     if (layout?.align === "center") {
         table.style.marginLeft = "auto";
         table.style.marginRight = "auto";
@@ -185,42 +207,65 @@ function tableElement(block, ctx) {
         table.style.marginLeft = "0";
         table.style.marginRight = "auto";
     }
-    const columnWidths = layout?.column_widths_mm;
-    if (columnWidths && columnWidths.length === data?.columns) {
-        const colgroup = h("colgroup");
-        for (const width of columnWidths)
-            colgroup.appendChild(h("col", { attrs: { style: `width: ${width}mm` } }));
-        table.appendChild(colgroup);
-        table.style.width = `${columnWidths.reduce((a, b) => a + b, 0)}mm`;
+    if (layout?.indent_mm && layout.align !== "center" && layout.align !== "right") {
+        table.style.marginLeft = `${layout.indent_mm}mm`;
+        table.style.width = layout.width_mm ? `${layout.width_mm}mm` : `calc(100% - ${layout.indent_mm}mm)`;
     }
+    if (hasWidths && columnWidths) {
+        const colgroup = h("colgroup");
+        for (const width of columnWidths) {
+            const col = h("col");
+            col.style.width = `${width}mm`;
+            colgroup.appendChild(col);
+        }
+        table.appendChild(colgroup);
+        if (fit !== "window")
+            table.style.width = `${columnWidths.reduce((a, b) => a + b, 0)}mm`;
+    }
+    if (layout?.keep_rows_together)
+        table.setAttribute("data-keep-together", "");
+    if (layout?.allow_row_split === false)
+        table.setAttribute("data-no-row-split", "");
     if (block.text)
         table.appendChild(h("caption", { text: block.text }));
     const headerRows = data?.header_rows ?? 0;
     (data?.rows ?? []).forEach((row, r) => {
         const tr = h("tr");
-        if (layout?.row_heights_mm?.[r])
-            tr.style.height = `${layout.row_heights_mm[r]}mm`;
+        if (r < headerRows)
+            tr.setAttribute("data-header", "");
+        const rowHeight = layout?.row_heights_mm?.[r];
+        if (rowHeight) {
+            tr.style.height = `${rowHeight}mm`;
+            if (layout?.row_height_rule === "exact")
+                tr.setAttribute("data-exact-height", "");
+        }
         row.forEach((cell, c) => {
             const isHeader = r < headerRows;
             const td = h(isHeader ? "th" : "td", { class: "cell", attrs: { "data-edit": "cell", "data-row": r, "data-col": c, contenteditable: ctx.readOnly ? "false" : EDIT_MODE, colspan: cell.colspan && cell.colspan > 1 ? cell.colspan : null, rowspan: cell.rowspan && cell.rowspan > 1 ? cell.rowspan : null, scope: isHeader ? "col" : null, "aria-label": `Row ${r + 1}, column ${c + 1}`, tabindex: "0" }, text: cell.text });
             if (cell.align)
                 td.style.textAlign = cell.align;
+            const look = looks.get(`${r},${c}`);
+            if (look) {
+                td.style.backgroundColor = look.fill ?? "transparent";
+                td.style.fontWeight = look.bold ? "700" : "400";
+                const ink = look.color ?? (look.fill ? contrastInk(look.fill) : null);
+                if (ink)
+                    td.style.color = ink;
+                td.style.borderTop = borderCss(look.borders.top);
+                td.style.borderBottom = borderCss(look.borders.bottom);
+                td.style.borderLeft = borderCss(look.borders.left);
+                td.style.borderRight = borderCss(look.borders.right);
+            }
+            if (layout?.cell_padding_mm !== undefined)
+                td.style.padding = `${layout.cell_padding_mm}mm`;
             const style = cellStyles?.[`${r},${c}`];
             if (style) {
                 if (style.paragraph_style)
                     applyStyle(td, resolveStyle(ctx.meta, "paragraph", style.paragraph_style), true);
                 if (style.valign)
                     td.style.verticalAlign = style.valign;
-                if (style.background)
-                    td.style.backgroundColor = style.background;
                 if (style.padding_mm !== undefined)
                     td.style.padding = `${style.padding_mm}mm`;
-                if (style.border_color)
-                    td.style.borderColor = style.border_color;
-                if (style.border_width_pt !== undefined)
-                    td.style.borderWidth = `${style.border_width_pt}pt`;
-                if (style.border_style)
-                    td.style.borderStyle = style.border_style;
                 if (style.line_height)
                     td.style.lineHeight = String(style.line_height);
                 if (style.space_before_pt)

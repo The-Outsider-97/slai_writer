@@ -418,7 +418,7 @@ export async function enter(ed) {
     });
 }
 export function focusCell(ed, id, row, col, offset) {
-    const cell = ed.els.get(id)?.querySelector(`[data-edit=cell][data-row="${row}"][data-col="${col}"]`);
+    const cell = ed.page?.cellEl(id, row, col) ?? ed.els.get(id)?.querySelector(`[data-edit=cell][data-row="${row}"][data-col="${col}"]`);
     if (!cell)
         return;
     cell.focus();

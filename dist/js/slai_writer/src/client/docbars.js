@@ -15,6 +15,9 @@ import { segments } from "./textops.js";
 import { manageStyles } from "./style_manager.js";
 import { shapeOf } from "./shape.js";
 import { editShape } from "./shape_ui.js";
+import { buildLayoutRibbon } from "./column_ui.js";
+import { buildContentsGroup } from "./toc_ui.js";
+import { buildTableRibbons } from "./table_ui.js";
 import { bibliographyDialog, removeBibliography, sourceDialog } from "./panels/sources.js";
 import { ago, notice, pickFile } from "./widgets.js";
 /** Keep the text selection in the page when a bar button is pressed. */
@@ -440,7 +443,8 @@ export function buildFormatBar(ctx) {
         return b;
     };
     const referenceGroup = (label, ...buttons) => h("div", { class: "ribbon-group" }, h("span", { class: "ribbon-controls" }, ...buttons), h("span", { class: "ribbon-group-label", text: label }));
-    const refs = h("div", { class: "format-ribbon references-ribbon", attrs: { role: "toolbar", "aria-label": "References ribbon" } }, referenceGroup("Citations", ribbonButton("Insert citation", fire("citation"), "book")), referenceGroup("Sources", ribbonButton("Add source", () => run(() => sourceDialog(ctx)), "plus"), ribbonButton("Manage sources", fire("sources"), "book")), referenceGroup("Bibliography", ribbonButton("Insert / Update References", () => run(() => bibliographyDialog(ctx)), "book"), ribbonButton("Remove References", () => run(() => removeBibliography(ctx)), "close")), referenceGroup("Citation style", h("span", { class: "ribbon-style-label", text: "APA-style author–date" })));
+    const contents = buildContentsGroup(ctx);
+    const refs = h("div", { class: "format-ribbon references-ribbon", attrs: { role: "toolbar", "aria-label": "References ribbon" } }, contents.el, referenceGroup("Citations", ribbonButton("Insert citation", fire("citation"), "book")), referenceGroup("Sources", ribbonButton("Add source", () => run(() => sourceDialog(ctx)), "plus"), ribbonButton("Manage sources", fire("sources"), "book")), referenceGroup("Bibliography", ribbonButton("Insert / Update References", () => run(() => bibliographyDialog(ctx)), "book"), ribbonButton("Remove References", () => run(() => removeBibliography(ctx)), "close")), referenceGroup("Citation style", h("span", { class: "ribbon-style-label", text: "APA-style author–date" })));
     const illustrations = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Insert illustrations" } }, referenceGroup("Illustrations", ribbonButton("Insert Picture", fire("picture"), "image"), ribbonButton("Insert Shape", fire("shape"), "layers")));
     // Contextual shape formatting uses the same canonical shape_set operation as
     // the full dialog; there is no separate undo, document store, or renderer.
@@ -481,14 +485,31 @@ export function buildFormatBar(ctx) {
     const insertTab = h("button", { type: "button", class: "ribbon-tab", text: "Insert", attrs: { role: "tab", "aria-selected": "false" } });
     const shapeTab = h("button", { type: "button", class: "ribbon-tab", text: "Shape Format", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
     const refsTab = h("button", { type: "button", class: "ribbon-tab", text: "References", attrs: { role: "tab", "aria-selected": "false" } });
+    const tableRibbons = buildTableRibbons(ctx);
+    const layoutRibbon = buildLayoutRibbon(ctx);
+    layoutRibbon.el.hidden = true;
+    const layoutTab = h("button", { type: "button", class: "ribbon-tab", text: "Layout", attrs: { role: "tab", "aria-selected": "false" } });
+    const designTab = h("button", { type: "button", class: "ribbon-tab", text: "Table Design", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
+    const tableLayoutTab = h("button", { type: "button", class: "ribbon-tab", text: "Table Layout", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
     let activeTab = "home";
     let hadShape = false;
+    let hadTable = false;
     const showTab = (which) => {
         activeTab = which;
         home.hidden = which !== "home";
         refs.hidden = which !== "references";
         illustrations.hidden = which !== "insert";
         shapeRibbon.hidden = which !== "shape";
+        tableRibbons.design.hidden = which !== "tdesign";
+        tableRibbons.layout.hidden = which !== "tlayout";
+        layoutRibbon.el.hidden = which !== "layout";
+        layoutTab.setAttribute("aria-selected", String(which === "layout"));
+        if (which === "layout")
+            layoutRibbon.update();
+        if (which === "references")
+            contents.update();
+        designTab.setAttribute("aria-selected", String(which === "tdesign"));
+        tableLayoutTab.setAttribute("aria-selected", String(which === "tlayout"));
         homeTab.setAttribute("aria-selected", String(which === "home"));
         refsTab.setAttribute("aria-selected", String(which === "references"));
         insertTab.setAttribute("aria-selected", String(which === "insert"));
@@ -497,8 +518,11 @@ export function buildFormatBar(ctx) {
     homeTab.addEventListener("click", () => showTab("home"));
     refsTab.addEventListener("click", () => showTab("references"));
     insertTab.addEventListener("click", () => showTab("insert"));
+    layoutTab.addEventListener("click", () => showTab("layout"));
     shapeTab.addEventListener("click", () => showTab("shape"));
-    const el = h("div", { class: "bar writer-ribbon" }, h("div", { class: "ribbon-tabs", attrs: { role: "tablist", "aria-label": "Ribbon tabs" } }, homeTab, insertTab, refsTab, shapeTab), home, illustrations, refs, shapeRibbon);
+    designTab.addEventListener("click", () => showTab("tdesign"));
+    tableLayoutTab.addEventListener("click", () => showTab("tlayout"));
+    const el = h("div", { class: "bar writer-ribbon" }, h("div", { class: "ribbon-tabs", attrs: { role: "tablist", "aria-label": "Ribbon tabs" } }, homeTab, insertTab, layoutTab, refsTab, shapeTab, designTab, tableLayoutTab), home, illustrations, layoutRibbon.el, refs, shapeRibbon, tableRibbons.design, tableRibbons.layout);
     showTab("home");
     const GROUPS_KEY = "writer.ribbonGroups.v1";
     const groupRows = [{ id: "font", label: "Font", element: fontGroup }, { id: "paragraph", label: "Paragraph / Alignment", element: paragraphGroup }];
@@ -596,6 +620,17 @@ export function buildFormatBar(ctx) {
         else if (!hasShape && activeTab === "shape")
             showTab("home");
         hadShape = hasShape;
+        if (activeTab === "layout")
+            layoutRibbon.update();
+        if (activeTab === "references")
+            contents.update();
+        const inTable = tableRibbons.update();
+        designTab.hidden = tableLayoutTab.hidden = !inTable;
+        if (inTable && !hadTable && !hasShape)
+            showTab("tlayout");
+        else if (!inTable && (activeTab === "tdesign" || activeTab === "tlayout"))
+            showTab("home");
+        hadTable = inTable;
         if (activeShape) {
             const s = activeShape.shape;
             if (document.activeElement !== fillPicker)

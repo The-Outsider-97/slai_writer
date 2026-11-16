@@ -232,7 +232,14 @@ figure.fig[data-missing-alt] .fig-frame { outline: 2px dashed var(--danger); }
 .blk[data-floating] > .grip { display: none; }
 figure.fig[data-floating] { position: absolute; margin: 0; z-index: 2; display: block; }
 figure.fig[data-floating="behind_text"] { z-index: 0; }
-.sheet .body > .blk:not([data-floating]) { z-index: 1; }
+.sheet .body > .blk:not([data-floating]), .sheet .body > .cols > .blk:not([data-floating]) { z-index: 1; }
+/* Columns: a region of the page body whose text runs from one column to the next (the same editable text, so the caret and selection move across columns). */
+.sheet .body > .cols { flex: none; width: 100%; box-sizing: border-box; min-height: 0; }
+.sheet .body > .cols > .blk { break-inside: auto; }
+.sheet .body > .cols[data-flow=rtl] > .blk { direction: ltr; }   /* the columns run right to left; the text in them keeps its own direction */
+.sheet .body > .cols > .blk[data-colbreak] { break-before: column; }
+.sheet .body > .cols > .blk[data-type=table], .sheet .body > .cols > .blk[data-type=figure], .sheet .body > .cols > .blk[data-type=equation] { break-inside: avoid; }
+.sheet .body > .cols > .blk[data-type=heading] { break-after: avoid; }
 /* the object the person selected, and where a dragged block will land */
 .blk[data-selected] > figure.fig .fig-box, .blk[data-selected] > .eqn, .blk[data-selected] > table, .blk[data-selected] > .embed { outline: 2px solid var(--focus, #3b82f6); outline-offset: 2px; }
 .blk.drop-before { box-shadow: 0 -3px 0 0 var(--accent, #fb9494); } .blk.drop-after { box-shadow: 0 3px 0 0 var(--accent, #fb9494); }
