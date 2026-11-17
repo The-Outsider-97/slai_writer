@@ -1,0 +1,76 @@
+{
+  "chromium": "153.0.8010.12",
+  "viewport": "1500x950",
+  "at": "2026-11-16",
+  "sizes": {
+    "20": {
+      "paragraphs": 20,
+      "sheets": 2,
+      "openMs": 1117,
+      "typing": {
+        "n": 64,
+        "p50": 25.3,
+        "p95": 32.6,
+        "max": 36.1
+      },
+      "enterMs": 110,
+      "backspaceMergeMs": 108,
+      "undoMs": 8,
+      "redoMs": 7,
+      "pasteMs": 50.8000000002794,
+      "scroll": {
+        "frames": 60,
+        "p50": 16.7,
+        "p95": 16.8,
+        "over50ms": 0
+      },
+      "styleMs": 122
+    },
+    "150": {
+      "paragraphs": 150,
+      "sheets": 15,
+      "openMs": 1813,
+      "typing": {
+        "n": 64,
+        "p50": 24.3,
+        "p95": 30.8,
+        "max": 32.1
+      },
+      "enterMs": 164,
+      "backspaceMergeMs": 143,
+      "undoMs": 4,
+      "redoMs": 7,
+      "pasteMs": 7.7999999998137355,
+      "scroll": {
+        "frames": 60,
+        "p50": 16.7,
+        "p95": 16.8,
+        "over50ms": 0
+      },
+      "styleMs": 33
+    },
+    "600": {
+      "paragraphs": 600,
+      "sheets": 60,
+      "openMs": 3828,
+      "typing": {
+        "n": 64,
+        "p50": 25.2,
+        "p95": 32.9,
+        "max": 34
+      },
+      "enterMs": 1103,
+      "backspaceMergeMs": 721,
+      "undoMs": 6,
+      "redoMs": 694,
+      "pasteMs": 37.10000000009313,
+      "scroll": {
+        "frames": 104,
+        "p50": 16.7,
+        "p95": 16.8,
+        "over50ms": 0
+      },
+      "styleMs": 96
+    }
+  }
+}

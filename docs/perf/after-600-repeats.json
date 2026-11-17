@@ -1,0 +1,8 @@
+{
+  "note": "Three further runs at 600 paragraphs (60 pages), Chromium 153, 1500x950, same fixed content, after the final changes. baseline-after.json holds a first run whose Enter/paste/style figures were higher; the spread between runs is the measurement noise of this machine.",
+  "runs": [
+    {"enterMs": 355, "backspaceMergeMs": 396, "redoMs": 144, "pasteMs": 26, "styleMs": 65, "typingP95": 32.0},
+    {"enterMs": 359, "backspaceMergeMs": 447, "redoMs": 174, "pasteMs": 23, "styleMs": 159, "typingP95": 31.3},
+    {"enterMs": 363, "backspaceMergeMs": 346, "redoMs": 174, "pasteMs": 19, "styleMs": 56, "typingP95": 31.7}
+  ]
+}

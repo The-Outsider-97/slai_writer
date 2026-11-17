@@ -1,5 +1,7 @@
 # Test report
 
+> The figures for the final weekly upgrade (466 Python tests, 196 TypeScript unit tests, 12 browser suites, gate mode) are in `FINAL_WEEKLY_UPGRADE.md` §7; the table below is the earlier baseline.
+
 Run on the build environment (Linux, Python 3.13, Node 22, Chromium via Playwright) against the working tree in `applications/slai_writer`.
 Every number below is from an actual run at the end of development; nothing is estimated.
 

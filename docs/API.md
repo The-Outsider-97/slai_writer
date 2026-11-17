@@ -125,12 +125,14 @@ Every route is under `/api`, loopback only, requires the session cookie and (for
 | POST | `/api/docs/{sid}/spell` | `spell` |
 | POST | `/api/docs/{sid}/dictionary` | `dictionary` |
 | POST | `/api/docs/{sid}/grammar` | `grammar` |
+| POST | `/api/docs/{sid}/proof` | `proof` |
 | POST | `/api/docs/{sid}/assist` | `assist_propose` |
 | GET | `/api/assist/jobs/{id}` | `assist_job` |
 | POST | `/api/assist/jobs/{id}/cancel` | `assist_cancel` |
 | POST | `/api/docs/{sid}/assist/apply` | `assist_apply` |
 | POST | `/api/assist/proposals/{id}/reject` | `assist_reject` |
 | GET | `/api/docs/{sid}/sources` | `sources` |
+| POST | `/api/names/read` | `names_read` |
 | POST | `/api/docs/{sid}/sources` | `source_put` |
 | DELETE | `/api/docs/{sid}/sources/{id}` | `source_delete` |
 | POST | `/api/docs/{sid}/sources/{id}/checked` | `source_checked` |
@@ -148,9 +150,20 @@ Every route is under `/api`, loopback only, requires the session cookie and (for
 | POST | `/api/docs/{sid}/export` | `export` |
 | POST | `/api/docs/{sid}/download` | `download` |
 | POST | `/api/docs/{sid}/preview` | `preview` |
+| GET | `/api/docs/{sid}/pages` | `rendered_pages` |
+| GET | `/api/docs/{sid}/pages/{n}.png` | `rendered_page` |
 | GET | `/api/docs/{sid}/layout` | `measured_layout` |
 | POST | `/api/import` | `import_upload` |
 | POST | `/api/import/path` | `import_path` |
 | GET | `/api/workspace` | `workspace` |
 | POST | `/api/docs/{sid}/workspace/{action}` | `workspace_action` |
 | POST | `/api/docs/{sid}/merge-copy` | `merge_copy` |
+
+## Notes on requests that carry a version or a retry
+
+* Edits by position (`/ops`, `/xref`, `/footnote`, `/cite`, `/embed`) send `base`, the version the browser last saw; a stale one is refused with 409
+  `details.kind = "stale_version"` and changes nothing. `/contents` and the bibliography are built on the server from the current text and need no base.
+* `POST /api/docs/{sid}/proof` accepts `retry: true` (the Check button): it skips the pause the server keeps after a checker failed to load. Answers
+  and the `dependency_missing` (503) error carry `retryAfter`, the seconds left of that pause.
+* `GET /api/docs/{sid}/pages` and `/pages/{n}.png` serve the pages of the export PDF for the Rendered view.
+

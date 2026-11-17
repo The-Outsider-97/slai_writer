@@ -25,12 +25,15 @@ Writer API                                applications/slai_writer/api/
    │   routes/*.py    canonical HTTP handlers (see API.md); root routes_*.py are compatibility imports
    ▼
 Writer application                        applications/slai_writer/app/ and top-level *.py
-   │   app.py         original runtime, loaded once by app/__init__.py (public entry-point facade)
+   │   app/runtime.py the application runtime (re-exported by app/__init__.py)
    │   app/services/document_lifecycle.py  create / Save As, saved-version views, failed-create cleanup
    │   app/commands/documents.py           version-checked history travel, unsaved-close protection
    │   app/queries/documents.py            consistent undo/redo menu snapshots
    │   session.py     one DocumentSession per open document: model, undo/redo, revisions, autosave, recovery, snapshots, merge
-   │   ops.py         the operation vocabulary applied to a session (text, format, blocks, tables, pages, styles, sources, embeds, ext…)
+   │   opcore.py      what every edit shares (errors, undo, tracker, handler registry)
+   │   ops.py         the document-level operations (text, format, blocks, pages, styles, sources, embeds, ext…); re-exports opcore
+   │   tableops.py / tablegrid.py / columns.py / book.py   tables, column sections, book layout (depend on opcore only)
+   │   names.py       author-name reading (APA 7)
    │   textmodel.py   block/span arithmetic shared by ops
    │   accounts.py    signup, e-mail code, login, TOTP, recovery codes, trusted devices, sessions, throttling, audit
    │   totp.py        RFC 6238 on hashlib/hmac only
@@ -60,14 +63,27 @@ logo/icon set in `applications/assets`; SLDC in `src/utils/sldc.py`; Documaster'
   `routes_{account,core,docs,tools}.py` modules and `routing.py` remain import-compatible facades. The public `routes.router` is
   the identical object to `api.routing.router`.
 * The document lifecycle and history use cases are extracted only where they coordinate multiple established components.
-  Editing (`ops.py`), session transactions (`session.py`), storage (`store.py`), SLDC format handling and account policies
-  remain single-source implementations. `app.py` is not moved because its module/package compatibility loader is part of startup.
-* `api/middleware/`, `api/utils/api_errors.py` and `app/utils/app_errors.py` do **not** define competing middleware or error
-  hierarchies. The shared SLAI server already handles Host/Origin/marker checks, body limits, secure headers and error responses;
-  the shared `applications.tools.errors` is canonical. No Writer-specific middleware requirement was found.
-* `app/ports/` remains intentionally free of artificial wrappers: existing storage, converters, and AI integrations already
-  expose callable interfaces. No new persistence, auth, configuration, or dependency-injection framework is introduced.
-* `domain/`, `utils/`, `export.py`, `docmaster.py` and shared SLAI modules retain their pre-existing responsibilities.
+  Editing, session transactions (`session.py`), storage (`store.py`), SLDC format handling and account policies remain single-source
+  implementations.
+* **Editing kernel.** `opcore.py` holds what every edit shares (`OpError`, `Undo`, `Tracker`, the `HANDLERS`/`LABELS` registries, argument
+  helpers, `repair_sections`). `tablegrid.py` holds the table grid model. `ops.py` registers the document-level operations and **re-exports every
+  kernel name**, so `from applications.slai_writer.ops import ...` keeps working. `tableops`, `columns`, `book`, `table_styles` and
+  `shape_validation` depend on `opcore`/`tablegrid` only, never on `ops`: there is no import cycle at module or function level
+  (`tests/test_architecture.py` checks this on every run).
+* **Application runtime.** `app/runtime.py` is the old `app.py`; `app/__init__.py` re-exports it (PEP 562), so `applications.slai_writer.app`
+  keeps its public names whichever module is imported first. `preferences.py` owns the preference schema and defaults (the API reads it from
+  there, not from the runtime), `dependencies.py` owns "is this optional package installed" (`installed`, `require`) so no module uses an
+  exception around an import to find out.
+* **Removed as dead.** `app/ports/`, `app/utils/`, `api/middleware/`, `api/utils/` held only empty placeholder modules; the shared SLAI server
+  already owns middleware and errors. `tests/test_architecture.py` fails if an empty placeholder module is added to `app/` or `api/` again.
+  Outside this scope and left untouched: `domain/`, `utils/` (empty placeholder modules), `configs/sw_config.yaml`, `configs/slai_profile.yaml`,
+  `version.py`.
+* **Names.** `names.py` is the only place an author name is read (family, given, suffix, particle, institution, ambiguity note); the citation
+  engine, the legacy in-text marks, the reference line, the year-suffix grouping and the source warnings all use it. The editor never reads a name itself: it
+  asks `POST /api/names/read` and shows the answer (`src/client/names_ui.ts`: Confirm, Keep as one name, Change… write the corrected line, nothing else).
+* **Odd/even running heads.** Stored with the section's book layout (`odd_even`, `header_even`, `footer_even`), never in the core SLDC header. One rule
+  (right-hand page: the ordinary band; left-hand page: its own text, else the ordinary band swapped when mirrored) in `book.py`, the client's `runningBand` and
+  Documaster's `even_page_template`.
 
 ## 2. Server-authoritative editing
 

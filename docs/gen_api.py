@@ -22,5 +22,14 @@ out = ["# Writer HTTP API (generated from the route table)\n",
 for name, items in groups.items():
     out.append(f"\n## {name}\n\n| Method | Path | Handler |\n|---|---|---|")
     out.extend(f"| {m} | `{p}` | `{fn}` |" for m, p, fn in items)
+out.append("""
+## Notes on requests that carry a version or a retry
+
+* Edits by position (`/ops`, `/xref`, `/footnote`, `/cite`, `/embed`) send `base`, the version the browser last saw; a stale one is refused with 409
+  `details.kind = "stale_version"` and changes nothing. `/contents` and the bibliography are built on the server from the current text and need no base.
+* `POST /api/docs/{sid}/proof` accepts `retry: true` (the Check button): it skips the pause the server keeps after a checker failed to load. Answers
+  and the `dependency_missing` (503) error carry `retryAfter`, the seconds left of that pause.
+* `GET /api/docs/{sid}/pages` and `/pages/{n}.png` serve the pages of the export PDF for the Rendered view.
+""")
 (HERE / "docs" / "API.md").write_text("\n".join(out) + "\n", encoding="utf-8")
 print(sum(len(v) for v in groups.values()), "routes")

@@ -1,5 +1,24 @@
 # Change summary
 
+## v2.4 final weekly upgrade (2026-11-17)
+
+Rendered View, 1–4 pages side by side, book layouts and margins, writing-experience fixes, app/api consolidation (`opcore.py`, `tablegrid.py`,
+`preferences.py`, `dependencies.py`, `app/runtime.py`; empty `app/ports`, `app/utils`, `api/middleware`, `api/utils` removed), proofing recovery, the
+integration gate, APA 7 author reading (`names.py`), version-checked cross-references and the Insert → Tables ribbon group. Full report, matrix,
+measurements and what is unverified: `FINAL_WEEKLY_UPGRADE.md`. Deleted files to remove from an existing copy: `app.py` (now `app/runtime.py`), `app/ports/`,
+`app/utils/`, `api/middleware/`, `api/utils/`.
+
+### Follow-up of 2026-11-17
+
+* **Odd/even headers and footers:** separate header and footer text for odd and even pages, per section; Header and footer dialog, on-page drawing, PDF, DOCX,
+  ODT and RTF (Documaster writers `common.py`, `write_pdf.py`, `write_docx.py`, `write_odt.py`, `write_rtf.py`). `book.py`, `src/client/book_layout.ts`
+  (`runningBand`), `page.ts`, `dialogs.ts`, `types.ts`. Tests: `tests/test_odd_even.py`, `tests_ts/book_layout.test.ts`, `tests_e2e/odd_even.mjs`.
+* **Author-name correction controls:** `names.py` (`Name.describe`, `read_all`, canonical text), `POST /api/names/read`, `src/client/names_ui.ts`, the source
+  editor. Tests: `test_names.py`, `test_api_tools.py`, `tests_ts/names_ui.test.ts`, `tests_e2e/author_names.mjs`, `tests/fixtures/name_canonical.json`, and
+  `tests/test_names_csl.py` (through the real APA CSL; needs citeproc-py).
+* **CI gate:** `ci/writer-integration-gate.yml` (Linux and Windows; copy to `.github/workflows/`), `docs/INTEGRATION_GATE.md`.
+* Files outside `applications/slai_writer/`: `applications/Documaster/slai/docmodel/writers/{common,write_pdf,write_docx,write_odt,write_rtf}.py`.
+
 ## New: `applications/slai_writer/` (SLAI Writer 1.0.0)
 
 A complete, tested application, not a mock-up:
