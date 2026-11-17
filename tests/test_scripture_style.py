@@ -5,6 +5,7 @@ import copy
 import re
 import tempfile
 import types
+from . import independent
 import unittest
 from pathlib import Path
 
@@ -235,8 +236,8 @@ class ScriptureExportTests(Base):
 
     def setUp(self):
         super().setUp()
-        if not self.dm.available or pdfplumber is None:
-            self.skipTest("Documaster or pdfplumber is not available")
+        independent.need(self, "Documaster", self.dm.available, str(self.dm.reason))
+        independent.need(self, "pdfplumber", pdfplumber is not None, "pip install pdfplumber")
         self.app.docmaster = self.dm
         self.app.settings = types.SimpleNamespace(signatures={"max_distinct": 2, "max_samples": 20}, max_upload_bytes=1024 * 1024, data_dir=self.root / "data")
         self.app.preferences = lambda: {"lookup_online": False}

@@ -4,8 +4,9 @@ from pathlib import Path
 
 from applications.tools.errors import BadRequest, LimitExceeded
 from applications.slai_writer.docmaster import DocumasterLink
-from applications.slai_writer.export import Exchange, available_formats
+from applications.slai_writer.export import Exchange, available_formats, parser_ready
 from applications.slai_writer.session import sldc
+from . import independent
 from .helpers import Workbench, png
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -25,8 +26,7 @@ class ExportTests(Workbench):
 
     def setUp(self):
         super().setUp()
-        if not self.dm.available:
-            self.skipTest("Documaster is not available: " + str(self.dm.reason))
+        independent.need(self, "Documaster", self.dm.available, str(self.dm.reason))
         self.app.docmaster = self.dm
         self.app.settings = types.SimpleNamespace(signatures={"max_distinct": 2, "max_samples": 20}, max_upload_bytes=1024 * 1024,
                                                   data_dir=self.root / "data")
@@ -113,6 +113,7 @@ class ExportTests(Workbench):
         self.assertNotEqual(imported.doc_id, session.doc_id)
 
     def test_import_text_markdown_html(self):
+        independent.need(self, "SLAI Reader's parser engine", parser_ready(self.dm), "src/agents/reader is missing or could not be loaded")
         md = self.ex.import_bytes(b"# Title\n\nSome *words* here.\n\n- one\n- two\n", "n.md", profile="guest")
         self.assertIn("Some words here", md.plain_text())
         self.assertTrue(any(b["type"] == "heading" for b in md.doc["blocks"]))
@@ -131,6 +132,7 @@ class ExportTests(Workbench):
             self.ex.import_bytes(b"PK\x03\x04not really a zip", "x.docx", profile="guest")
 
     def test_sdoc_is_never_silently_reinterpreted(self):
+        independent.need(self, "SLAI Reader's parser engine", parser_ready(self.dm), "src/agents/reader is missing or could not be loaded")
         session = self.doc()
         data = sldc().dumps_package(session._settled(session.pkg.copy()))
         copy = self.ex.import_bytes(data, "old.sdoc", profile="guest")

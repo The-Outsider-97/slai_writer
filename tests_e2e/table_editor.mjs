@@ -38,7 +38,7 @@ const until = async (fn, label) => {
 const assert = (ok, label) => { if (!ok) throw new Error(label); };
 try {
   await until(async () => { const r = await fetch(base); return r.status < 500; }, "server startup");
-  browser = await chromium.launch({ executablePath: process.env.WRITER_CHROMIUM || "/usr/bin/chromium", args: ["--no-sandbox"] });
+  browser = await chromium.launch({ executablePath: process.env.WRITER_CHROMIUM || undefined, args: ["--no-sandbox"] });
   page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   page.setDefaultTimeout(10000);
   await page.goto(`${base}/?token=table-e2e-token`);

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from applications.slai_writer.docmaster import DocumasterLink
 from applications.slai_writer.export import Exchange
+from . import independent
 from .helpers import Workbench
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -29,12 +30,13 @@ class Fidelity(Workbench):
 
     def setUp(self):
         super().setUp()
-        if not self.dm.available:
-            self.skipTest("Documaster is not available: " + str(self.dm.reason))
+        independent.need(self, "Documaster", self.dm.available, str(self.dm.reason))
         try:
             import docx, pdfplumber, pypdf  # noqa: F401
+            readers = None
         except ImportError as exc:
-            self.skipTest(f"an independent reader is not installed: {exc}")
+            readers = str(exc)
+        independent.need(self, "the independent readers (python-docx, pdfplumber, pypdf)", readers is None, str(readers))
         self.app.docmaster = self.dm
         self.app.settings = types.SimpleNamespace(signatures={"max_distinct": 2, "max_samples": 20}, max_upload_bytes=1024 * 1024, data_dir=self.root / "data")
         self.ex = Exchange(self.app)

@@ -10,6 +10,7 @@ from pathlib import Path
 from applications.tools.errors import BadRequest, Conflict, DependencyMissing, Forbidden
 from applications.slai_writer.assist import Assist
 from applications.slai_writer.docmaster import DocumasterLink
+from . import independent
 from .helpers import Workbench
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -86,8 +87,7 @@ class AssistTests(Workbench):
 
     def setUp(self):
         super().setUp()
-        if not self.dm.available:
-            self.skipTest("Documaster is not available")
+        independent.need(self, "Documaster", self.dm.available, str(self.dm.reason))
         self.prefs = {"ai_enabled": True, "ai_budget": 0}
         self.app.docmaster = self.dm
         self.app.preferences = lambda: dict(self.prefs)
@@ -143,6 +143,71 @@ class AssistTests(Workbench):
         self.assertIn("could not be loaded", str(ctx.exception))
         with self.assertRaises(DependencyMissing):
             a.spelling(self.make())                                   # remembered; no repeated expensive failure
+
+    def test_a_checker_that_failed_to_load_is_tried_again_not_given_up_on(self):
+        calls = []
+
+        def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                raise OSError("word list is still being written")
+            return FakeSpell()
+        now = [1000.0]
+        a = Assist(self.app, spell_factory=flaky)
+        a._spell_failure.clock = lambda: now[0]
+        session = self.make("The cat recieve the numbers.")
+        with self.assertRaises(DependencyMissing) as first:
+            a.spelling(session)
+        self.assertEqual(first.exception.details["retryAfter"], 15)                      # the page is told when it may ask again
+        with self.assertRaises(DependencyMissing) as again:
+            a.spelling(session)
+        self.assertEqual(len(calls), 1, "no second load while the pause lasts")
+        self.assertLessEqual(again.exception.details["retryAfter"], 15)
+        now[0] += 16                                                                     # the pause is over: one more attempt, which fails again, and the pause doubles
+        with self.assertRaises(DependencyMissing) as third:
+            a.spelling(session)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(third.exception.details["retryAfter"], 30)
+        now[0] += 31                                                                     # the cause has passed
+        out = a.spelling(session)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual({i["text"] for i in out["issues"]}, {"recieve"})
+        self.assertIsNone(out["retryAfter"])
+        self.assertIsNone(a._spell_failure.message, "a working checker clears the failure")
+        a.spelling(session)
+        self.assertEqual(len(calls), 3, "and is kept: no reload on later requests")
+
+    def test_pressing_check_again_does_not_wait_for_the_pause(self):
+        calls = []
+
+        def boom():
+            calls.append(1)
+            raise OSError("not yet")
+        a = Assist(self.app, spell_factory=boom)
+        a._spell_failure.clock = lambda: 1000.0
+        session = self.make()
+        with self.assertRaises(DependencyMissing):
+            a.spelling(session)
+        with self.assertRaises(DependencyMissing):
+            a.spelling(session)
+        self.assertEqual(len(calls), 1)
+        with self.assertRaises(DependencyMissing):
+            a.spelling(session, retry=True)                                              # the button: tried at once
+        self.assertEqual(len(calls), 2)
+
+    def test_the_pause_between_attempts_is_bounded(self):
+        from applications.slai_writer.assist import Failure, RETRY_FIRST_SECONDS, RETRY_MAX_SECONDS
+        now = [0.0]
+        failure = Failure(clock=lambda: now[0])
+        self.assertIsNone(failure.seconds_left())
+        seen = []
+        for _ in range(8):
+            failure.record("down")
+            seen.append(failure.seconds_left())
+            now[0] += 10_000
+        self.assertEqual(seen[0], RETRY_FIRST_SECONDS)
+        self.assertEqual(max(seen), RETRY_MAX_SECONDS)
+        self.assertEqual(seen, sorted(seen))
 
     # --- permissions
     def test_ai_is_off_by_default_and_reads_nothing(self):

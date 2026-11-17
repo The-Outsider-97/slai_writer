@@ -189,6 +189,81 @@ try {
     await page.unroute("**/api/docs/*/proof");
   });
 
+  /* A checker that failed to load (the dependency error carries how long the server pauses before it tries again): the page says so honestly, retries by
+   * itself a bounded number of times while it is visible, recovers without the person doing anything when the service returns, never interrupts typing, and
+   * the Check button still tries immediately. The failure is simulated at the network (the same envelope the server sends); the server's own pause and
+   * retry logic is covered by tests/test_assist.py. */
+  const downEnvelope = (seconds) => ({ ok: false, error: { code: "dependency_missing", message: "Spelling needs the 'pyspellchecker' package (pip install pyspellchecker).", hint: "Writer will try again.", details: { retryAfter: seconds } } });
+  await scenario("a proofing service that failed to load: honest notice, one automatic retry per pause, recovery without a click, typing never blocked", async () => {
+    await fresh([["paragraph", "Teh text is here."]]);
+    await settle();
+    let calls = 0, down = true; const bodies = [];
+    await page.route("**/api/docs/*/proof", async (route) => {
+      calls += 1; bodies.push(JSON.parse(route.request().postData() || "{}"));
+      if (down) await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify(downEnvelope(1)) });
+      else await route.continue();
+    });
+    await page.locator("#panel-red").getByRole("button", { name: "Recheck document" }).click();
+    await until(async () => /pyspellchecker/.test(await panelText()), "the reason is shown", 8000);
+    ok(/try again by itself/i.test(await panelText()), `the notice says Writer retries: ${(await panelText()).slice(0, 300)}`);
+    const afterFirst = calls;
+    // typing is not blocked while the service is down
+    const p = page.locator("#main .blk [data-edit=text]").first();
+    await p.click(); await page.keyboard.press("End");
+    const t0 = Date.now(); await page.keyboard.type(" More words while it is down.", { delay: 5 });
+    ok(Date.now() - t0 < 2000, `typing took ${Date.now() - t0} ms while proofing was down`);
+    await until(async () => (await text("b00001")).includes("while it is down."), "text saved");
+    // no polling storm: before the pause (6 s) has passed there is no flood of requests
+    await delay(2500);
+    ok(calls - afterFirst <= 4, `too many requests in 2.5 s while down: ${calls - afterFirst}`);
+    // an automatic retry happens by itself, and an automatic retry does not ask the server to skip its pause
+    await until(async () => bodies.slice(1).some((b) => b.retry === false), "an automatic retry", 12000);
+    ok(bodies.slice(1).every((b) => b.retry === false || b.retry === true), "retry flag is always sent");
+    // the service returns: the notice goes away and the typo is marked, with no button pressed
+    down = false;
+    await until(async () => !/pyspellchecker/.test(await panelText()), "the notice clears by itself", 20000);
+    await until(async () => (await marks("w-typo")).includes("Teh"), "the typo is marked after recovery", 8000);
+    const settled = calls; await delay(2500);
+    ok(calls - settled <= 2, `retrying stopped once it worked (${calls - settled} further requests)`);
+    await page.unroute("**/api/docs/*/proof");
+  });
+
+  await scenario("a long pause asked for by the server is respected, and the Check button still works at once (the retry limit itself is unit-tested)", async () => {
+    await fresh([["paragraph", "Teh text is here."]]);
+    await settle();
+    let calls = 0, down = true; const bodies = [];
+    await page.route("**/api/docs/*/proof", async (route) => {
+      calls += 1; bodies.push(JSON.parse(route.request().postData() || "{}"));
+      if (down) await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify(downEnvelope(300)) });
+      else await route.continue();
+    });
+    await page.locator("#panel-red").getByRole("button", { name: "Recheck document" }).click();
+    await until(async () => /pyspellchecker/.test(await panelText()), "the reason is shown", 8000);
+    // a long pause was asked for: nothing is retried meanwhile
+    const n = calls; await delay(3000);
+    eq(calls, n, "no request during the server's pause");
+    // the person presses Check: it goes out at once, and carries retry:true so the server skips its pause
+    down = false;
+    await page.getByRole("button", { name: "Check spelling" }).click();
+    await until(async () => bodies.some((b) => b.retry === true), "a manual check asks for an immediate retry", 5000);
+    await until(async () => (await marks("w-typo")).includes("Teh"), "the typo is marked after the manual check", 8000);
+    ok(!/Spelling is not available here/.test(await panelText()), "the spelling notice is gone (grammar, still down, keeps its own)");
+    await page.unroute("**/api/docs/*/proof");
+  });
+
+  await scenario("a refusal (403) is shown plainly and is never retried automatically", async () => {
+    await fresh([["paragraph", "Teh text is here."]]);
+    await settle();
+    let calls = 0;
+    await page.route("**/api/docs/*/proof", async (route) => { calls += 1; await route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ ok: false, error: { code: "forbidden", message: "Proofing is switched off for this document." } }) }); });
+    await page.locator("#panel-red").getByRole("button", { name: "Recheck document" }).click();
+    await until(async () => /switched off/.test(await panelText()), "the refusal is shown", 8000);
+    ok(!/try again by itself/i.test(await panelText()), "a refusal does not promise retries");
+    const n = calls; await delay(7500);
+    eq(calls, n, "a refusal is never retried automatically");
+    await page.unroute("**/api/docs/*/proof");
+  });
+
   await scenario("the check is local: no request leaves this computer", async () => {
     await fresh([["paragraph", "Teh text."]]);
     const external = [];

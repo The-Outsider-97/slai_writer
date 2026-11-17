@@ -12,6 +12,7 @@ from applications.slai_writer import columns as colmod
 from applications.slai_writer.docmaster import DocumasterLink
 from applications.slai_writer.academic import Academic
 from applications.slai_writer.export import Exchange
+from . import independent
 from .helpers import Workbench
 
 try:
@@ -40,10 +41,8 @@ class ExportLayoutTests(Workbench):
 
     def setUp(self):
         super().setUp()
-        if not self.dm.available:
-            self.skipTest("Documaster is not available: " + str(self.dm.reason))
-        if pdfplumber is None:
-            self.skipTest("pdfplumber is not installed")
+        independent.need(self, "Documaster", self.dm.available, str(self.dm.reason))
+        independent.need(self, "pdfplumber", pdfplumber is not None, "pip install pdfplumber")
         self.app.docmaster = self.dm
         self.app.settings = types.SimpleNamespace(signatures={"max_distinct": 2, "max_samples": 20}, max_upload_bytes=1024 * 1024,
                                                   data_dir=self.root / "data")
@@ -356,15 +355,13 @@ class ExportLayoutTests(Workbench):
         import shutil
         import subprocess
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
-        if not soffice:
-            self.skipTest("LibreOffice is not installed")
+        independent.need(self, "LibreOffice", bool(soffice), "install it or put 'soffice' on PATH")
         out = self.root / "lo"
         out.mkdir(exist_ok=True)
         done = subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out), str(path)], capture_output=True, timeout=180,
                               env={**__import__("os").environ, "HOME": str(self.root)})
         pdf = out / (Path(path).stem + ".pdf")
-        if done.returncode != 0 or not pdf.exists():
-            self.skipTest("LibreOffice could not convert the file here")
+        independent.need(self, "LibreOffice conversion", done.returncode == 0 and pdf.exists(), (done.stderr or b"").decode("utf-8", "replace").strip()[:300])
         return self.positions(pdf)
 
     def test_libreoffice_reads_the_word_and_rtf_columns_as_we_wrote_them(self):
@@ -436,15 +433,13 @@ class ExportLayoutTests(Workbench):
         import shutil
         import subprocess
         soffice = shutil.which("soffice") or shutil.which("libreoffice")
-        if not soffice:
-            self.skipTest("LibreOffice is not installed")
+        independent.need(self, "LibreOffice", bool(soffice), "install it or put 'soffice' on PATH")
         out = self.root / "lo2"
         out.mkdir()
         done = subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out), report["path"]], capture_output=True, timeout=180,
                               env={**__import__("os").environ, "HOME": str(self.root)})
         pdf = out / (Path(report["path"]).stem + ".pdf")
-        if done.returncode != 0 or not pdf.exists():
-            self.skipTest("LibreOffice could not convert the file here")
+        independent.need(self, "LibreOffice conversion", done.returncode == 0 and pdf.exists(), (done.stderr or b"").decode("utf-8", "replace").strip()[:300])
         with pdfplumber.open(pdf) as doc:
             texts = [(page.extract_text() or "") for page in doc.pages]
         rows = {m.group(1): int(m.group(2)) for m in re.finditer(r"^(Abstract|Introduction|Method|Results|Discussion|References)\W+(\d+)\s*$", texts[0], re.M)}

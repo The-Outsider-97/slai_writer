@@ -1,0 +1,92 @@
+# SLAI Writer: the mandatory integration gate, on Linux and Windows.
+#
+# Copy this file to .github/workflows/ at the root of the SLAI repository (it is kept here, beside the code it gates, because the repository root's CI layout is
+# not part of this checkout). It makes the 12 November audit's P1 finding impossible to merge past:
+#   * every export and import check runs against the real tools (Documaster, LibreOffice, poppler, pdfplumber, pypdf, python-docx, citeproc-py, SLAI Reader);
+#   * SLAI_REQUIRE_INTEGRATION=1 turns any skipped check, for any reason, into a failure of the job (tests/gate.py);
+#   * exported documents are read back and measured by software that did not write them, on both operating systems.
+# Make the "gate" job a required status check on the protected branches so a skip cannot be merged.
+name: writer-integration-gate
+
+on:
+  pull_request:
+    paths: ["applications/slai_writer/**", "applications/Documaster/**", "src/utils/**", "src/agents/reader/**"]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  gate:
+    name: gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    env:
+      SLAI_REQUIRE_INTEGRATION: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+
+      - name: Install LibreOffice and poppler (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-writer poppler-utils fonts-dejavu fonts-liberation
+      - name: Install LibreOffice and poppler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install libreoffice-fresh poppler -y --no-progress
+          $soffice = "C:\Program Files\LibreOffice\program"
+          if (-not (Test-Path "$soffice\soffice.exe")) { throw "LibreOffice was not installed where expected: $soffice" }
+          Add-Content $env:GITHUB_PATH $soffice
+          $poppler = (Get-ChildItem "C:\ProgramData\chocolatey\lib\poppler" -Recurse -Filter pdftoppm.exe | Select-Object -First 1).DirectoryName
+          if (-not $poppler) { throw "poppler's pdftoppm.exe was not found" }
+          Add-Content $env:GITHUB_PATH $poppler
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r applications/slai_writer/requirements.txt pdfplumber python-docx lxml
+
+      - name: Show the tools the gate will use
+        shell: bash
+        run: |
+          python --version
+          soffice --version || true
+          pdftoppm -v || true
+          python -c "import citeproc, pdfplumber, pypdf, docx; print('python readers present')"
+
+      - name: Integration gate (a skipped check fails the job)
+        run: python -m applications.slai_writer.tests.gate
+
+  browser:
+    name: browser (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: python -m pip install -r applications/slai_writer/requirements.txt pdfplumber python-docx lxml
+      - name: Build, type-check, unit tests
+        working-directory: applications/slai_writer
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+      - name: Browser tests
+        working-directory: applications/slai_writer
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+          node tests_e2e/run.mjs
+          for f in tests_e2e/*.mjs; do case "$f" in */harness.mjs|*/run.mjs) continue;; esac; echo "== $f"; node "$f"; done

@@ -6,6 +6,7 @@ from applications.slai_writer.docmaster import DocumasterLink
 from applications.slai_writer.export import Exchange
 from applications.slai_writer.session import sldc
 
+from . import independent
 from .helpers import Workbench
 
 
@@ -14,8 +15,7 @@ class PDFLayoutTests(Workbench):
         root = Path(__file__).resolve().parents[3]
         self.app.settings.data_dir = self.root / "data"
         self.app.docmaster = DocumasterLink(root, self.root / "data").load()
-        if not self.app.docmaster.available:
-            self.skipTest(self.app.docmaster.reason)
+        independent.need(self, "Documaster", self.app.docmaster.available, str(self.app.docmaster.reason))
         self.addCleanup(self.app.docmaster.close)
         return Exchange(self.app)
 

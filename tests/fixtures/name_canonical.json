@@ -1,0 +1,8 @@
+{"cases": [
+  {"family": "García Márquez", "given": "Gabriel", "suffix": "", "literal": false, "text": "García Márquez, Gabriel"},
+  {"family": "King", "given": "Martin Luther", "suffix": "Jr.", "literal": false, "text": "King, Martin Luther, Jr."},
+  {"family": "van Beethoven", "given": "", "suffix": "", "literal": false, "text": "van Beethoven,"},
+  {"family": "Plato", "given": "", "suffix": "", "literal": false, "text": "Plato"},
+  {"family": "Smith", "given": "", "suffix": "III", "literal": false, "text": "Smith, III"},
+  {"family": "World Health Organization", "given": "", "suffix": "", "literal": true, "text": "{World Health Organization}"}
+]}

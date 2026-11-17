@@ -3,7 +3,12 @@ produced becomes a narrative one. They need no citeproc-py, so they run everywhe
 CSL style's, and test_academic exercises it where citeproc-py is installed."""
 import unittest
 
-from applications.slai_writer.citation_engine import CitationEngine, csl_source, _person
+from applications.slai_writer.citation_engine import CitationEngine, csl_source
+from applications.slai_writer.names import parse
+
+
+def _person(name):
+    return parse(name).csl()
 
 narrative = CitationEngine.narrative
 

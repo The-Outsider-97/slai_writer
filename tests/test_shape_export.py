@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import io
 import types
+from . import independent
 import unittest
 from pathlib import Path
 
@@ -82,8 +83,7 @@ class ShapeConversion(Workbench):
         with TemporaryDirectory() as root:
             dm = DocumasterLink(Path(__file__).resolve().parents[3], Path(root)).load()
             self.addCleanup(dm.close)
-            if not dm.available:
-                self.skipTest("Documaster unavailable: " + str(dm.reason))
+            independent.need(self, "Documaster", dm.available, str(dm.reason))
             self.app.docmaster = dm
             self.app.settings = types.SimpleNamespace(signatures={"max_distinct": 2, "max_samples": 20},
                 max_upload_bytes=1024 * 1024, data_dir=self.root / "data")

@@ -3,8 +3,10 @@ import base64
 import json
 import urllib.parse
 
+from . import independent
 from .api_helpers import ApiCase, Browser
 from .helpers import png
+from applications.slai_writer.export import parser_ready
 
 PW = "correct horse battery"
 PASS = "a long signing passphrase"
@@ -171,6 +173,20 @@ class Embeds(ApiCase):
         self.assertGreaterEqual(status, 400)
 
 
+class AuthorNames(ApiCase):
+    def test_the_editor_can_ask_how_names_are_read_and_nothing_is_stored(self):
+        out = self.web.ok("POST", "/api/names/read", {"names": ["Ludwig van Beethoven", "García Márquez, Gabriel", "World Health Organization", ""]})["names"]
+        self.assertEqual([n and n["family"] for n in out], ["van Beethoven", "García Márquez", "World Health Organization", None], "one answer per line, blank lines included")
+        self.assertEqual([n and n["stated"] for n in out[:3]], [False, True, False])
+        self.assertEqual(out[1]["canonical"], "García Márquez, Gabriel")
+        self.assertTrue(out[2]["literal"] and out[2]["note"])
+
+    def test_bad_input_is_refused(self):
+        for body in ({}, {"names": "x"}, {"names": [1]}, {"names": ["x" * 201]}, {"names": ["a"] * 101}):
+            code, _ = self.web.api("POST", "/api/names/read", body)
+            self.assertEqual(code, 400, str(body)[:40])
+
+
 class Assistance(ApiCase):
     def test_nothing_runs_until_the_person_turns_it_on_and_unavailable_means_unavailable(self):
         status = self.web.ok("GET", "/api/assist/status")
@@ -304,6 +320,7 @@ class ExportImport(ApiCase):
         self.assertIn("approximation", out["note"])
 
     def test_import_markdown_upload_and_rejections(self):
+        independent.need(self, "SLAI Reader's parser engine", parser_ready(self.app.docmaster), "src/agents/reader is missing or could not be loaded")
         body = b"# Heading\n\nA paragraph about water.\n"
         imported = self.web.ok("POST", "/api/import?name=notes.md", raw=body, headers={"Content-Type": "application/octet-stream"})
         texts = [b["text"] for b in imported["blocks"]]

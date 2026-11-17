@@ -28,11 +28,21 @@ class ArchitectureCompatibility(ApiCase):
         self.assertEqual(len(routes.router.routes), len({(method, regex.pattern) for method, regex, _ in routes.router.routes}))
         self.assertGreater(len(routes.router.routes), 100)
 
-    def test_app_package_remains_the_original_runtime(self):
-        runtime = importlib.import_module("applications.slai_writer._app_runtime")
-        self.assertIs(writer_app.WriterApp, runtime.WriterApp)
-        self.assertIs(writer_app.build_server, runtime.build_server)
-        self.assertIs(sys.modules[runtime.__name__], runtime)
+    def test_app_package_re_exports_the_runtime_and_any_import_order_works(self):
+        runtime = importlib.import_module("applications.slai_writer.app.runtime")
+        for name in ("WriterApp", "build_server", "load_settings", "main", "PREF_SCHEMA", "PREF_DEFAULTS", "BUILTIN_CURSORS", "CURSOR_KINDS", "Settings"):
+            self.assertIs(getattr(writer_app, name), getattr(runtime, name), name)
+        self.assertIn("WriterApp", dir(writer_app))
+        self.assertTrue((runtime.HERE / "dist").parent.joinpath("configs", "config.yaml").is_file())     # the Writer directory, not the app/ package
+        with self.assertRaises(AttributeError):
+            writer_app.no_such_name                                                                        # noqa: B018
+        # The packages depend on each other without a circle, so each can be the first one imported (a fresh interpreter each time).
+        import subprocess
+        root = str(__import__("pathlib").Path(__file__).resolve().parents[3])
+        for first in ("routes", "app", "app.runtime", "api.routes.core", "api.routes.documents", "ops", "tableops", "table_styles", "columns", "book", "shape_validation"):
+            done = subprocess.run([sys.executable, "-c", f"import applications.slai_writer.{first}"], cwd=root, env={**__import__("os").environ, "PYTHONPATH": root},
+                                  capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, f"{first}: {done.stderr[-400:]}")
 
     def test_app_use_cases_are_reachable_through_real_http(self):
         state = self.new_doc("Layer smoke")
