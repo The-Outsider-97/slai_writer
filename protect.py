@@ -13,7 +13,8 @@ import os
 import secrets
 from pathlib import Path
 
-from ..tools.errors import DependencyMissing, Forbidden, StorageError
+from ..tools.errors import Forbidden, StorageError
+from .dependencies import require
 from ..tools.storage import atomic_write
 
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 15, 8, 1
@@ -21,11 +22,7 @@ MAGIC = b"SWP1"
 
 
 def _aesgcm():
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    except ImportError as exc:                                       # pragma: no cover - cryptography ships with SLAI
-        raise DependencyMissing("The 'cryptography' package is needed to protect secrets on this computer (pip install cryptography).") from exc
-    return AESGCM
+    return require("cryptography.hazmat.primitives.ciphers.aead", needed_for="Protecting secrets on this computer", package="cryptography").AESGCM
 
 
 class MasterKey:

@@ -24,14 +24,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from ..tools.errors import BadRequest, DependencyMissing, NotFound
 from ..tools.validation import utc_now
 from . import toc_presets
-from .session import DocumentSession, sldc
-from .textmodel import OBJ
+from .session import DocumentSession
 from .citation_engine import CitationEngine, SOURCE_TYPES
+from .names import parse, surname
 
 STATUSES = ("user", "imported", "checked", "registry", "ai")
 STATUS_LABELS = {"user": "Provided by you", "imported": "Imported with the document", "checked": "Checked by you", "registry": "Verified in the DOI registry",
@@ -50,22 +50,35 @@ def _statuses(doc: dict[str, Any]) -> dict[str, Any]:
 
 
 def _surname(author: str) -> str:
-    author = author.strip()
-    if "," in author:
-        return author.split(",", 1)[0].strip()
-    parts = author.split()
-    return parts[-1] if parts else author
+    return surname(author)
 
 
-def in_text(entry: dict[str, Any]) -> str:
-    """The in-text mark, built only from the entry's own fields."""
+def _authors_of(entry: dict[str, Any]) -> list[str]:
+    """The authors as typed, or the organisation as one whole name when the source has no personal author."""
     authors = entry.get("authors") or []
+    return list(authors) if authors else ["{" + str(entry["organization"]) + "}"] if entry.get("organization") else []
+
+
+def in_text(entry: dict[str, Any], others: Iterable[dict[str, Any]] = ()) -> str:
+    """The in-text mark, built only from the entry's own fields. When another source has the same first author's family name and the same year but a
+    different given name, the initial is added (J. Smith, 2020; A. Smith, 2020), as APA 7 asks, so two people are never mistaken for one."""
+    authors = _authors_of(entry)
     year = str(entry.get("year") or "n.d.")
     if not authors:
         title = entry.get("title", "")
         short = title if len(title) <= 40 else title[:37].rstrip() + "…"
         return f"({short}, {year})"
-    names = [_surname(a) for a in authors]
+    people = [parse(a) for a in authors]
+    names = [p.family for p in people]
+    first = people[0]
+    if not first.literal and first.initials:
+        for other in others:
+            if other.get("id") == entry.get("id") or str(other.get("year") or "n.d.") != year:
+                continue
+            rivals = [parse(a) for a in _authors_of(other)[:1]]
+            if any(not r.literal and r.family.casefold() == first.family.casefold() and r.initials and r.initials[:1] != first.initials[:1] for r in rivals):
+                names[0] = f"{first.initials[0].upper()}. {first.family}"
+                break
     who = names[0] if len(names) == 1 else f"{names[0]} & {names[1]}" if len(names) == 2 else f"{names[0]} et al."
     return f"({who}, {year})"
 
@@ -73,7 +86,7 @@ def in_text(entry: dict[str, Any]) -> str:
 def reference_line(entry: dict[str, Any]) -> str:
     """One bibliography line in Writer's simple author-year layout (not a claim of conformity to APA, MLA or any style guide)."""
     parts = []
-    authors = entry.get("authors") or []
+    authors = [parse(a).display() for a in _authors_of(entry)]
     if authors:
         parts.append((", ".join(authors[:-1]) + (", & " if len(authors) > 2 else " & " if len(authors) == 2 else "") + authors[-1]) if len(authors) > 1 else authors[0])
     parts.append(f"({entry.get('year') or 'n.d.'})")
@@ -161,7 +174,7 @@ def _linked_mark(refs_by_id: dict[str, dict[str, Any]], span: dict[str, Any]) ->
         index = engine.register(ids, locator=span.get("locator"), label=span.get("label", "page"))
         return engine.cite(index, narrative=span.get("mode") == "narrative")
     except DependencyMissing:
-        return in_text(refs_by_id[span["ref"]])
+        return in_text(refs_by_id[span["ref"]], refs_by_id.values())
 
 
 class Academic:
@@ -194,7 +207,7 @@ class Academic:
             entry = {"id": ref["id"], "kind": ref["kind"], "uses": counts.get(ref["id"], 0)}
             if ref["kind"] == "citation":
                 st = status.get(ref["id"], {"status": "user"})
-                preview_cite, preview_line = previews.get(ref["id"], (in_text(ref), reference_line(ref)))
+                preview_cite, preview_line = previews.get(ref["id"], (in_text(ref, citation_refs), reference_line(ref)))
                 entry.update({"data": {k: ref[k] for k in _FIELDS if k in ref}, "status": st["status"], "statusLabel": STATUS_LABELS[st["status"]],
                               "statusDate": st.get("date"), "inText": preview_cite, "line": preview_line,
                               "problems": self._problems(ref)})
@@ -206,8 +219,10 @@ class Academic:
     @staticmethod
     def _problems(ref: dict[str, Any]) -> list[str]:
         found = []
-        if not ref.get("authors"):
+        if not ref.get("authors") and not ref.get("organization"):
             found.append("No author is recorded.")
+        for field in ("authors", "editors"):
+            found += [p.note for p in (parse(n) for n in ref.get(field) or []) if p.note]
         if not ref.get("year"):
             found.append("No year is recorded (shown as n.d.).")
         if not (ref.get("doi") or ref.get("url") or ref.get("publisher") or ref.get("container")):
@@ -257,7 +272,7 @@ class Academic:
         if managed:
             meta = managed["extensions"][REFERENCES_EXTENSION]
             self.bibliography(session, only_cited=meta.get("only_cited", True), heading=managed["text"])
-        return {"id": sid, "status": statuses[sid]["status"], "inText": in_text(entry), "state": session.state()}
+        return {"id": sid, "status": statuses[sid]["status"], "inText": in_text(entry, [r for r in session.doc.get("references", []) or [] if r.get("kind") == "citation"]), "state": session.state()}
 
     def delete_source(self, session: DocumentSession, source_id: str) -> dict[str, Any]:
         if not any(r["id"] == source_id for r in session.doc.get("references", []) or []):
@@ -349,7 +364,7 @@ class Academic:
         except DependencyMissing:
             if len(ids) > 1 or locator or mode != "parenthetical":
                 raise
-            mark = in_text(refs[0])
+            mark = in_text(refs[0], [r for r in session.doc.get("references", []) if r.get("kind") == "citation"])
         citation_span: dict[str, Any] = {"op": "span", "block": block_id, "start": at,
             "end": at + len(mark), "kind": "ref", "ref": ids[0]}
         if len(ids) > 1:
@@ -687,8 +702,9 @@ class Academic:
                 "note": "Automatic refresh follows heading edits when enabled; manual Update contents remains available.",
                 "patch": patch, "state": session.state()}
 
-    def cross_reference(self, session: DocumentSession, block_id: str, start: int, end: int, target: str) -> dict[str, Any]:
-        return session.apply({"op": "span", "block": block_id, "start": start, "end": end, "kind": "xref", "target": target}, None)
+    def cross_reference(self, session: DocumentSession, block_id: str, start: int, end: int, target: str, *, base: int | None = None) -> dict[str, Any]:
+        """The offsets come from what the person saw, so the request carries that version: if the text moved since, it is refused (409), never applied elsewhere."""
+        return session.apply({"op": "span", "block": block_id, "start": start, "end": end, "kind": "xref", "target": target}, base)
 
     # -------------------------------------------------------------------------------------------------- pre-export
     def audit(self, session: DocumentSession) -> list[dict[str, Any]]:

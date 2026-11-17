@@ -16,18 +16,18 @@ from __future__ import annotations
 
 import difflib
 import importlib
+import math
 import re
 import secrets
 import sys
 import threading
 import time
 import types
-from pathlib import Path
 from typing import Any
 
-from ..tools.errors import BadRequest, Conflict, DependencyMissing, Forbidden, NotFound
+from ..tools.errors import BadRequest, DependencyMissing, Forbidden, NotFound
 from .proofing import Proofreader, split_language
-from .session import DocumentSession, sldc
+from .session import DocumentSession
 from .textmodel import OBJ
 
 TASKS = {
@@ -50,6 +50,46 @@ _WORD = re.compile(r"[^\W\d_][\w'’-]*", re.U)
 PASSAGE = re.compile(r"</?passage>", re.I)
 
 
+RETRY_FIRST_SECONDS = 15
+RETRY_MAX_SECONDS = 300
+
+
+class Failure:
+    """Why an optional checker could not be loaded, and when it may be tried again.
+
+    A load that failed once is not final: the cause (a file still being written, a package installed a minute ago, a busy machine) often passes. The checker
+    is tried again after a pause that doubles with each failure up to five minutes, so a checker that stays broken costs one attempt per pause, not one
+    per keystroke; and a person who presses Check again is never made to wait (:meth:`force`).
+    """
+
+    def __init__(self, clock: Any = time.monotonic) -> None:
+        self.clock = clock
+        self.message: str | None = None
+        self.since = 0.0
+        self.pause = float(RETRY_FIRST_SECONDS)
+
+    def record(self, message: str) -> None:
+        self.pause = float(RETRY_FIRST_SECONDS) if self.message is None else min(self.pause * 2, float(RETRY_MAX_SECONDS))
+        self.message, self.since = message, self.clock()
+
+    def clear(self) -> None:
+        self.message, self.pause = None, float(RETRY_FIRST_SECONDS)
+
+    def force(self) -> None:
+        """The person asked again: the next request tries to load the checker at once."""
+        if self.message is not None:
+            self.since = float("-inf")
+
+    def waiting(self) -> bool:
+        return self.message is not None and self.clock() - self.since < self.pause
+
+    def seconds_left(self) -> int | None:
+        """Seconds until the next attempt, or None when nothing failed."""
+        if self.message is None:
+            return None
+        return max(1, math.ceil(self.pause - (self.clock() - self.since))) if self.waiting() else 1
+
+
 def _import_slai(docmaster: Any, dotted: str) -> Any:
     root = getattr(docmaster, "slai_root", None)
     if root is not None and str(root) not in sys.path:
@@ -63,9 +103,9 @@ class Assist:
         self._gateway = gateway
         self._spell_factory = spell_factory
         self._spell: Any = None
-        self._spell_error: str | None = None
+        self._spell_failure = Failure()
         self._grammar: Any = None
-        self._grammar_error: str | None = None
+        self._grammar_failure = Failure()
         self._proof: Proofreader | None = None
         self._lock = threading.Lock()
         self._grammar_run_lock = threading.RLock()
@@ -93,8 +133,9 @@ class Assist:
         with self._lock:
             if self._spell is not None:
                 return self._spell
-            if self._spell_error:
-                raise DependencyMissing(self._spell_error, hint="Spelling is optional; you can keep writing without it.")
+            if self._spell_failure.waiting():
+                raise DependencyMissing(str(self._spell_failure.message), details={"retryAfter": self._spell_failure.seconds_left()},
+                                        hint="Spelling is optional; you can keep writing without it.")
             try:
                 if self._spell_factory is not None:
                     self._spell = self._spell_factory()
@@ -114,8 +155,11 @@ class Assist:
                             "the full SLAI English dictionary was not loaded."
                         )
             except Exception as exc:  # noqa: BLE001 - a missing wordlist or package must degrade, not crash
-                self._spell_error = f"SLAI's spell checker could not be loaded ({type(exc).__name__}: {str(exc)[:200]})."
-                raise DependencyMissing(self._spell_error, hint="Spelling is optional; you can keep writing without it.") from exc
+                self._spell = None
+                self._spell_failure.record(f"SLAI's spell checker could not be loaded ({type(exc).__name__}: {str(exc)[:200]}).")
+                raise DependencyMissing(str(self._spell_failure.message), details={"retryAfter": self._spell_failure.seconds_left()},
+                                        hint="Spelling is optional; you can keep writing without it.") from exc
+            self._spell_failure.clear()
             return self._spell
 
     def _proofreader(self) -> Proofreader:
@@ -126,7 +170,7 @@ class Assist:
             return self._proof
 
     def proofread(self, session: DocumentSession, kinds: tuple[str, ...] = ("spelling", "grammar", "style"), blocks: list[str] | None = None, limit: int = 400,
-                  language: str | None = None) -> dict[str, Any]:
+                  language: str | None = None, *, retry: bool = False) -> dict[str, Any]:
         """Spelling, grammar and style for the document (or the given blocks) in one pass.
 
         SLAI's spell checker and grammar processor are providers inside Writer's own layer (``proofing.py``): their findings are checked and normalised
@@ -136,6 +180,9 @@ class Assist:
         base, _locale = split_language(tag)
         proof = self._proofreader()
         want = set(kinds)
+        if retry:                                                  # the person pressed Check again: a checker that failed to load is tried at once
+            for failure in (self._spell_failure, self._grammar_failure):
+                failure.force()
         spell_error: DependencyMissing | None = None
         if "spelling" in want and base == "en":
             try:
@@ -164,11 +211,14 @@ class Assist:
         if spell_error is not None and "spelling" in want:
             reason = " ".join(x for x in (reason, str(spell_error.message if hasattr(spell_error, "message") else spell_error)) if x)
         grammar_ran = "SLAI grammar processor" in result.providers
+        waits = [left for left in (self._spell_failure.seconds_left() if "spelling" in want else None,
+                                   self._grammar_failure.seconds_left() if "grammar" in want else None) if left is not None]
         return {"available": result.available, "issues": result.issues, "version": version, "truncated": result.truncated, "reason": reason, "providers": result.providers,
-                "skipped": result.skipped, "language": tag, "source": "SLAI grammar processor" if grammar_ran else "Writer proofreading"}
+                "skipped": result.skipped, "language": tag, "source": "SLAI grammar processor" if grammar_ran else "Writer proofreading",
+                "retryAfter": max(waits) if waits else None}      # seconds until a checker that failed to load is tried again; None when nothing failed
 
-    def spelling(self, session: DocumentSession, blocks: list[str] | None = None, limit: int = 400, language: str | None = None) -> dict[str, Any]:
-        return self.proofread(session, ("spelling",), blocks, limit, language)
+    def spelling(self, session: DocumentSession, blocks: list[str] | None = None, limit: int = 400, language: str | None = None, *, retry: bool = False) -> dict[str, Any]:
+        return self.proofread(session, ("spelling",), blocks, limit, language, retry=retry)
 
     def add_to_dictionary(self, session: DocumentSession, word: str, scope: str = "document") -> dict[str, Any]:
         word = (word or "").strip()
@@ -223,8 +273,8 @@ class Assist:
         with self._lock:
             if self._grammar is not None:
                 return self._grammar
-            if self._grammar_error:
-                raise DependencyMissing(self._grammar_error)
+            if self._grammar_failure.waiting():
+                raise DependencyMissing(str(self._grammar_failure.message), details={"retryAfter": self._grammar_failure.seconds_left()})
             try:
                 nlp = _import_slai(self.app.docmaster, "src.agents.language.nlp_engine").NLPEngine()
                 grammar = _import_slai(self.app.docmaster, "src.agents.language.grammar_processor").GrammarProcessor(
@@ -232,8 +282,10 @@ class Assist:
                 )
                 self._grammar = types.SimpleNamespace(nlp_engine=nlp, grammar_processor=grammar)
             except Exception as exc:  # noqa: BLE001 - preserve a true unavailable status
-                self._grammar_error = f"Local SLAI grammar resources are unavailable ({type(exc).__name__}: {str(exc)[:200]})."
-                raise DependencyMissing(self._grammar_error, hint="Install SLAI's language dependencies; writing remains available.") from exc
+                self._grammar_failure.record(f"Local SLAI grammar resources are unavailable ({type(exc).__name__}: {str(exc)[:200]}).")
+                raise DependencyMissing(str(self._grammar_failure.message), details={"retryAfter": self._grammar_failure.seconds_left()},
+                                        hint="Install SLAI's language dependencies; writing remains available.") from exc
+            self._grammar_failure.clear()
             return self._grammar
 
     def _slai_grammar(self, snapshot: list[tuple[str, str]]) -> list[dict[str, Any]]:
@@ -275,9 +327,9 @@ class Assist:
         # Explicit test/integration gateways keep their callback contract; normal sessions use the standalone local engines (no AgentGateway, no AI permission).
         return self._gateway.call("language", analyse, 90) if self._gateway is not None else analyse(self._grammar_engines())
 
-    def grammar(self, session: DocumentSession, blocks: list[str] | None = None, limit: int = 200, language: str | None = None) -> dict[str, Any]:
+    def grammar(self, session: DocumentSession, blocks: list[str] | None = None, limit: int = 200, language: str | None = None, *, retry: bool = False) -> dict[str, Any]:
         # Grammar and style are ordinary local editor tools, not AI proposals: the opt-in AI/privacy gate applies to generative tasks only.
-        return self.proofread(session, ("grammar", "style"), blocks, limit, language)
+        return self.proofread(session, ("grammar", "style"), blocks, limit, language, retry=retry)
 
     # ------------------------------------------------------------------------------------------------ proposals
     def _budget(self) -> int:

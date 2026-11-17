@@ -13,7 +13,8 @@ import secrets
 from pathlib import Path
 from typing import Any
 
-from ..tools.errors import BadRequest, DependencyMissing, LimitExceeded, NotFound
+from ..tools.errors import BadRequest, LimitExceeded, NotFound
+from .dependencies import require
 from ..tools.storage import atomic_write
 from ..tools.validation import utc_now
 
@@ -54,10 +55,7 @@ class Cursors:
             raise LimitExceeded(f"A cursor picture is at most {MAX_BYTES // 1024} KiB.")
         if len(self.listing()) >= MAX_CURSORS:
             raise LimitExceeded(f"You can keep up to {MAX_CURSORS} custom cursors. Delete one to add another.")
-        try:
-            from PIL import Image
-        except Exception as exc:  # noqa: BLE001
-            raise DependencyMissing("Pillow is required to prepare cursor pictures (pip install pillow).") from exc
+        Image = require("PIL.Image", needed_for="Preparing cursor pictures", package="pillow")
         try:
             with Image.open(io.BytesIO(data)) as image:
                 if image.format not in ("PNG", "GIF", "WEBP"):

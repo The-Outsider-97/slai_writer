@@ -10,11 +10,12 @@ Do not use the result as evidence of editable DOCX DrawingML or vector PDF.
 """
 from __future__ import annotations
 
-import copy
 import io
 import math
+import os
 from typing import Any
 
+from .columns import SCRIPTURE_PROPS
 from .shape_validation import SHAPE_KEY, validate_shape
 
 
@@ -52,7 +53,6 @@ def _vertices(kind: str) -> list[tuple[float, float]]:
 
 def _font(size: int, bold: bool = False, italic: bool = False) -> Any:
     from PIL import ImageFont
-    import os
     names = (["DejaVuSans-BoldOblique.ttf", "DejaVuSans-Bold.ttf"] if bold and italic
              else ["DejaVuSans-Bold.ttf"] if bold
              else ["DejaVuSans-Oblique.ttf"] if italic else ["DejaVuSans.ttf"])
@@ -216,7 +216,6 @@ def resolve_paragraph_style(styles: dict[str, Any] | None, name: str | None) -> 
         chain.insert(0, group[current])
         current = group[current].get("based_on")
     if not chain and name == "Scripture":                                # not yet defined in this document: the built-in definition, as the editor uses
-        from .columns import SCRIPTURE_PROPS
         return dict(SCRIPTURE_PROPS)
     merged: dict[str, Any] = {}
     for item in chain:

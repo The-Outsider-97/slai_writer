@@ -14,16 +14,16 @@ import re
 import secrets
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..tools import slai
-from ..tools.errors import BadRequest, Conflict, DependencyMissing, Forbidden, LimitExceeded, NotFound
+from ..tools.errors import BadRequest, Conflict, DependencyMissing, Forbidden, LimitExceeded, NotFound, classify_oserror
 from ..tools.storage import atomic_write
-from ..tools.validation import utc_now
 from . import ops as O
 from . import textmodel as tm
+from .shape_validation import SHAPE_KEY, validate_shape
 from .store import WriterStore, safe_file_stem
 
 MAX_UNDO = 400
@@ -42,7 +42,6 @@ def words_and_chars(text: str) -> tuple[int, int]:
 
 def block_plain(block: dict[str, Any]) -> str:
     """Readable text including native shape-owned text for word counts."""
-    from .shape_validation import SHAPE_KEY
     shape = (block.get("extensions") or {}).get(SHAPE_KEY)
     if isinstance(shape, dict):
         text = (shape.get("text") or {})
@@ -99,7 +98,6 @@ class DocumentSession:
         self.password = password
         self.readonly_reason = readonly_reason
         self.notices = notices or []
-        from .shape_validation import SHAPE_KEY, validate_shape
         for block in package.document["blocks"]:
             shape = (block.get("extensions") or {}).get(SHAPE_KEY)
             if shape is None:
@@ -666,7 +664,6 @@ class DocumentSession:
             try:
                 os.replace(old, target)
             except OSError as exc:
-                from ..tools.errors import classify_oserror
                 raise classify_oserror(exc, "rename the file") from exc
             self.store.retarget_recent(str(old), target)
             self.path = target

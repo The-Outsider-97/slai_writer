@@ -1,10 +1,12 @@
 """Plan catalogue and entitlements, read from ``configs/plans.yaml``. Pure data and decisions: no payment code lives here."""
 from __future__ import annotations
 
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
 from ..tools.errors import DependencyMissing, Forbidden
+from .dependencies import installed
 
 ORDER = ("guest", "essential", "creator", "professional", "workspace")
 EMBED_LEVELS = ("view", "declarative", "advanced", "team")
@@ -20,13 +22,13 @@ class Plans:
         self.note: str | None = None
         data: dict[str, Any] = {}
         if path is not None and path.is_file():
-            try:
-                from src.utils.configuration import bind_config
-                data = bind_config(path).load()
-            except ImportError as exc:
-                self.note = f"SLAI's ConfigRepository is not available ({exc}); the plan file could not be read."
-            except Exception as exc:  # noqa: BLE001
-                raise ValueError(f"Invalid plan file {path.name}: {exc}") from exc
+            if not installed("src.utils.configuration"):
+                self.note = "SLAI's ConfigRepository is not available; the plan file could not be read."
+            else:
+                try:
+                    data = import_module("src.utils.configuration").bind_config(path).load()
+                except Exception as exc:  # noqa: BLE001
+                    raise ValueError(f"Invalid plan file {path.name}: {exc}") from exc
         else:
             self.note = "No plans.yaml found; paid plans are not defined."
         self.cfg = {**DEFAULTS, **{k: v for k, v in data.items() if k != "plans"}}

@@ -21,6 +21,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .opcore import OpError
+from .tablegrid import BORDERS_KEY, CELLS_KEY, STYLE_KEY, Grid
+
 DATA: dict[str, Any] = json.loads((Path(__file__).parent / "table_styles.json").read_text(encoding="utf-8"))
 PRESETS: dict[str, Any] = DATA["presets"]
 DEFAULT_ACCENT: str = DATA["accent"]
@@ -35,7 +38,6 @@ class StyleError(ValueError):
 
 
 def _fail(message: str) -> None:
-    from .ops import OpError
     raise OpError(message)
 
 
@@ -181,7 +183,6 @@ def _derived(rule: dict[str, Any] | None, accent: str) -> dict[str, Any] | None:
 
 def resolve(block: dict[str, Any], custom: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     """Per cell (keyed ``"row,position in row"``): ``fill``, ``color``, ``bold`` and ``borders`` {top,bottom,left,right}."""
-    from .tableops import BORDERS_KEY, CELLS_KEY, STYLE_KEY, Grid
     table, ext = block["table"], block.get("extensions") or {}
     opt = options(ext.get(STYLE_KEY), custom)
     preset, accent = PRESETS[opt["preset"]], opt["accent"]

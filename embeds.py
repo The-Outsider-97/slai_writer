@@ -20,10 +20,10 @@ import copy
 import hashlib
 import re
 import uuid
-from typing import Any, Callable
+from typing import Any
 
 from ..tools.errors import BadRequest, Conflict, DependencyMissing, Forbidden, NotFound
-from .session import DocumentSession, block_plain, sldc
+from .session import DocumentSession, block_plain
 
 KIND = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 MAX_OUTPUT = 4000

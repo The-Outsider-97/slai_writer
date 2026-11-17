@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..tools.errors import DependencyMissing
+from .dependencies import require
+from .names import parse
 
 APA_STYLE = Path(__file__).resolve().parent / "assets" / "csl" / "apa.csl"
 SOURCE_TYPES = frozenset({"article-journal", "book", "chapter", "webpage", "report", "thesis", "paper-conference",
@@ -38,13 +40,15 @@ def _year_suffixes(references: list[dict[str, Any]]) -> dict[str, str]:
 
     The CSL renderer itself handles the resulting suffix in both in-text
     citations and the reference list. Only identical author lists and years
-    collide; ordering is deterministic by title and stable source ID.
+    collide, where an author is the same person however the name was typed
+    (Smith, Jane / Jane Smith / J. Smith); ordering is deterministic by title
+    and stable source ID.
     """
-    buckets: dict[tuple[tuple[str, ...], str], list[dict[str, Any]]] = {}
+    buckets: dict[tuple[tuple[tuple[str, str], ...], str], list[dict[str, Any]]] = {}
     for ref in references:
-        authors = [str(name).strip().casefold() for name in ref.get("authors", [])]
+        authors = [parse(str(name)).key() for name in ref.get("authors", [])]
         if not authors and ref.get("organization"):
-            authors = [str(ref["organization"]).strip().casefold()]
+            authors = [parse("{" + str(ref["organization"]).strip() + "}").key()]
         year = str(ref.get("year") or (str(ref.get("published") or "").split("-")[0]))
         if not authors or not year.isdigit() or len(year) != 4:
             continue
@@ -58,31 +62,6 @@ def _year_suffixes(references: list[dict[str, Any]]) -> dict[str, str]:
     return suffixes
 
 
-#: Lower-case words that belong to a surname written without a comma ("Ludwig van Beethoven"): APA 7 files such a name under its particle.
-_PARTICLES = frozenset({"van", "von", "de", "der", "den", "del", "della", "di", "da", "du", "la", "le", "ten", "ter", "bin", "ibn", "al", "el", "dos", "das", "af", "av", "zu", "zur"})
-_SUFFIXES = frozenset({"jr", "sr", "ii", "iii", "iv", "v"})
-
-
-def _person(name: str) -> dict[str, str]:
-    """A name as CSL-JSON. "Family, Given" is read as written; "Given Family" takes the last word as the family name, together with any particle before it
-    (van, de, ...), and a trailing Jr./Sr./II/III is the suffix, not the family name."""
-    suffix = ""
-    if "," in name:
-        family, given = name.split(",", 1)
-        tail = [t.strip() for t in given.split(",")]                     # "King, Martin Luther, Jr."
-        if len(tail) > 1 and tail[-1].rstrip(".").casefold() in _SUFFIXES:
-            given, suffix = ", ".join(tail[:-1]), tail[-1]
-    else:
-        parts = name.strip().split()
-        if len(parts) > 1 and parts[-1].rstrip(".").casefold() in _SUFFIXES:
-            suffix = parts.pop()
-        start = len(parts) - 1
-        while start > 1 and parts[start - 1].casefold() in _PARTICLES:
-            start -= 1
-        family, given = " ".join(parts[start:]), " ".join(parts[:start])
-    return {"family": family.strip(), **({"given": given.strip()} if given.strip() else {}), **({"suffix": suffix} if suffix else {})}
-
-
 def csl_source(entry: dict[str, Any]) -> dict[str, Any]:
     kind = entry.get("source_type") or ("article-journal" if entry.get("container") else
                                         "book" if entry.get("publisher") else "webpage")
@@ -90,11 +69,11 @@ def csl_source(entry: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unsupported CSL source type {kind!r}")
     record: dict[str, Any] = {"id": entry["id"], "type": kind, "title": entry["title"]}
     if entry.get("authors"):
-        record["author"] = [_person(a) for a in entry["authors"]]
+        record["author"] = [parse(a).csl() for a in entry["authors"]]
     elif entry.get("organization"):
         record["author"] = [{"literal": entry["organization"]}]
     if entry.get("editors"):
-        record["editor"] = [_person(e) for e in entry["editors"]]
+        record["editor"] = [parse(e).csl() for e in entry["editors"]]
     if entry.get("published"):
         digits = str(entry["published"]).split("-")
         if all(d.isdigit() for d in digits) and len(digits) in (1, 2, 3):
@@ -147,11 +126,10 @@ class CitationEngine:
     """One in-memory CSL context per bibliography/citation batch."""
 
     def __init__(self, references: Iterable[dict[str, Any]]) -> None:
-        try:
-            from citeproc import Citation, CitationItem, CitationStylesBibliography, CitationStylesStyle, Locator, formatter
-            from citeproc.source.json import CiteProcJSON
-        except ImportError as exc:
-            raise DependencyMissing("APA 7 citation formatting needs citeproc-py. Install it from Writer requirements.txt.") from exc
+        citeproc = require("citeproc", needed_for="APA 7 citation formatting", package="citeproc-py")
+        Citation, CitationItem, CitationStylesBibliography = citeproc.Citation, citeproc.CitationItem, citeproc.CitationStylesBibliography
+        CitationStylesStyle, Locator, formatter = citeproc.CitationStylesStyle, citeproc.Locator, citeproc.formatter
+        CiteProcJSON = require("citeproc.source.json", needed_for="APA 7 citation formatting", package="citeproc-py").CiteProcJSON
         if not APA_STYLE.is_file():
             raise DependencyMissing("The bundled APA 7 CSL definition was not found.")
         self.Citation, self.CitationItem, self.Locator = Citation, CitationItem, Locator

@@ -14,6 +14,7 @@ from types import ModuleType
 from typing import Any
 
 from ..tools.errors import DependencyMissing
+from .dependencies import installed
 
 ALIAS = "documaster_slai"
 
@@ -73,6 +74,10 @@ class DocumasterLink:
             raise DependencyMissing(self.reason or "Documaster is not available",
                                     hint="Import and export of Word, OpenDocument, RTF, HTML, PDF and Markdown files need Documaster.")
         return importlib.import_module(f"{ALIAS}.{dotted}")
+
+    def has_module(self, dotted: str) -> bool:
+        """Whether this Documaster ships the module (an older one may lack a writer). Looks it up; imports nothing."""
+        return self.available and installed(f"{ALIAS}.{dotted}")
 
     def status(self) -> dict[str, Any]:
         return {"available": self.available, "reason": self.reason, "version": self.version}

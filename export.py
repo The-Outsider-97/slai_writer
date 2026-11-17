@@ -15,7 +15,6 @@ import base64
 import copy
 import io
 import os
-import re
 import secrets
 import tempfile
 import threading
@@ -24,6 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from ..tools.errors import BadRequest, DependencyMissing, Forbidden, LimitExceeded, NotFound, Unauthorized
+from ..tools.storage import atomic_write
+from .academic import Academic
+from .dependencies import require
 from .session import DocumentSession, load_bytes, sldc
 from .shape_export import prepare_shapes
 from .shape_validation import SHAPE_KEY
@@ -90,13 +92,13 @@ def available_formats(docmaster: Any) -> dict[str, Any]:
         why = None if ok else reason
         if ok and f in ("doc", "rtf") and not soffice:
             ok, why = False, "Reading this older format needs LibreOffice, which is not installed."
-        if ok and f in ("md", "txt", "html", "xml", "csv") and not _parser_ready(docmaster):
+        if ok and f in ("md", "txt", "html", "xml", "csv") and not parser_ready(docmaster):
             ok, why = False, "Reading this format needs SLAI Reader's parser engine, which could not be loaded."
         imports.append({"id": f, "label": LABELS.get(f, f), "available": ok, "reason": why, "note": IMPORT_LOSS.get(f, "")})
     return {"export": export, "import": imports, "documaster": docmaster.status(), "libreoffice": soffice}
 
 
-def _parser_ready(docmaster: Any) -> bool:
+def parser_ready(docmaster: Any) -> bool:
     try:
         return bool(docmaster.services.reader.available("parser"))
     except Exception:  # noqa: BLE001
@@ -108,6 +110,7 @@ class Exchange:
         self.app = app
         self._cache: OrderedDict[tuple[str, int], bytes] = OrderedDict()
         self._layout_cache: OrderedDict[tuple[str, int], dict[str, Any]] = OrderedDict()
+        self._images: OrderedDict[tuple[str, int, int, int], bytes] = OrderedDict()
         self._lock = threading.Lock()
 
     # -------------------------------------------------------------------------------------------------------- helpers
@@ -129,11 +132,8 @@ class Exchange:
     def _shape_export_package(self, package: Any, fmt: str, dm: Any) -> tuple[Any, list[str]]:
         """Prefer Documaster's native vector adapter; retain a truthful legacy fallback."""
         if fmt in ("pdf", "docx"):
-            try:
-                module = dm.module(f"docmodel.writers.write_{fmt}")
-                native = bool(getattr(module, "SLDC_WRITER_SHAPES", False))
-            except (ImportError, AttributeError):
-                native = False
+            writer = f"docmodel.writers.write_{fmt}"
+            native = dm.has_module(writer) and bool(getattr(dm.module(writer), "SLDC_WRITER_SHAPES", False))
             if native:
                 # Only select a native writer when it can visually preserve
                 # every shape. Unsupported effects trigger the measured PNG
@@ -257,10 +257,9 @@ class Exchange:
         if package.signatures and target not in (None, "sldc"):
             add("info", "signature", "This document is signed. Other formats cannot carry the signature, so the copy will not verify.")
         try:
-            from .academic import Academic
             issues.extend(Academic(self.app).audit(session))
-        except Exception:  # noqa: BLE001 - the audit is advice; it must never stop an export
-            pass
+        except Exception as exc:  # noqa: BLE001 - the audit is advice; it must never stop an export, but it must not vanish without a word either
+            add("info", "citations", f"The citation and reference check could not run ({type(exc).__name__}), so it says nothing about them. The export is not affected.")
         order = {"error": 0, "warn": 1, "info": 2}
         issues.sort(key=lambda i: order[i["severity"]])
         return {"issues": issues, "counts": {k: sum(1 for i in issues if i["severity"] == k) for k in order},
@@ -368,7 +367,6 @@ class Exchange:
             data = sldc().dumps_package(package, recipients=recipients)
         except sldc().SLDCError as exc:
             raise BadRequest(f"The copy could not be written: {exc}") from exc
-        from ..tools.storage import atomic_write
         for n in range(10_000):
             name = f"{stem}.sldc" if n == 0 else f"{stem} ({n}).sldc"
             target = out_dir / name
@@ -455,33 +453,74 @@ class Exchange:
     def print_pdf(self, session: DocumentSession) -> bytes:
         return self._pdf_bytes(session)
 
-    def preview(self, session: DocumentSession, pages: list[int], width: int = 720) -> dict[str, Any]:
-        data = self._pdf_bytes(session)
+    def _pages(self, data: bytes, numbers: list[int], width: int, *, fmt: str) -> tuple[int, list[dict[str, Any]]]:
+        """Rasterise pages (1-based) of a PDF at about ``width`` pixels. Returns the page count and one entry per page asked for that exists."""
         dm = self._dm()
         lock = dm.module("pdfium_lock").PDFIUM_LOCK
-        try:
-            import pypdfium2 as pdfium
-        except Exception as exc:  # noqa: BLE001
-            raise DependencyMissing("The print preview needs pypdfium2 (pip install pypdfium2).") from exc
-        out = []
+        pdfium = require("pypdfium2", needed_for="The print preview")
+        out: list[dict[str, Any]] = []
         with lock:
             pdf = pdfium.PdfDocument(data)
             try:
                 total = len(pdf)
-                for n in pages[:12]:
+                for n in numbers:
                     if not 1 <= n <= total:
                         continue
                     page = pdf[n - 1]
                     w, h = page.get_size()
-                    image = page.render(scale=max(0.2, min(3.0, width / w))).to_pil()
+                    image = page.render(scale=max(0.2, min(4.0, width / w))).to_pil().convert("RGB")
                     buf = io.BytesIO()
-                    image.convert("RGB").save(buf, "PNG", optimize=False)
-                    out.append({"page": n, "widthPt": w, "heightPt": h, "image": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")})
+                    image.save(buf, fmt, **({"optimize": False} if fmt == "PNG" else {}))
+                    out.append({"page": n, "widthPt": w, "heightPt": h, "bytes": buf.getvalue()})
             finally:
                 pdf.close()
+        return total, out
+
+    def preview(self, session: DocumentSession, pages: list[int], width: int = 720) -> dict[str, Any]:
+        data = self._pdf_bytes(session)
+        total, rendered = self._pages(data, pages[:12], width, fmt="PNG")
+        out = [{"page": p["page"], "widthPt": p["widthPt"], "heightPt": p["heightPt"],
+                "image": "data:image/png;base64," + base64.b64encode(p["bytes"]).decode("ascii")} for p in rendered]
         facts = self._facts_from_bytes(data)
         return {"total": total, "pages": out, "facts": facts, "version": session.version,
                 "note": "This preview is drawn from the PDF Writer would export. The editor's page breaks are an approximation; this is the exact result for PDF and print."}
+
+    def page_sizes(self, session: DocumentSession) -> dict[str, Any]:
+        """What the rendered view needs before it asks for a picture: the version, and each page of the PDF Writer would export (size, printed label, section)."""
+        data = self._pdf_bytes(session)
+        layout = self.layout(session)
+        dm = self._dm()
+        lock = dm.module("pdfium_lock").PDFIUM_LOCK
+        pdfium = require("pypdfium2", needed_for="The rendered view")
+        with lock:
+            pdf = pdfium.PdfDocument(data)
+            try:
+                sizes = [pdf[i].get_size() for i in range(len(pdf))]
+            finally:
+                pdf.close()
+        labels, sections = layout.get("printedLabels") or [], layout.get("sectionIds") or []
+        return {"version": session.version, "total": len(sizes),
+                "pages": [{"n": i + 1, "widthPt": w, "heightPt": h, "label": labels[i] if i < len(labels) else None,
+                           "section": sections[i] if i < len(sections) else None} for i, (w, h) in enumerate(sizes)]}
+
+    def page_image(self, session: DocumentSession, number: int, width: int) -> bytes:
+        """One page of the PDF Writer would export, as a PNG. The same bytes for the same version, page and width, so a browser may keep them."""
+        key = (session.sid, session.version, number, width)
+        with self._lock:
+            hit = self._images.get(key)
+            if hit is not None:
+                self._images.move_to_end(key)
+                return hit
+        data = self._pdf_bytes(session)
+        _, rendered = self._pages(data, [number], width, fmt="PNG")
+        if not rendered:
+            raise NotFound(f"There is no page {number} in the exported document.")
+        png = rendered[0]["bytes"]
+        with self._lock:
+            self._images[key] = png
+            while len(self._images) > 40:
+                self._images.popitem(last=False)
+        return png
 
     def _facts_from_bytes(self, data: bytes) -> dict[str, Any]:
         with tempfile.NamedTemporaryFile(dir=self._tmp(), suffix=".pdf", delete=False) as handle:

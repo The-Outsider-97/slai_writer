@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ProofStatus } from "../src/client/proof_status.js";
+import { ProofStatus, RECOVERY_LIMIT, Recovery, retryAfterOf } from "../src/client/proof_status.js";
 
 const both = { spell: true, grammar: true };
 
@@ -50,5 +50,43 @@ describe("proofing availability", () => {
     assert.deepEqual(status.notices(both).map((n) => n.kind), ["grammar"]);
     status.reset();
     assert.deepEqual(status.notices(both), []);
+  });
+});
+
+describe("retrying a proofing service that failed to load", () => {
+  it("waits at least what the server asked, plus a second, and never less than five seconds", () => {
+    const r = new Recovery();
+    assert.equal(r.plan("spell", 15), 16000);
+    assert.equal(r.plan("spell", 0), 6000);
+    assert.equal(r.plan("spell", undefined), 6000);
+    assert.equal(r.plan("spell", 9999), 301000);                     // bounded above as well
+  });
+
+  it("stops after the limit and says so, and counts each check on its own", () => {
+    const r = new Recovery();
+    for (let i = 0; i < RECOVERY_LIMIT; i++) assert.notEqual(r.plan("grammar", 5), null);
+    assert.equal(r.plan("grammar", 5), null);
+    assert.equal(r.exhausted("grammar"), true);
+    assert.equal(r.exhausted("spell"), false);
+    assert.notEqual(r.plan("spell", 5), null);
+  });
+
+  it("starts the count again after a reset (button, setting, language, success)", () => {
+    const r = new Recovery();
+    for (let i = 0; i < RECOVERY_LIMIT; i++) r.plan("spell", 5);
+    r.reset("spell");
+    assert.equal(r.exhausted("spell"), false);
+    assert.notEqual(r.plan("spell", 5), null);
+    r.reset();
+    assert.equal(r.exhausted("spell"), false);
+  });
+
+  it("reads the pause from an error's details or an answer, and ignores anything else", () => {
+    assert.equal(retryAfterOf({ retryAfter: 12 }), 12);
+    assert.equal(retryAfterOf({ retryAfter: null }), null);
+    assert.equal(retryAfterOf({ retryAfter: "soon" }), null);
+    assert.equal(retryAfterOf({ retryAfter: -3 }), null);
+    assert.equal(retryAfterOf(undefined), null);
+    assert.equal(retryAfterOf("x"), null);
   });
 });

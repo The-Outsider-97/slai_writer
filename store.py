@@ -4,12 +4,9 @@ trusted keys and the local account tables. One SQLite file next to the preferenc
 from __future__ import annotations
 
 import hashlib
-import os
 import re
-import shutil
-import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..tools.database import Database, Migration
 from ..tools.errors import BadRequest, Conflict, NotFound

@@ -12,7 +12,7 @@ import math
 import re
 from typing import Any
 
-from .ops import OpError  # Imported lazily by ops handlers; no imports of this module at ops load time.
+from .opcore import OpError
 
 SHAPE_KEY = "slai.writer.shape"
 SHAPE_KINDS = frozenset({"rectangle", "ellipse", "line", "triangle", "diamond",

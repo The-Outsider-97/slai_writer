@@ -20,11 +20,13 @@ text before and after stays in sections that look exactly as before. Repeating t
 from __future__ import annotations
 
 import copy
+import json
 import math
 from typing import Any
 
-from . import ops
-from .ops import DEFAULT_SECTION, OpError, Tracker, WRITER_EXT, _d, _i, handler
+from .opcore import (DEFAULT_SECTION, HANDLERS, LABELS, OpError, TEXT_TYPES, Tracker, WRITER_EXT, _i, _tidy_attributes, handler,
+                     repair_sections)
+from .shape_validation import SHAPE_KEY
 
 LAYOUTS = "column_layouts"
 BREAK_KEY = "slai.writer.column_break"
@@ -139,7 +141,6 @@ def _blocks_of(tr: Tracker, section_id: str) -> list[int]:
 
 
 def _signature(section: dict[str, Any], layout: dict[str, Any]) -> str:
-    import json
     plain = {k: v for k, v in section.items() if k != "id"}
     if isinstance(plain.get("numbering"), dict):
         plain["numbering"] = {k: v for k, v in plain["numbering"].items() if k != "start"}
@@ -245,7 +246,6 @@ def _apply(section: dict[str, Any], layout: dict[str, Any], op: dict[str, Any]) 
 def group_members(sections: list[dict[str, Any]], layouts: dict[str, dict[str, Any]], section_id: str) -> list[str]:
     """The sections that share a page with ``section_id``: a continuous section with the same page setup as the one before it belongs to that one's group.
     A change of page size, margins, header or footer has to reach all of them, or the sections would start new pages."""
-    import json
     groups: dict[str, str] = {}
     previous: dict[str, Any] | None = None
     for section in sections:
@@ -300,7 +300,7 @@ def op_columns_set(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
         targets = list(dict.fromkeys((tr.get(op["block"]).get("section") or sections[0]["id"],
                                       tr.get(op.get("end_block") or op["block"]).get("section") or sections[0]["id"])))
     tr.doc["sections"] = sections
-    ops.repair_sections(tr)
+    repair_sections(tr)
     _write_layouts(tr, layouts, sections)
     return {"sections": targets}
 
@@ -321,9 +321,9 @@ def op_column_break(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     at = op.get("at")
     if at not in (None, 0):
-        if block["type"] not in ops.TEXT_TYPES:
+        if block["type"] not in TEXT_TYPES:
             raise OpError("A column break can only be put inside text")
-        result = ops.HANDLERS["split"](tr, {"block": block["id"], "at": _i(op, "at"), "keep_type": True})
+        result = HANDLERS["split"](tr, {"block": block["id"], "at": _i(op, "at"), "keep_type": True})
         block = tr.get(result["block"])
     if block["type"] == "table" and block.get("extensions", {}).get(BREAK_KEY):
         return {"block": block["id"]}
@@ -362,22 +362,21 @@ def op_scripture_apply(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
             target.pop("attributes", None)
         if target["type"] != "paragraph":
             target["type"] = "paragraph"
-            ops._tidy_attributes(target)
+            _tidy_attributes(target)
     inner = {"op": "columns_set", "scope": "selection", "block": chosen[0]["id"], "end_block": chosen[-1]["id"], "columns": 2, "scripture": True}
     return {"blocks": [b["id"] for b in chosen], **op_columns_set(tr, inner)}
 
 
 def _is_text(block: dict[str, Any]) -> bool:
     """A paragraph the Scripture style can apply to: text, not code, and not the inert carrier of a vector shape or text box."""
-    from .shape_validation import SHAPE_KEY
-    return block["type"] in ops.TEXT_TYPES and block["type"] != "code" and SHAPE_KEY not in (block.get("extensions") or {})
+    return block["type"] in TEXT_TYPES and block["type"] != "code" and SHAPE_KEY not in (block.get("extensions") or {})
 
 
 def _scripture_sync(tr: Tracker) -> None:
     """The two columns of a Scripture section belong to the Scripture style. A paragraph in such a section that is no longer Scripture (switched to
     Normal text, a heading, a list ...) goes back to the one column it would have had; paragraphs around it keep their columns, and so does every
     section the style did not make. Undo restores both together because it restores the document as it was."""
-    layouts = _read_layouts(tr)
+    layouts = copy.deepcopy(layouts_of(tr.doc))            # read straight from the document: asking the tracker for the key would report a document change on every edit
     flagged = [sid for sid, entry in layouts.items() if entry.get("scripture")]
     if not flagged:
         return
@@ -412,7 +411,7 @@ def _scripture_sync(tr: Tracker) -> None:
                 layouts.pop(target)
     sections = _coalesce(tr, sections, layouts)
     tr.doc["sections"] = sections
-    ops.repair_sections(tr)
+    repair_sections(tr)
     _write_layouts(tr, layouts, sections)
 
 
@@ -455,4 +454,4 @@ def inherit(tr: Tracker, from_id: str, to_id: str) -> None:
             _write_layouts(tr, layouts, list(tr.doc.get("sections") or []))
 
 
-ops.LABELS.update({"columns_set": "columns", "column_break": "column break", "scripture_apply": "Scripture style"})
+LABELS.update({"columns_set": "columns", "column_break": "column break", "scripture_apply": "Scripture style"})

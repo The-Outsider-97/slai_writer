@@ -20,8 +20,9 @@ import threading
 import time
 from typing import Any
 
-from ..tools.errors import BadRequest, Forbidden, LimitExceeded, NotFound, Unauthorized
+from ..tools.errors import BadRequest, Conflict, DependencyMissing, Forbidden, LimitExceeded, NotFound, Unauthorized
 from ..tools.validation import new_id, utc_now
+from .dependencies import installed, require
 from .protect import unwrap_with_passphrase, wrap_with_passphrase
 from .session import DocumentSession, load_bytes, sldc
 
@@ -43,16 +44,13 @@ class SigningService:
         self._lock = threading.Lock()
 
     def available(self) -> dict[str, Any]:
-        try:
-            from cryptography.hazmat.primitives.asymmetric import ed25519  # noqa: F401
+        if installed("cryptography"):
             return {"available": True, "reason": None}
-        except Exception as exc:  # noqa: BLE001
-            return {"available": False, "reason": f"Signing needs the 'cryptography' package ({type(exc).__name__}). Install it with pip install cryptography."}
+        return {"available": False, "reason": "Signing needs the 'cryptography' package. Install it with pip install cryptography."}
 
     def _need(self) -> None:
         status = self.available()
         if not status["available"]:
-            from ..tools.errors import DependencyMissing
             raise DependencyMissing(status["reason"])
 
     def _throttle(self, profile: str) -> None:
@@ -90,7 +88,7 @@ class SigningService:
 
     @staticmethod
     def _raw() -> tuple[Any, Any, Any]:
-        from cryptography.hazmat.primitives import serialization
+        serialization = require("cryptography.hazmat.primitives.serialization", needed_for="Signing", package="cryptography")
         return serialization.Encoding.Raw, serialization.PrivateFormat.Raw, serialization.NoEncryption()
 
     def delete_key(self, profile: str, passphrase: str) -> None:
@@ -134,7 +132,6 @@ class SigningService:
         statement = (statement or "").strip()[:500] or None
         with session.lock:
             if expected_revision and expected_revision != sldc().revision_id(session._settled(session.pkg.copy())):          # noqa: SLF001
-                from ..tools.errors import Conflict
                 raise Conflict("The document changed after you previewed it. Preview the revision again before signing.", details={"kind": "stale_revision"})
             signer = self._unlock(profile, passphrase)
             out = session.apply_signature(signer, purpose=purpose, statement=statement)
@@ -242,11 +239,7 @@ class SigningService:
         """Decode, bound and re-encode as a metadata-free PNG with a transparent background where the source had one."""
         if len(data) > MAX_MARK_BYTES:
             raise LimitExceeded(f"A signature picture is at most {MAX_MARK_BYTES // 1024 // 1024} MiB.")
-        try:
-            from PIL import Image
-        except Exception as exc:  # noqa: BLE001
-            from ..tools.errors import DependencyMissing
-            raise DependencyMissing("Pillow is required to prepare signature pictures (pip install pillow).") from exc
+        Image = require("PIL.Image", needed_for="Preparing signature pictures", package="pillow")
         Image.MAX_IMAGE_PIXELS = MAX_MARK_PIXELS * 4
         try:
             with Image.open(io.BytesIO(data)) as image:
@@ -299,7 +292,7 @@ class SigningService:
 
     @staticmethod
     def _blank(png: bytes) -> bool:
-        from PIL import Image
+        Image = require("PIL.Image", needed_for="Signature pictures", package="pillow")
         with Image.open(io.BytesIO(png)) as image:
             alpha = image.getchannel("A").tobytes()
             rgb = image.convert("RGB").tobytes()
@@ -320,7 +313,7 @@ class SigningService:
 
     @staticmethod
     def _thumb(png: bytes) -> bytes:
-        from PIL import Image
+        Image = require("PIL.Image", needed_for="Signature pictures", package="pillow")
         with Image.open(io.BytesIO(png)) as image:
             image.thumbnail((THUMB, THUMB // 2))
             out = io.BytesIO()

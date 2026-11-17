@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from ..tools.errors import BadRequest
 from ..tools.validation import utc_now
