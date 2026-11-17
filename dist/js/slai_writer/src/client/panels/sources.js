@@ -6,6 +6,7 @@ import { announce, clear, confirmDialog, h, labelled, openDialog, toast } from "
 import * as A from "../actions.js";
 import { api, errorText } from "../net.js";
 import { tocCoverAnchor } from "../toc_position.js";
+import { nameReview } from "../names_ui.js";
 import { button, checkbox, emptyState, notice, selectField, statusBadge, fill } from "../widgets.js";
 const url = (ctx, tail) => `/docs/${encodeURIComponent(ctx.sid)}/${tail}`;
 export function badgeClass(status) { return status === "registry" ? "verified" : status === "ai" ? "ai" : "user"; }
@@ -57,13 +58,17 @@ export async function sourceDialog(ctx, existing) {
     const text = (key, label, hint, max = 300) => labelled(label, h("input", { type: "text", name: key, value: String(d[key] ?? ""), maxLength: max, attrs: { autocomplete: "off" } }), hint ? { hint } : {});
     const authors = h("textarea", { rows: 3, name: "authors", maxLength: 2000, value: Array.isArray(d["authors"]) ? d["authors"].join("\n") : "" });
     const editors = h("textarea", { rows: 2, name: "editors", maxLength: 2000, value: Array.isArray(d["editors"]) ? d["editors"].join("\n") : "" });
+    const authorReview = nameReview(authors, "authors");
+    const editorReview = nameReview(editors, "editors");
     const sourceType = selectField("Source type", [["article-journal", "Journal article"], ["book", "Book"], ["chapter", "Book chapter"],
         ["webpage", "Website"], ["report", "Report"], ["thesis", "Thesis / dissertation"], ["paper-conference", "Conference paper"],
         ["article", "Preprint / article"], ["dataset", "Dataset"], ["software", "Software"], ["motion_picture", "Video"],
         ["document", "Document"]], String(d["source_type"] ?? "article-journal"));
     const status = selectField("Where does this source come from?", [["user", "I am entering it myself"], ["imported", "It came with an imported document"], ["ai", "An AI assistant suggested it (not verified)"]], "user");
     const error = h("p", { class: "form-error", attrs: { role: "alert" }, hidden: true });
-    const body = h("form", { class: "stack", attrs: { novalidate: true } }, notice("Enter only what you can see on the real work. Writer will not fill in or correct missing details: anything left empty stays empty, and shows as “n.d.” or is listed as a problem.", "info"), sourceType.root, text("title", "Title (required)", undefined, 1000), labelled("Authors (one per line)", authors), h("details", {}, h("summary", { text: "Additional source-specific metadata" }), labelled("Editors (one per line)", editors), text("organization", "Organization as author", undefined, 300), h("div", { class: "grid-3" }, text("published", "Publication date", "YYYY-MM-DD", 10), text("edition", "Edition", undefined, 40), text("isbn", "ISBN", undefined, 40))), h("div", { class: "grid-3" }, text("year", "Year", "Four digits", 4), text("volume", "Volume", undefined, 40), text("issue", "Issue", undefined, 40)), text("container", "Journal, book or website", undefined, 500), h("div", { class: "grid-2" }, text("publisher", "Publisher", undefined, 300), text("pages", "Pages", "For example 12–34", 40)), h("div", { class: "grid-2" }, text("doi", "DOI", "For example 10.1000/xyz123", 200), text("url", "Link", undefined, 2000)), h("div", { class: "grid-2" }, text("accessed", "Date accessed", "YYYY-MM-DD", 10), text("note", "Note", undefined, 2000)), existing ? null : status.root, error);
+    const body = h("form", { class: "stack", attrs: { novalidate: true } }, notice("Enter only what you can see on the real work. Writer will not fill in or correct missing details: anything left empty stays empty, and shows as “n.d.” or is listed as a problem.", "info"), sourceType.root, text("title", "Title (required)", undefined, 1000), labelled("Authors (one per line)", authors, { hint: "Write Family, Given (García Márquez, Gabriel) or {Organisation} to say exactly how a name reads. Anything else is Writer’s best reading, shown below." }), authorReview.root, h("details", {}, h("summary", { text: "Additional source-specific metadata" }), labelled("Editors (one per line)", editors), editorReview.root, text("organization", "Organization as author", undefined, 300), h("div", { class: "grid-3" }, text("published", "Publication date", "YYYY-MM-DD", 10), text("edition", "Edition", undefined, 40), text("isbn", "ISBN", undefined, 40))), h("div", { class: "grid-3" }, text("year", "Year", "Four digits", 4), text("volume", "Volume", undefined, 40), text("issue", "Issue", undefined, 40)), text("container", "Journal, book or website", undefined, 500), h("div", { class: "grid-2" }, text("publisher", "Publisher", undefined, 300), text("pages", "Pages", "For example 12–34", 40)), h("div", { class: "grid-2" }, text("doi", "DOI", "For example 10.1000/xyz123", 200), text("url", "Link", undefined, 2000)), h("div", { class: "grid-2" }, text("accessed", "Date accessed", "YYYY-MM-DD", 10), text("note", "Note", undefined, 2000)), existing ? null : status.root, error);
+    authorReview.refresh();
+    editorReview.refresh();
     const read = () => {
         const out = {};
         for (const el of Array.from(body.querySelectorAll("input[name], textarea[name]")))
@@ -184,7 +189,7 @@ export async function xrefDialog(ctx) {
         actions: [{ label: "Create cross-reference", kind: "primary", run: async () => {
                     try {
                         ctx.ed.refocus(sel);
-                        await mutate(ctx, () => api.post(url(ctx, "xref"), { block: sel.start.block, start: sel.start.offset, end: sel.end.offset, target: target.select.value }));
+                        await mutate(ctx, () => api.post(url(ctx, "xref"), { block: sel.start.block, start: sel.start.offset, end: sel.end.offset, target: target.select.value, base: ctx.ed.model.version }));
                         return true;
                     }
                     catch (e) {

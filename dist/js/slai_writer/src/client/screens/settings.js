@@ -22,7 +22,7 @@ export async function settingsScreen(app) {
     const size = selectField("Default page size", ["A4", "A5", "A3", "B5", "Letter", "Legal"].map((s) => [s, s]), p.page_size, (v) => { void save({ page_size: v }); });
     const orient = selectField("Default orientation", [["portrait", "Portrait"], ["landscape", "Landscape"]], p.orientation, (v) => { void save({ orientation: v }); });
     const units = selectField("Ruler units", [["mm", "Millimetres"], ["in", "Inches"]], p.units, (v) => { void save({ units: v }); });
-    const zoom = selectField("Open documents zoomed to", [["custom", `Last zoom (${p.zoom}%)`], ["height", "Page height"], ["width", "Page width"]], p.zoom_mode, (v) => { void save({ zoom_mode: v }); });
+    const zoom = selectField("Open documents zoomed to", [["custom", `Last zoom (${p.zoom}%)`], ["height", "Page height"], ["width", "Page width"], ["entire", "Entire page"]], p.zoom_mode, (v) => { void save({ zoom_mode: v }); });
     const rulers = checkbox("Show rulers", p.show_rulers, (v) => { void save({ show_rulers: v }); });
     const guides = checkbox("Show margin and guide lines", p.show_guides, (v) => { void save({ show_guides: v }); });
     const docs = section("Documents", autosave.root, labelled("Autosave interval (seconds)", interval, { hint: "Applies when autosave is on. Right-click Save in the editor to change it for one document." }), h("div", { class: "grid-2" }, size.root, orient.root), h("div", { class: "grid-2" }, units.root, zoom.root), rulers.root, guides.root);

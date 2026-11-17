@@ -354,6 +354,24 @@ async function startTypedTable(ed, delimiter, offset) {
     toast("Table created from Markdown.", { kind: "ok", action: { label: "Undo", run: () => { void undoRedo(ed, "undo"); } } });
     return true;
 }
+/** Shift+Enter: a line break inside the paragraph (the text holds "\n", which every export writes as a line break), not a new paragraph. */
+export async function lineBreak(ed) {
+    const sel = ed.readSelection();
+    if (!sel || ed.readOnly)
+        return;
+    const block = ed.model.block(sel.start.block);
+    if (!block || (sel.start.field !== "cell" && !isTextBlock(block)))
+        return;
+    await guarded(ed, async () => {
+        const at = await replaceRange(ed, sel, "\n");
+        if (!at)
+            return;
+        if (at.field === "cell")
+            focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+        else
+            ed.focusBlock(at.block, at.offset);
+    });
+}
 export async function enter(ed) {
     let sel = ed.readSelection();
     if (!sel || ed.readOnly)

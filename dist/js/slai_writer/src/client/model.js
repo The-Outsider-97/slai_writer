@@ -2,6 +2,9 @@
 import { api } from "./net.js";
 import { shapeOf } from "./shape.js";
 import { PAGE_MM } from "./textops.js";
+import { bookOf, effectiveMargins } from "./book_layout.js";
+/** The geometry of the sheet at this 1-based position in the document: its margins are those of its side of the spread. */
+export function geometryFor(g, physical) { return { ...g, margins: effectiveMargins(g.stored, g.book, physical) }; }
 /** Where header and footer text sit when the document says nothing: in the middle of the margin. */
 export const defaultBand = (marginMm) => Math.max(2, marginMm / 2 - 3);
 const DEFAULT_MARGIN = 25;
@@ -96,9 +99,11 @@ export class DocModel {
         if (page.orientation === "landscape" && w < h)
             [w, h] = [h, w];
         const m = page.margins_mm ?? {};
-        const margins = { top: m.top ?? DEFAULT_MARGIN, right: m.right ?? DEFAULT_MARGIN, bottom: m.bottom ?? DEFAULT_MARGIN, left: m.left ?? DEFAULT_MARGIN };
+        const stored = { top: m.top ?? DEFAULT_MARGIN, right: m.right ?? DEFAULT_MARGIN, bottom: m.bottom ?? DEFAULT_MARGIN, left: m.left ?? DEFAULT_MARGIN };
+        const book = bookOf(this.meta, section.id);
+        const margins = effectiveMargins(stored, book, 1);
         return {
-            widthMm: w, heightMm: h, columns: section.columns ?? 1, section, margins,
+            widthMm: w, heightMm: h, columns: section.columns ?? 1, section, margins, stored, book,
             headerMm: page.header_mm ?? defaultBand(margins.top), footerMm: page.footer_mm ?? defaultBand(margins.bottom),
         };
     }

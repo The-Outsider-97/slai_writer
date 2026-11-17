@@ -4,6 +4,7 @@ import * as C from "./column_actions.js";
 import * as A from "./actions.js";
 import { MAX_COLUMNS } from "./column_layout.js";
 import { pageSetupDialog } from "./dialogs.js";
+import { openMarginsMenu } from "./margins_ui.js";
 import { checkbox, notice, selectField } from "./widgets.js";
 const keep = (el) => { el.addEventListener("mousedown", (e) => { if (!(e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement))
     e.preventDefault(); }); };
@@ -54,8 +55,11 @@ export function buildLayoutRibbon(ctx) {
         "separator",
         { label: "Section break (new section from here)", disabled: readOnly(), run: () => { void A.sectionBreak(ed); } },
     ], "Breaks: page, column and section breaks");
+    const marginsButton = h("button", { class: "ribbon-action margins-button", type: "button", attrs: { title: "Margins: presets, mirrored margins and the binding gutter", "aria-label": "Margins", "aria-haspopup": "menu" } }, glyph("book"), h("span", { text: "Margins ▾" }));
+    keep(marginsButton);
+    marginsButton.addEventListener("click", () => openMarginsMenu(ctx, marginsButton));
     const status = h("span", { class: "ribbon-style-label", attrs: { "aria-live": "polite" } });
-    const el = h("div", { class: "format-ribbon layout-ribbon", attrs: { role: "toolbar", "aria-label": "Layout ribbon" } }, group("Page", action("Page setup", () => { void pageSetupDialog(ctx); }, "ruler", "Page size, orientation and margins")), group("Columns", columns, action("Column break", () => { void C.insertColumnBreak(ed); }, "page", "Column break: start the next column here"), status), group("Breaks", breaks));
+    const el = h("div", { class: "format-ribbon layout-ribbon", attrs: { role: "toolbar", "aria-label": "Layout ribbon" } }, group("Page Setup", marginsButton, action("Page setup", () => { void pageSetupDialog(ctx); }, "ruler", "Page size, orientation and margins")), group("Columns", columns, action("Column break", () => { void C.insertColumnBreak(ed); }, "page", "Column break: start the next column here"), status), group("Breaks", breaks));
     const update = () => {
         const now = C.columnsAtCaret(ed);
         status.textContent = now.spec ? `${now.spec.count} columns${now.spec.widthsMm ? " (unequal)" : ""}` : "One column";

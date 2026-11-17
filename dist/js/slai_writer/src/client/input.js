@@ -31,6 +31,7 @@ function lockedBlock(ed, id) {
 }
 export function installInput(ed) {
     const host = ed.host;
+    let enterWithShift = false;
     const off = [];
     const on = (type, fn, target = host) => {
         target.addEventListener(type, fn);
@@ -193,10 +194,13 @@ export function installInput(ed) {
         }
         switch (type) {
             case "insertParagraph":
-            case "insertLineBreak":
                 e.preventDefault();
                 serial(() => A.enter(ed));
                 return;
+            case "insertLineBreak":
+                e.preventDefault();
+                serial(() => (enterWithShift ? A.lineBreak(ed) : A.enter(ed)));
+                return; // a plain-text field reports Enter as a line break too: the key says which it was
             case "historyUndo":
                 e.preventDefault();
                 serial(() => A.undoRedo(ed, "undo"));
@@ -332,9 +336,76 @@ export function installInput(ed) {
     on("keydown", (e) => {
         if (e.isComposing || ed.composing)
             return;
+        if (e.key === "Enter")
+            enterWithShift = e.shiftKey;
         const mod = e.ctrlKey || e.metaKey;
         const k = e.key.toLowerCase();
         const run = (fn) => { e.preventDefault(); void fn(); };
+        if (!mod && !e.altKey && (e.key === "PageDown" || e.key === "PageUp")) {
+            // PageDown / PageUp move the caret one screen and keep it where it was on the screen, as in a word processor (the browser would only scroll)
+            const selection = window.getSelection();
+            const scroller = ed.page.scroller;
+            if (!selection || !selection.rangeCount || !host.contains(selection.anchorNode))
+                return;
+            const range = selection.getRangeAt(0).cloneRange();
+            range.collapse(selection.isCollapsed ? true : false);
+            const rects = range.getClientRects();
+            const field = editableOf(selection.anchorNode)?.getBoundingClientRect();
+            const caret = rects[0] && rects[0].height > 0 ? rects[0] : null; // an empty line has no rectangle of its own: the paragraph's line is used
+            const x = caret ? caret.left : (field?.left ?? 0) + 12;
+            const y = caret ? caret.top + caret.height / 2 : (field?.top ?? scroller.getBoundingClientRect().top + 60) + 10;
+            const delta = (e.key === "PageDown" ? 1 : -1) * Math.max(80, scroller.clientHeight * 0.9);
+            const before = scroller.scrollTop;
+            scroller.scrollTop = before + delta;
+            const moved = scroller.scrollTop - before;
+            const rect = scroller.getBoundingClientRect();
+            const target = Math.max(rect.top + 4, Math.min(rect.bottom - 4, y));
+            const hit = document.caretPositionFromPoint?.(x, target);
+            const at = hit ?? (() => { const r = document.caretRangeFromPoint?.(x, target); return r ? { offsetNode: r.startContainer, offset: r.startOffset } : null; })();
+            if (at && host.contains(at.offsetNode) && editableOf(at.offsetNode)) {
+                e.preventDefault();
+                if (e.shiftKey && selection.anchorNode)
+                    selection.extend(at.offsetNode, at.offset);
+                else
+                    selection.collapse(at.offsetNode, at.offset);
+            }
+            else {
+                // Nothing to land on at that height (the desk below the last page, or above the first): the caret goes to the end or the start of the document, as in a word processor
+                e.preventDefault();
+                const texts = [...host.querySelectorAll("[data-edit='text']")];
+                const edge = e.key === "PageDown" ? texts[texts.length - 1] : texts[0];
+                if (edge) {
+                    const offset = e.key === "PageDown" ? edge.childNodes.length : 0;
+                    if (e.shiftKey && selection.anchorNode)
+                        selection.extend(edge, offset);
+                    else {
+                        edge.focus({ preventScroll: true });
+                        selection.collapse(edge, offset);
+                    }
+                    edge.scrollIntoView({ block: "nearest" });
+                }
+            }
+            void moved;
+            return;
+        }
+        if (mod && !e.altKey && (e.key === "Home" || e.key === "End")) {
+            // Ctrl+Home / Ctrl+End: the start and the end of the document, in a paragraph (the browser would leave the caret on the page itself)
+            const texts = [...host.querySelectorAll("[data-edit='text']")];
+            const target = e.key === "Home" ? texts[0] : texts[texts.length - 1];
+            if (!target)
+                return;
+            e.preventDefault();
+            const selection = window.getSelection();
+            const at = e.key === "Home" ? 0 : target.childNodes.length;
+            if (e.shiftKey && selection?.anchorNode)
+                selection.extend(target, at);
+            else {
+                target.focus({ preventScroll: true });
+                selection?.collapse(target, at);
+            }
+            target.scrollIntoView({ block: "nearest" });
+            return;
+        }
         if (mod && !e.altKey) {
             if (k === "b" && !e.shiftKey)
                 return run(() => A.toggleFormat(ed, "bold"));

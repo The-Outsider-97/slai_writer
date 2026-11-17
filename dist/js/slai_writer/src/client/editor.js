@@ -6,9 +6,10 @@
  *  speed behave) and the difference is sent right after, coalesced while an earlier request is still on its way.
  *
  *  All blocks live in ONE contenteditable root, so selections, arrow keys and drag-selection cross paragraphs and pages naturally. */
-import { announce, Emitter, uid } from "./kit.js";
+import { ApiError, announce, Emitter, uid } from "./kit.js";
 import { Decor } from "./decor.js";
 import { blockIdOf, caretAt, editableOf, placeCaret, pointFor, serialise } from "./domtext.js";
+import { contentSize, storedFromLine } from "./book_layout.js";
 import { columnSpec, pageGroups } from "./column_layout.js";
 import { DocModel, OpQueue, layerOf } from "./model.js";
 import { api, errorText } from "./net.js";
@@ -40,6 +41,9 @@ export class Editor {
     reflowTimer;
     settleTimer;
     flushTimer;
+    retryTimer;
+    retryDelayMs = 1000;
+    heldSaid = false;
     printLayoutTimer;
     tocRefreshTimer;
     lastTocHeadingSignature = "";
@@ -55,7 +59,7 @@ export class Editor {
         const pageEvents = {
             rulerDouble: () => this.events.emit({ type: "ruler-double" }),
             pageDouble: (sheetIndex, section, xMm, yMm) => this.events.emit({ type: "page-double", sheetIndex, section, xMm, yMm }),
-            margin: (section, side, mm) => { void this.setMargin(section, side, mm); },
+            margin: (section, side, mm, physical) => { void this.setMargin(section, side, mm, physical); },
             band: (section, edge, mm) => { void this.setBand(section, edge, mm); },
             guideMove: (axis, index, mm) => { void this.moveGuide(axis, index, mm); },
             guideAdd: (axis, mm) => { void this.addGuide(axis, mm); },
@@ -312,10 +316,19 @@ export class Editor {
             if (this.destroyed || this.composing)
                 return;
             const saved = this.saveSelection();
+            // Where the line being written is on the screen: if reflow moves its paragraph (to the next page, say), the page scrolls with it, so the line stays put under the eyes
+            const sel = window.getSelection();
+            const at = sel && sel.rangeCount && sel.isCollapsed && this.host.contains(sel.anchorNode) ? editableOf(sel.anchorNode) : null;
+            const before = at?.getBoundingClientRect().top ?? 0;
             const changed = this.page.reflow();
             if (changed)
                 this.page.redecorate();
             this.restoreSelection(saved);
+            if (changed && at?.isConnected) {
+                const drift = at.getBoundingClientRect().top - before;
+                if (Math.abs(drift) > 1)
+                    this.page.scroller.scrollTop += drift;
+            }
             this.decor.refresh();
             this.events.emit({ type: "layout" });
         }, 120);
@@ -567,8 +580,38 @@ export class Editor {
             return result;
         });
     }
+    /** The server could not be reached (or answered 502 and above): nothing was refused, so what was typed is kept, not thrown away. */
+    unreachable(error) {
+        return error instanceof ApiError && (error.code === "offline" || error.status === 0 || error.status >= 502);
+    }
+    /** Typed text that the server has not got: the field differs from what the server last confirmed. It goes out again, with growing pauses, until it does. */
+    holdTyping() {
+        for (const key of [...this.sent.keys()]) {
+            const el = this.fieldEl(key);
+            if (!el)
+                continue;
+            const [id, field] = key.split("#");
+            const block = this.model.block(id);
+            const confirmed = (field && field !== "cap" ? block?.table?.rows[Number(field.split(",")[0])]?.[Number(field.split(",")[1])]?.text : block?.text) ?? "";
+            if (serialise(el) === confirmed)
+                continue;
+            this.sent.set(key, confirmed);
+            this.dirty.add(key);
+        }
+        if (!this.heldSaid) {
+            this.heldSaid = true;
+            announce("The server cannot be reached. What you type is kept and will be saved as soon as it is back.");
+        }
+        window.clearTimeout(this.retryTimer);
+        this.retryTimer = window.setTimeout(() => { void this.flush(); }, this.retryDelayMs);
+        this.retryDelayMs = Math.min(15000, this.retryDelayMs * 2);
+    }
     failed(error) {
         this.events.emit({ type: "error", error });
+        if (this.unreachable(error)) {
+            this.holdTyping();
+            return;
+        }
         announce(errorText(error), "assertive");
         // The mirror may be ahead of the server (a typed change was refused): fetch the truth.
         void this.resync();
@@ -605,6 +648,12 @@ export class Editor {
     /** A patch the server produced outside of /ops (citations, EMBED apply, AI apply, signature graphic placement). */
     applyExternalPatch(patch) { this.afterPatch(patch, { op: "external" }, false); }
     afterPatch(patch, op, local) {
+        if (this.heldSaid) {
+            this.heldSaid = false;
+            this.retryDelayMs = 1000;
+            window.clearTimeout(this.retryTimer);
+            announce("Saved again. The server is back.");
+        }
         const { changed, removed, reordered, documentChanged } = this.model.applyPatch(patch);
         const headingSignature = this.headingSignature();
         if (headingSignature !== this.lastTocHeadingSignature) {
@@ -675,19 +724,21 @@ export class Editor {
             }
             this.rememberFields(block);
         }
-        if (documentChanged)
+        if (documentChanged) {
+            const sel = this.readSelection(); // one read for the whole sweep, not one per block
             for (const [id, block] of this.model.blocks) {
                 const w = this.els.get(id);
-                if (w && !changed.includes(id)) {
-                    this.rerender(id, block, w);
-                }
+                if (w && !changed.includes(id))
+                    this.rerender(id, block, w, sel, false);
             }
+        }
         if (relayout) {
+            const sel = this.readSelection();
             for (const [id, block] of this.model.blocks)
                 if (listMarkersChanged(this.els.get(id), ctx, block)) {
                     const w = this.els.get(id);
                     if (w)
-                        this.rerender(id, block, w);
+                        this.rerender(id, block, w, sel, false);
                 }
             this.layout();
         }
@@ -700,8 +751,8 @@ export class Editor {
         void op;
     }
     /** Re-render one block in place and put the caret back where it was. */
-    rerender(id, block, wrapper) {
-        const saved = this.readSelection();
+    rerender(id, block, wrapper, selection, refreshDecor = true) {
+        const saved = selection === undefined ? this.readSelection() : selection;
         const hadFocus = wrapper.contains(document.activeElement);
         const ctx = this.ctx();
         if (block.type === "table")
@@ -725,7 +776,8 @@ export class Editor {
         }
         if (saved && (saved.start.block === id || saved.end.block === id))
             this.restoreSelection(saved);
-        this.decor.refresh();
+        if (refreshDecor)
+            this.decor.refresh();
     }
     /** Called when typing has been sent and answered: bring deferred blocks in line with the server. */
     settle() {
@@ -743,13 +795,23 @@ export class Editor {
         }, 350);
     }
     /* ---------------------------------------------------------------------------------------------- document-level settings */
-    async setMargin(section, side, mm) {
+    /** A margin line of the sheet at position `physical` was moved to `mm`. The line may stand for the inside or the outside margin, or include the gutter: what is stored
+     *  is always the margin itself, and the text area keeps at least 30 mm. */
+    async setMargin(section, side, mm, physical = 1) {
         const g = this.model.geometry(section);
         const vertical = side === "top" || side === "bottom";
-        const opposite = g.margins[side === "top" ? "bottom" : side === "bottom" ? "top" : side === "left" ? "right" : "left"];
-        const clamped = Math.max(0, Math.min((vertical ? g.heightMm : g.widthMm) - opposite - 30, Math.round(mm * 2) / 2));
+        let key = side;
+        let value = Math.max(0, Math.round(mm * 2) / 2);
+        if (!vertical) {
+            const target = storedFromLine(g.stored, g.book, physical, side, value);
+            key = target.key;
+            value = Math.max(0, Math.round(target.value * 2) / 2);
+        }
+        const room = contentSize(g.widthMm, g.heightMm, g.stored, g.book);
+        const free = (vertical ? room.height : room.width) - 30; // how much this margin may still grow
+        value = Math.min(value, g.stored[key] + Math.max(0, free));
         try {
-            await this.op({ op: "page_setup", section: section ?? undefined, page: { margins_mm: { [side]: clamped } }, label: "margins" });
+            await this.op({ op: "page_setup", section: section ?? undefined, page: { margins_mm: { [key]: value } }, label: "margins" });
         }
         catch (e) {
             this.failed(e);
