@@ -13,10 +13,13 @@ import { ImageTools } from "../imageedit.js";
 import { editShape } from "../shape_ui.js";
 import { ShapeTools } from "../shapetools.js";
 import { shapeOf } from "../shape.js";
-import type { Dock, DocCtx, DocUi, Panel, ZoomRequest } from "../docctx.js";
+import type { Dock, DocCtx, DocUi, Panel, ViewState, ZoomRequest } from "../docctx.js";
 import { externalDialog, saveAsDialog, saveDocument } from "../docsave.js";
 import { Editor } from "../editor.js";
 import { Find } from "../find.js";
+import { RenderedView } from "../rendered.js";
+import { clampPerRow, type PerRow } from "../arrangement.js";
+import { documentIsBook } from "../book_layout.js";
 import { installInput } from "../input.js";
 import { announce, clear, h, openMenu, toast } from "../kit.js";
 import { api, errorText } from "../net.js";
@@ -57,8 +60,16 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
   let staleBanner = false;
   let externalBanner = false;
   let hiddenMode = false;
-  let zoomMode: "custom" | "height" | "width" = app.prefs.zoom_mode;
+  let zoomMode: "custom" | "height" | "width" | "entire" = app.prefs.zoom_mode;
   let zoomSave: number | undefined;
+  let rendered: RenderedView | null = null;
+  let renderedBusy = false;
+  let perRow: PerRow = clampPerRow(app.prefs.view_pages);
+  let bookView: "facing" | "single" = app.prefs.book_view;
+  let wasBook = documentIsBook(ed.model.meta);
+  let perRowBeforeBook: PerRow | null = null;
+  let sheetSelection: ReturnType<typeof ed.recallSelection> = null;
+  let currentPercent = app.prefs.zoom;
 
   /* ---------------------------------------------------------------------------------------------- the pieces */
   const find = new Find({ get app() { return app; }, get ed() { return ed; }, sid, get ui() { return ui; } } as DocCtx);
@@ -74,7 +85,7 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
   /* ------------------------------------------------------------------------------------------------- the UI hooks */
   const ui: DocUi = {
     openPanel(kind: Dock, tab?: string): void { openPanel(kind, tab); },
-    focusFind(): void { top.search.focus(); top.search.select(); },
+    focusFind(): void { top.openFind(); },
     save: () => saveDocument(ctx),
     saveAs: () => saveAsDialog(ctx),
     refreshStatus(): void { top.update(); status.update(); format.update(); document.title = `${ed.model.meta.title} – SLAI Writer`; },
@@ -91,6 +102,9 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
     palette(x: number, y: number): void { const sel = ed.recallSelection(); openPalette(ctx, x, y, () => ed.refocus(sel)); },
     setZoom: (request: ZoomRequest) => setZoom(request),
     async reload(next?: DocState): Promise<void> { await ed.resync(next); ui.refreshStatus(); },
+    setRendered: (on: boolean) => setRendered(on),
+    setPages: (count, options) => setPages(count, options),
+    viewState: (): ViewState => viewState(),
     toggleHidden(): void { hiddenMode = !hiddenMode; if (hiddenMode) root.dataset["hidden"] = ""; else delete root.dataset["hidden"]; status.el.querySelector<HTMLElement>("button[aria-pressed]")?.setAttribute("aria-pressed", String(hiddenMode)); const label = status.el.querySelector<HTMLElement>("button[aria-pressed] span"); if (label) label.textContent = hiddenMode ? "Reveal" : "Hide"; announce(hiddenMode ? "Everything except the page is hidden. Press Reveal or Escape to show it." : "Revealed."); },
   };
   ctx = { app, ed, sid, ui };
@@ -215,15 +229,129 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
     }
   };
 
+  /* ------------------------------------------------------------------------------------------ pages per view, rendered view */
+  function isBook(): boolean { return documentIsBook(ed.model.meta); }
+  /** What is on the desk: the pages-per-view choice, or the two-page book view for a document with mirrored margins (page 1 alone on the right). */
+  function arrangementNow(): { perRow: PerRow; facing: boolean } {
+    const facing = isBook() && perRow <= 2 && bookView === "facing";
+    return { perRow: facing ? 2 : perRow, facing };
+  }
+  const applyArrangement = (): void => {
+    const now = arrangementNow();
+    ed.page.setArrangement(now.perRow, now.facing);
+    rendered?.setArrangement(now.perRow, now.facing);
+    if (zoomMode !== "custom") setZoom(zoomMode);
+    ui.refreshStatus();
+  };
+  const savePrefs = (extra: Record<string, unknown> = {}): void => { void app.setPrefs({ view_pages: perRow, book_view: bookView, ...extra }).catch(() => undefined); };
+  function setPages(count: 1 | 2 | 3 | 4, options?: { book?: boolean }): void {
+    perRow = clampPerRow(count);
+    if (count <= 2 && isBook()) bookView = count === 2 && options?.book !== false ? "facing" : "single";
+    perRowBeforeBook = null;
+    applyArrangement();
+    savePrefs();
+    announce(arrangementNow().facing ? "Two pages, book view: page 1 on the right." : `${arrangementNow().perRow} ${arrangementNow().perRow === 1 ? "page" : "pages"} across.`);
+  }
+  /** Turning mirrored margins on makes a book of the document, and a book is read as spreads: two pages, page 1 alone on the right. Turning them off again
+   *  returns to what was shown before. Opening a document that already is a book keeps what the person last chose. */
+  const syncBook = (): void => {
+    const now = isBook();
+    if (now === wasBook) return;
+    wasBook = now;
+    if (now) { perRowBeforeBook = perRow; perRow = 2; bookView = "facing"; savePrefs(); }
+    else if (perRowBeforeBook) { perRow = perRowBeforeBook; perRowBeforeBook = null; savePrefs(); }
+    applyArrangement();
+    announce(now ? "Mirrored margins are on. The pages are shown as a book, two at a time." : "Mirrored margins are off.");
+  };
+  function renderedUnavailable(): string | null {
+    const pdf = app.boot.capabilities.exportFormats.export.find((f) => f.id === "pdf");
+    if (!app.boot.capabilities.documaster.available) return app.boot.capabilities.documaster.reason ?? "Documaster, which draws the pages, is not available.";
+    if (pdf && !pdf.available) return pdf.reason ?? "PDF export is not available.";
+    return null;
+  }
+  function viewState(): ViewState {
+    const now = arrangementNow();
+    const at = rendered?.currentPage() ?? 0;
+    return { rendered: !!rendered, perRow: now.perRow, facing: now.facing, book: isBook(), renderedUnavailable: renderedUnavailable(),
+      renderedPage: rendered ? { page: at, total: rendered.total, label: rendered.labelOf(at) } : null };
+  }
+  /** The page of the exported PDF that the editing view is on: the page of the block with the caret (measured by Documaster), else the editor's own count. */
+  const editingPdfPage = (): number => {
+    const block = ed.recallSelection()?.start.block;
+    const exact = block ? ed.printLayout?.blockPages[block] : undefined;
+    return exact ?? ed.currentPage();
+  };
+  async function setRendered(on: boolean): Promise<void> {
+    if (renderedBusy || on === !!rendered) return;
+    renderedBusy = true;
+    try {
+      if (on) {
+        const why = renderedUnavailable();
+        if (why) { toast(`The rendered view is not available: ${why}`, { kind: "info" }); return; }
+        const sel = ed.recallSelection();
+        const page = editingPdfPage();
+        await ed.whenIdle();                                                   // what was typed is sent first, so the pages drawn are of the text on screen
+        const view = new RenderedView(sid, {
+          changed: () => { status.update(); },
+          leave: () => { void setRendered(false); },
+          zoom: (percent) => setZoom(percent),
+          stale: () => { toast("The document changed while the rendered view was open. Showing it again.", { kind: "info" }); void reopenRendered(); },
+        });
+        try { await view.load(); } catch (e) { view.destroy(); toast(`The rendered view could not be drawn. ${errorText(e)}`, { kind: "error", timeoutMs: 9000 }); return; }
+        rendered = view;
+        sheetSelection = sel;
+        root.dataset["view"] = "rendered";
+        ed.page.el.after(view.el);
+        const now = arrangementNow();
+        view.setArrangement(now.perRow, now.facing);
+        setZoom(zoomMode === "custom" ? currentPercent : zoomMode);
+        view.refresh();
+        view.goTo(page);
+        view.focus();
+        announce("Rendered view. The pages are shown as they export. Press Escape to return to editing.");
+      } else if (rendered) {
+        const view = rendered;
+        const page = view.currentPage();
+        rendered = null;
+        view.destroy();
+        delete root.dataset["view"];
+        ed.layout();
+        setZoom(zoomMode === "custom" ? currentPercent : zoomMode);
+        const first = ed.model.order.find((id) => (ed.printLayout?.blockPages[id] ?? 0) >= page);
+        const target = ed.recallSelection()?.start.block ?? sheetSelection?.start.block;
+        const inPage = target && ed.printLayout?.blockPages[target] === page ? target : first;
+        if (inPage) ed.page.el.querySelector<HTMLElement>(`[data-id="${CSS.escape(inPage)}"]`)?.scrollIntoView({ block: "start" });
+        if (sheetSelection && ed.printLayout?.blockPages[sheetSelection.start.block] === page) ed.refocus(sheetSelection); else ed.host.focus({ preventScroll: true });
+        sheetSelection = null;
+        announce("Editing view.");
+      }
+    } finally { renderedBusy = false; status.update(); }
+  }
+  /** The pictures no longer match the document (it changed under the view): draw it again where the reader was. */
+  async function reopenRendered(): Promise<void> {
+    const view = rendered;
+    if (!view) return;
+    const page = view.currentPage();
+    rendered = null; view.destroy(); delete root.dataset["view"];
+    ed.layout();
+    await setRendered(true);
+    const again = (): RenderedView | null => rendered;
+    again()?.goTo(page);
+  }
   /* ------------------------------------------------------------------------------------------------- zoom */
   function setZoom(request: ZoomRequest): void {
     let percent: number;
-    if (request === "height" || request === "width") { zoomMode = request; percent = ed.page.fitZoom(request); } else { zoomMode = "custom"; percent = Math.max(10, Math.min(400, Math.round(request))); }
-    ed.setZoom(percent);
+    if (request === "height" || request === "width" || request === "entire") { zoomMode = request; percent = rendered ? rendered.fitZoom(request) : ed.page.fitZoom(request); } else { zoomMode = "custom"; percent = Math.max(10, Math.min(400, Math.round(request))); }
+    currentPercent = percent;
+    if (rendered) rendered.setZoom(percent); else ed.setZoom(percent);
     status.setZoom(percent, zoomMode);
     window.clearTimeout(zoomSave);
     zoomSave = window.setTimeout(() => { void app.setPrefs({ zoom: percent, zoom_mode: zoomMode }).catch(() => undefined); }, 700);
   }
+  // A fit mode follows the window: when the window is resized the pages are fitted again (a custom zoom stays where it is).
+  let resizeTimer: number | undefined;
+  const onResize = (): void => { window.clearTimeout(resizeTimer); resizeTimer = window.setTimeout(() => { if (zoomMode !== "custom") setZoom(zoomMode); }, 120); };
+  window.addEventListener("resize", onResize);
 
   /* ------------------------------------------------------------------------------------------------ events */
   let frame = 0;
@@ -254,11 +382,11 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
         const summary = app.docs.get(sid);
         if (summary && summary.dirty !== e.patch.dirty) app.docs.set(sid, { ...summary, dirty: e.patch.dirty });
         ed.model.state = { ...ed.model.state, lastEdit: Date.now() / 1000 };
-        refreshBars(); afterEdit();
+        syncBook(); refreshBars(); afterEdit();
         break;
       }
       case "selection": case "layout": case "comments": refreshBars(); if (e.type === "layout") afterEdit(); break;
-      case "reloaded": staleBanner = false; paintBanners(); refreshBars(); afterEdit(); break;
+      case "reloaded": staleBanner = false; paintBanners(); syncBook(); refreshBars(); afterEdit(); break;
       case "stale": staleBanner = true; paintBanners(); break;
       case "slash": ui.palette(e.x, e.y); break;
       case "context": { const sel = ed.recallSelection(); contextMenu(ctx, e.x, e.y, () => ed.refocus(sel)); break; }
@@ -308,6 +436,7 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
   const onKey = (e: KeyboardEvent): void => {
     if (e.defaultPrevented) return;
     const mod = e.ctrlKey || e.metaKey;
+    if (e.key === "Escape" && rendered && !(e.target as Element | null)?.closest?.("dialog, [role=menu]")) { e.preventDefault(); void setRendered(false); return; }
     if (e.key === "Escape" && hiddenMode) { e.preventDefault(); ui.toggleHidden(); return; }
     if (e.key === "Escape" && !(e.target as Element | null)?.closest?.("dialog, [role=menu], .slash")) {
       // Escape closes a panel attached to a page when focus is on its tab; inside a panel the panel handles it, inside the page it keeps its other meanings.
@@ -332,8 +461,8 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
     else if (e.code === "KeyB" && e.altKey && !e.shiftKey) { e.preventDefault(); runCommand("background"); }
     else if (k === "d" && !e.altKey && !e.shiftKey) { e.preventDefault(); runCommand("picture"); }
     else if (k === "\\") { e.preventDefault(); void A.clearFormatting(ed); }
-    else if (k === "+" || k === "=") { e.preventDefault(); setZoom(Math.round(ed.page.zoom * 100) + 10); }
-    else if (k === "-") { e.preventDefault(); setZoom(Math.round(ed.page.zoom * 100) - 10); }
+    else if (k === "+" || k === "=") { e.preventDefault(); setZoom(currentPercent + 10); }
+    else if (k === "-") { e.preventDefault(); setZoom(currentPercent - 10); }
     else if (k === "0" && !e.altKey) { e.preventDefault(); setZoom(100); }
   };
   document.addEventListener("keydown", onKey);
@@ -355,6 +484,7 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
       // The page was built before it was on screen, so measure and lay it out again now, and again when fonts have loaded.
       window.requestAnimationFrame(() => {
         ed.layout();
+        applyArrangement();
         setZoom(zoomMode === "custom" ? app.prefs.zoom : zoomMode);
         status.update();
         const first = ed.model.order[0];
@@ -366,6 +496,8 @@ export async function docScreen(app: App, route: Route): Promise<Screen> {
       void ed.whenIdle().catch(() => undefined);              // typing not yet sent goes out before the page is torn down
       window.clearInterval(poll); window.clearTimeout(marksTimer); window.clearTimeout(findTimer); window.clearTimeout(zoomSave);
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResize); window.clearTimeout(resizeTimer);
+      rendered?.destroy(); rendered = null;
       offEditor(); offApp(); uninstall(); imageTools.destroy(); shapeTools.destroy();
       top.dispose(); status.dispose();
       for (const p of dockPanels.values()) p.destroy?.();

@@ -6,7 +6,7 @@ import { chevron, crossIcon, dico } from "./dico.js";
 import type { NavMenu } from "./navmenu.js";
 import * as A from "./actions.js";
 import { COMMANDS, PaletteList, type Command } from "./commands.js";
-import type { DocCtx } from "./docctx.js";
+import type { DocCtx, ZoomRequest } from "./docctx.js";
 import { autosaveMenu, confirmConflicts, saveAsDialog, saveDocument, type MergeResult } from "./docsave.js";
 import type { Find } from "./find.js";
 import { closeDocument, needsPassword, withPassword } from "./fileops.js";
@@ -411,6 +411,7 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     referenceGroup("Citation style", h("span", { class: "ribbon-style-label", text: "APA-style author–date" })));
   const illustrations = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Insert illustrations" } },
     referenceGroup("Illustrations", ribbonButton("Insert Picture", fire("picture"), "image"), ribbonButton("Insert Shape", fire("shape"), "layers")),
+    referenceGroup("Tables", ribbonButton("Table", fire("table"), "table"), ribbonButton("Markdown to table", fire("markdown-table"), "table")),
     referenceGroup("Text", ribbonButton("Text Box", fire("textbox"), "paragraph"), ribbonButton("Draw Text Box", fire("textbox-draw"), "pen")));
   // Contextual shape formatting uses the same canonical shape_set operation as
   // the full dialog; there is no separate undo, document store, or renderer.
@@ -663,13 +664,27 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
 }
 
 /* ===================================================================================================== status bar */
-export interface StatusBar { el: HTMLElement; update(): void; setZoom(percent: number, mode: "custom" | "height" | "width"): void; dispose(): void }
+export interface StatusBar { el: HTMLElement; update(): void; setZoom(percent: number, mode: "custom" | "height" | "width" | "entire"): void; dispose(): void }
 
 /** The status bar of the design (page 11): page, words, version and last edit on the left; shared workspace, the pen for signing, Hide/Reveal
  *  and the status dots in the middle; the zoom to page height or width and the percentage slider on the right. */
-export function buildStatusBar(ctx: DocCtx, onZoom: (request: number | "height" | "width") => void): StatusBar {
+export function buildStatusBar(ctx: DocCtx, onZoom: (request: ZoomRequest) => void): StatusBar {
   const { app, ed } = ctx;
   const pageLine = h("span", { class: "page-line", attrs: { title: "The editor page count is an approximate block layout. The PDF page count and TOC references are measured by Documaster." } });
+  const pagesButton = h("button", { class: "sbtn pages", type: "button", attrs: { "aria-haspopup": "menu", "aria-label": "Pages shown side by side", title: "Pages shown side by side: 1, 2, 3 or 4" } }, glyph("pages-1"), h("span", { class: "pages-n", text: "1" }));
+  pagesButton.addEventListener("click", () => {
+    const now = ctx.ui.viewState();
+    const mark = (on: boolean): string => (on ? "● " : "");
+    const book = now.book;
+    openMenu(pagesButton, [
+      { label: `${mark(now.perRow === 1)}1 page`, icon: "pages-1", run: () => ctx.ui.setPages(1) },
+      book ? { label: `${mark(now.perRow === 2 && now.facing)}2 pages: book view (page 1 on the right)`, icon: "pages-book", run: () => ctx.ui.setPages(2, { book: true }) }
+           : { label: `${mark(now.perRow === 2)}2 pages`, icon: "pages-2", run: () => ctx.ui.setPages(2) },
+      ...(book ? [{ label: `${mark(now.perRow === 2 && !now.facing)}2 pages side by side, not as a book`, icon: "pages-2", run: () => ctx.ui.setPages(2, { book: false }) } as MenuEntry] : []),
+      { label: `${mark(now.perRow === 3)}3 pages`, icon: "pages-3", run: () => ctx.ui.setPages(3) },
+      { label: `${mark(now.perRow === 4)}4 pages`, icon: "pages-4", run: () => ctx.ui.setPages(4) },
+    ], { label: "Pages shown side by side" });
+  });
   const words = h("span", {});
   const version = h("span", {});
   const last = h("span", {});
@@ -685,6 +700,10 @@ export function buildStatusBar(ctx: DocCtx, onZoom: (request: number | "height" 
   hide.addEventListener("click", () => ctx.ui.toggleHidden());
   const dots = h("span", { class: "dots-slot" });
 
+  const rendered = h("button", { class: "sbtn rendered-toggle", type: "button", attrs: { "aria-label": "Rendered view", "aria-pressed": "false", title: "Rendered view: the pages as they export, read only" } }, glyph("view-rendered"));
+  rendered.addEventListener("click", () => { void ctx.ui.setRendered(!ctx.ui.viewState().rendered); });
+  const fitEntire = h("button", { class: "sbtn fit", type: "button", attrs: { "aria-label": "Zoom to the entire page", "aria-pressed": "false", title: "Fit entire page" } }, glyph("zoom-entire"));
+  fitEntire.addEventListener("click", () => onZoom("entire"));
   const fitHeight = h("button", { class: "sbtn fit", type: "button", attrs: { "aria-label": "Zoom to page height", "aria-pressed": "false", title: "Fit page height" } }, dico("zoom-height"));
   const fitWidth = h("button", { class: "sbtn fit", type: "button", attrs: { "aria-label": "Zoom to page width", "aria-pressed": "false", title: "Fit page width" } }, dico("zoom-width"));
   fitHeight.addEventListener("click", () => onZoom("height"));
@@ -693,14 +712,35 @@ export function buildStatusBar(ctx: DocCtx, onZoom: (request: number | "height" 
   const zoomText = h("output", { class: "zoom-text", attrs: { for: "" } });
   range.addEventListener("input", () => { onZoom(Number(range.value)); });
   const paintRange = (): void => { range.style.setProperty("--fill", `${((Number(range.value) - 10) / 390) * 100}%`); };
-  const zoom = h("div", { class: "zoomctl" }, fitHeight, fitWidth, range, zoomText);
+  const zoom = h("div", { class: "zoomctl" }, rendered, fitHeight, fitWidth, fitEntire, range, zoomText);
 
   const el = h("footer", { class: "estatus", attrs: { role: "contentinfo" } },
-    h("div", { class: "stats" }, pageLine, words, version, last),
+    h("div", { class: "stats" }, pagesButton, pageLine, words, version, last),
     h("div", { class: "centre" }, workspace, pen, hide, dots),
     zoom);
 
+  const paintView = (): void => {
+    const view = ctx.ui.viewState();
+    const shown = view.facing ? 2 : view.perRow;
+    pagesButton.querySelector(".pages-n")!.textContent = String(shown);
+    pagesButton.querySelector("svg")?.replaceWith(glyph(view.facing ? "pages-book" : `pages-${shown}`));
+    pagesButton.title = `Pages shown side by side: ${view.facing ? "2 (book view)" : shown}`;
+    pagesButton.setAttribute("aria-label", `Pages shown side by side: ${view.facing ? "2, book view" : shown}. Change`);
+    const off = !view.rendered && view.renderedUnavailable;
+    rendered.setAttribute("aria-pressed", String(view.rendered));
+    rendered.disabled = !!off;
+    rendered.setAttribute("aria-label", view.rendered ? "Editing view: return to editing" : "Rendered view");
+    rendered.title = off ? `Rendered view is not available: ${off}` : view.rendered ? "Editing view: return to editing (Esc)" : "Rendered view: the pages as they export, read only";
+    const icon = rendered.querySelector("svg");
+    if (icon && icon.dataset["name"] !== (view.rendered ? "view-editing" : "view-rendered")) { const next = glyph(view.rendered ? "view-editing" : "view-rendered"); next.dataset["name"] = view.rendered ? "view-editing" : "view-rendered"; icon.replaceWith(next); }
+  };
   const update = (): void => {
+    paintView();
+    const view = ctx.ui.viewState();
+    if (view.rendered && view.renderedPage) {
+      const r = view.renderedPage;
+      pageLine.textContent = `Rendered ${String(r.page).padStart(2, "0")}/${String(r.total).padStart(2, "0")} (exact, read only)${r.label ? ` · Printed: ${r.label}` : ""}`;
+    }
     const state = ed.model.state;
     const total = Math.max(1, ed.page.total);
     const cur = Math.min(total, ed.currentPage());
@@ -708,7 +748,7 @@ export function buildStatusBar(ctx: DocCtx, onZoom: (request: number | "height" 
     const active = ed.recallSelection()?.start.block;
     const physical = active ? layout?.blockPages[active] : undefined;
     const printed = physical ? layout?.printedLabels[physical - 1] : undefined;
-    pageLine.textContent = `Editor ${String(cur).padStart(2, "0")}/${String(total).padStart(2, "0")} (approx.)` +
+    if (!(view.rendered && view.renderedPage)) pageLine.textContent = `Editor ${String(cur).padStart(2, "0")}/${String(total).padStart(2, "0")} (approx.)` +
       (layout ? ` · PDF ${physical ? `${physical}/` : ""}${layout.pages} (exact)${printed ? ` · Printed: ${printed}` : ""}` : "");
     words.textContent = `${ed.model.stats.words.toLocaleString()} words - ${ed.model.stats.characters.toLocaleString()} characters`;
     version.textContent = `Version: ${state.revision.number}`;
@@ -723,12 +763,13 @@ export function buildStatusBar(ctx: DocCtx, onZoom: (request: number | "height" 
     workspace.title = ws.available ? "Shared workspace: connected" : "Shared workspace: not connected";
     workspace.classList.toggle("off", !ws.available);
   };
-  const setZoom = (percent: number, m: "custom" | "height" | "width"): void => {
+  const setZoom = (percent: number, m: "custom" | "height" | "width" | "entire"): void => {
     range.value = String(Math.max(10, Math.min(400, percent)));
     paintRange();
     zoomText.textContent = `${Math.round(percent)}%`;
     fitHeight.setAttribute("aria-pressed", String(m === "height"));
     fitWidth.setAttribute("aria-pressed", String(m === "width"));
+    fitEntire.setAttribute("aria-pressed", String(m === "entire"));
   };
   update();
   paintRange();

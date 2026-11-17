@@ -173,6 +173,17 @@ table.plans td { min-width: 9rem; }
 .sizer { position: relative; }
 .zoomer { transform-origin: 0 0; width: max-content; padding: 28px; }
 .sheets { display: flex; flex-direction: column; gap: 28px; outline: none; caret-color: var(--paper-ink); }
+/* One, two, three or four pages side by side, and the two-page book view: where the sheets sit, nothing about how a page is laid out. */
+.sheets[data-per-row="2"], .sheets[data-per-row="3"], .sheets[data-per-row="4"] { display: grid; grid-template-columns: repeat(var(--per-row), max-content); grid-auto-rows: min-content; align-items: start; width: max-content; }
+.sheets[data-facing] { column-gap: 0; }
+.sheet-slot { visibility: hidden; pointer-events: none; user-select: none; }
+.sheets:not([data-per-row="1"]) .page-no { right: 0; left: 0; bottom: -1.6rem; text-align: center; }
+/* the spine of a book: no gap, a soft shade on each side of it, and the inner corners square */
+.sheets[data-facing] .sheet[data-side="left"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.sheets[data-facing] .sheet[data-side="right"] { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.sheets[data-facing] .sheet[data-side="left"]::after, .sheets[data-facing] .sheet[data-side="right"]::before { content: ""; position: absolute; top: 0; bottom: 0; width: 18px; pointer-events: none; z-index: 3; }
+.sheets[data-facing] .sheet[data-side="left"]::after { right: 0; background: linear-gradient(to left, rgba(0, 0, 0, .14), transparent); }
+.sheets[data-facing] .sheet[data-side="right"]::before { left: 0; background: linear-gradient(to right, rgba(0, 0, 0, .14), transparent); }
 .sheet { position: relative; background: var(--paper); color: var(--page-ink, var(--paper-ink)); box-shadow: 0 2px 10px rgba(0, 0, 0, .28); flex: none; overflow: visible; cursor: var(--cur-default, default); }
 .sheet .body { position: relative; overflow: hidden; display: flex; flex-direction: column; }
 .sheet .body > .foot { margin-top: auto; border-top: 1px solid currentColor; padding-top: 2mm; font-size: 8.5pt; display: none; user-select: none; }
@@ -462,3 +473,52 @@ table.tbl .cell { height: 7mm; }
 .tb-gallery-sample { height: 46px; padding: 6px 8px; font-size: 14px; overflow: hidden; box-sizing: border-box; }
 .tb-gallery-name { font-weight: 600; }
 .tb-gallery-hint { font-size: 12px; opacity: .75; }
+
+/* ------------------------------------------------------------------------------------------------ the rendered view */
+/* The pictures of the pages of the exported PDF, read only. No caret, selection, ruler, guide or object outline can exist here: there is nothing to edit. */
+.rendered { position: relative; grid-column: 2; flex: 1 1 auto; min-width: 0; min-height: 0; display: grid; grid-template-rows: minmax(0, 1fr) auto; background: var(--bg-2); }
+.rendered[hidden] { display: none; }
+.rv-scroller { overflow: auto; position: relative; min-height: 0; outline: none; user-select: none; -webkit-user-select: none; cursor: default; }
+.rv-scroller:focus-visible { outline: 2px solid var(--accent, #2d6cdf); outline-offset: -2px; }
+.rv-sizer { position: relative; box-sizing: border-box; }
+.rv-grid { display: grid; grid-template-columns: repeat(var(--rv-per-row, 1), max-content); grid-auto-rows: min-content; gap: var(--rv-gap, 28px); align-items: start; width: max-content; margin: 0 auto; }
+.rv-grid[data-facing] { column-gap: 0; }
+.rv-page { position: relative; margin: 0; background: #fff; box-shadow: 0 2px 10px rgba(0, 0, 0, .28); flex: none; }
+.rv-img { display: block; width: 100%; height: 100%; pointer-events: none; -webkit-user-drag: none; background: #fff; }
+.rv-no { position: absolute; left: 0; right: 0; bottom: -1.6rem; text-align: center; font-size: .75rem; color: var(--muted); user-select: none; }
+.rv-grid[data-per-row="1"]:not([data-facing]) .rv-no { text-align: right; right: -2.4rem; left: auto; bottom: 0; }
+.rv-slot { visibility: hidden; }
+.rv-grid[data-facing] .rv-page[data-side="left"] { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.rv-grid[data-facing] .rv-page[data-side="right"] { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.rv-grid[data-facing] .rv-page[data-side="left"]::after, .rv-grid[data-facing] .rv-page[data-side="right"]::before { content: ""; position: absolute; top: 0; bottom: 0; width: 18px; pointer-events: none; z-index: 3; }
+.rv-grid[data-facing] .rv-page[data-side="left"]::after { right: 0; background: linear-gradient(to left, rgba(0, 0, 0, .14), transparent); }
+.rv-grid[data-facing] .rv-page[data-side="right"]::before { left: 0; background: linear-gradient(to right, rgba(0, 0, 0, .14), transparent); }
+.rv-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.doc[data-view="rendered"] .page-area { display: none; }
+.sbtn .glyph { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.sbtn.pages { display: flex; align-items: center; gap: 3px; padding: 0 6px; }
+.sbtn.pages .pages-n { font-size: .8rem; font-variant-numeric: tabular-nums; }
+.sbtn.rendered-toggle[aria-pressed=true] { background: rgba(0, 0, 0, .14); }
+.sbtn:disabled { opacity: .45; cursor: not-allowed; }
+.sbtn:focus-visible { outline: 2px solid #2d6cdf; outline-offset: 1px; }
+
+/* ------------------------------------------------------------------------------------------------ margins menu and dialog */
+.margins-menu { min-width: 20rem; max-width: 24rem; padding: .35rem; }
+.margins-where { padding: .3rem .6rem .5rem; font-size: .75rem; color: var(--muted); max-width: 22rem; }
+.margin-item { display: flex; align-items: center; gap: .75rem; width: 100%; text-align: left; }
+.margin-item .margin-preview { flex: none; color: var(--ink, #222); }
+.margin-item-text { display: grid; gap: .1rem; min-width: 0; }
+.margin-item-text .muted { font-size: .75rem; white-space: normal; }
+.margins-preview-row { display: flex; align-items: center; gap: .75rem; min-height: 2.6rem; }
+.margins-preview-row .margin-preview { flex: none; color: var(--ink, #222); }
+.sections-pick { border: 1px solid var(--border); border-radius: 6px; padding: .4rem .6rem; display: flex; gap: .75rem; flex-wrap: wrap; }
+.sections-pick[hidden] { display: none; }
+
+/* Author names: how each name was read, and the controls to confirm or correct it */
+.name-review { display: grid; gap: .5rem; margin: .4rem 0 .8rem; }
+.name-review:empty { display: none; }
+.name-row { border: 1px solid var(--line, #d0d4da); border-radius: 8px; padding: .5rem .7rem; }
+.name-row.guessed { border-color: var(--warn, #b7791f); }
+.name-row .name-head { display: flex; flex-wrap: wrap; gap: .3rem; align-items: baseline; }
+.name-row .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .4rem; }
+.name-row .name-form { margin-top: .5rem; padding-top: .4rem; border-top: 1px dashed var(--line, #d0d4da); }

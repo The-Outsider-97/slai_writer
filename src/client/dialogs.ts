@@ -5,6 +5,7 @@ import * as A from "./actions.js";
 import type { DocCtx } from "./docctx.js";
 import { errorText, rawPost } from "./net.js";
 import { PAGE_MM } from "./textops.js";
+import { bookOf, problem } from "./book_layout.js";
 import type { BandRun, BandTextFormat, Block, HeaderFooter, Patch, Section } from "./types.js";
 import { FONT_FAMILIES } from "./font_rules.js";
 import { checkbox, errorLine, notice, selectField } from "./widgets.js";
@@ -131,12 +132,25 @@ export async function headerFooterDialog(ctx: DocCtx): Promise<void> {
   const format = selectField("Page number style", [["decimal", "1, 2, 3"], ["lower-roman", "i, ii, iii"], ["upper-roman", "I, II, III"], ["lower-alpha", "a, b, c"], ["upper-alpha", "A, B, C"]],
     String((target.numbering as { format?: string } | undefined)?.format ?? "decimal"));
   const all = sections.length > 1 ? checkbox("Apply to every section", false) : null;
+  // Odd and even pages: left-hand (even) pages may have their own header and footer text. The typography is that of the same position above.
+  const book = bookOf(ed.model.meta, sectionId);
+  const oddEven = checkbox("Different header and footer on odd and even pages", book?.odd_even === true);
+  const eh = [field(book?.header_even?.left, "Even-page header, left"), field(book?.header_even?.center, "Even-page header, centre"), field(book?.header_even?.right, "Even-page header, right")] as const;
+  const ef = [field(book?.footer_even?.left, "Even-page footer, left"), field(book?.footer_even?.center, "Even-page footer, centre"), field(book?.footer_even?.right, "Even-page footer, right")] as const;
+  const evenBox = h("div", { class: "stack" },
+    h("p", { class: "fine", text: "Odd pages (the first page, the third, …) use the header and footer above. Even pages (the left-hand pages of a book) use these; a band left empty here shows the ordinary one, with left and right swapped in mirrored margins." }),
+    h("fieldset", { class: "hf-row" }, h("legend", { text: "Header on even pages" }), h("div", { class: "grid-3" }, labelled("Left", eh[0]), labelled("Centre", eh[1]), labelled("Right", eh[2]))),
+    h("fieldset", { class: "hf-row" }, h("legend", { text: "Footer on even pages" }), h("div", { class: "grid-3" }, labelled("Left", ef[0]), labelled("Centre", ef[1]), labelled("Right", ef[2]))));
+  const syncEven = (): void => { evenBox.hidden = !oddEven.input.checked; };
+  oddEven.input.addEventListener("change", syncEven);
+  syncEven();
   const row = (title: string, a: HTMLInputElement, b: HTMLInputElement, c: HTMLInputElement): HTMLElement =>
     h("fieldset", { class: "hf-row" }, h("legend", { text: title }), h("div", { class: "grid-3" }, labelled("Left", a), labelled("Centre", b), labelled("Right", c)));
   const body = h("div", { class: "stack" },
     sections.length > 1 ? h("p", { class: "muted", text: `Editing ${sectionLabel(sections, sectionId)}.` }) : null,
     notice("Use {page} for the page number, {pages} for the page count and {title} for the document title. These are filled in when the document is printed or exported; the on-screen page count is approximate.", "info"),
     row("Header", hl, hc, hr), row("Footer", fl, fc, fr),
+    oddEven.root, evenBox,
     h("fieldset", { class: "hf-row" }, h("legend", { text: "Header and footer typography" }),
       h("p", { class: "fine", text: "Each left, centre and right field can have its own font, size, colour and emphasis. Leave font fields blank to keep the default." }),
       choice.root, fonts, h("div", { class: "grid-3" }, labelled("Font family", fontFamily), labelled("Size (pt)", fontSize), labelled("Color", fontColor)),
@@ -164,7 +178,20 @@ export async function headerFooterDialog(ctx: DocCtx): Promise<void> {
       const numbering = { ...(restart.input.checked ? { start: Math.max(1, Math.round(Number(start.value) || 1)) } : {}),
         format: format.select.value, show: visible.input.checked };
       const ops = ids.map((id) => ({ op: "page_setup", section: id, header: pack("header", hl, hc, hr), footer: pack("footer", fl, fc, fr), numbering }));
-      const ok = await guarded(ctx, () => ed.op(ops.length === 1 ? (ops[0] as { op: string }) : { op: "batch", ops, label: "header and footer" }));
+      // Odd and even pages are stored with the book layout of each section, so one more operation carries them (and nothing is sent when they were and are off).
+      const evenText = (spots: readonly HTMLInputElement[]): Record<string, string> => {
+        const out: Record<string, string> = {};
+        positions.forEach((pos, i) => { if (spots[i]!.value) out[pos] = spots[i]!.value; });
+        return out;
+      };
+      const wasOn = book?.odd_even === true, isOn = oddEven.input.checked;
+      const all_ops: Array<Record<string, unknown>> = [...ops];
+      if (wasOn || isOn) {
+        all_ops.push(isOn
+          ? { op: "page_layout", scope: "sections", sections: ids, odd_even: true, header_even: evenText(eh), footer_even: evenText(ef) }
+          : { op: "page_layout", scope: "sections", sections: ids, odd_even: null, header_even: null, footer_even: null });
+      }
+      const ok = await guarded(ctx, () => ed.op(all_ops.length === 1 ? (all_ops[0] as { op: string }) : { op: "batch", ops: all_ops, label: "header and footer" }));
       return ok ? true : undefined;
     } }],
   });
@@ -185,9 +212,11 @@ export async function pageSetupDialog(ctx: DocCtx): Promise<void> {
   const orientation = selectField("Orientation", [["portrait", "Portrait"], ["landscape", "Landscape"]], page.orientation === "landscape" ? "landscape" : "portrait");
   const width = numberInput(Math.round(g.widthMm * 10) / 10, 50, 1000, 0.5), height = numberInput(Math.round(g.heightMm * 10) / 10, 50, 1000, 0.5);
   const margin = (v: number): HTMLInputElement => numberInput(v, 0, 200, 0.5);
-  const top = margin(g.margins.top), right = margin(g.margins.right), bottom = margin(g.margins.bottom), left = margin(g.margins.left);
-  const preset = selectField("Margin preset", [["custom", "Custom"], ["normal", "Normal (25 mm)"], ["narrow", "Narrow (15 mm)"], ["wide", "Wide (35 mm)"]], "custom");
+  const top = margin(g.stored.top), right = margin(g.stored.right), bottom = margin(g.stored.bottom), left = margin(g.stored.left);   // the stored margins: the gutter and the page side are applied on top, never saved into them
+  const bookNote = g.book?.mirror || g.book?.gutter_mm ? notice("This section has mirrored margins or a binding gutter. The margins here are the stored ones (Left is the inside margin of a right-hand page); change the book settings in Layout → Margins → Custom Margins.", "info") : null;
+  const preset = selectField("Margin preset", [["custom", "Custom"], ["normal", "Normal (25 mm)"], ["narrow", "Narrow (15 mm)"], ["moderate", "Moderate (25.4 / 19.1 mm)"], ["wide", "Wide (35 mm)"]], "custom");
   preset.select.addEventListener("change", () => {
+    if (preset.select.value === "moderate") { top.value = "25.4"; bottom.value = "25.4"; left.value = "19.1"; right.value = "19.1"; return; }
     const value = ({ normal: 25, narrow: 15, wide: 35 } as Record<string, number>)[preset.select.value];
     if (value === undefined) return;
     for (const input of [top, right, bottom, left]) input.value = String(value);
@@ -211,6 +240,7 @@ export async function pageSetupDialog(ctx: DocCtx): Promise<void> {
   const body = h("div", { class: "stack" },
     sections.length > 1 ? h("p", { class: "muted", text: `Editing ${sectionLabel(sections, sectionId)}.` }) : null,
     h("div", { class: "grid-2" }, size.root, orientation.root), custom,
+    bookNote,
     h("fieldset", {}, h("legend", { text: "Margins (mm)" }), preset.root, h("div", { class: "grid-4" }, labelled("Top", top), labelled("Right", right), labelled("Bottom", bottom), labelled("Left", left))),
     h("details", {}, h("summary", { text: "Header and footer positions" }),
       h("div", { class: "grid-2" }, labelled("Header distance from top (mm)", header), labelled("Footer distance from bottom (mm)", footer), defaultHeader.root, defaultFooter.root)),
@@ -231,7 +261,8 @@ export async function pageSetupDialog(ctx: DocCtx): Promise<void> {
       if (![pageWidth, pageHeight, ...Object.values(m)].every((v) => Number.isFinite(v) && v >= 0)) {
         error.show("Enter valid finite page dimensions and margins."); return undefined;
       }
-      if (m.left + m.right > pageWidth - 25 || m.top + m.bottom > pageHeight - 25) { error.show("The margins leave less than 25 mm for text. Make them smaller."); return undefined; }
+      const tooTight = problem(pageWidth, pageHeight, m, g.book);
+      if (tooTight) { error.show(tooTight); return undefined; }
       const headerMm = defaultHeader.input.checked ? null : mm(header);
       const footerMm = defaultFooter.input.checked ? null : mm(footer);
       if ((headerMm !== null && (!Number.isFinite(headerMm) || headerMm < 0)) ||

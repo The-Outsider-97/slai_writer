@@ -38,6 +38,11 @@ export interface Block {
 }
 
 export interface Margins { top: number; right: number; bottom: number; left: number }
+/** Mirrored margins and the binding gutter of a section (``slai.writer.book_layouts``). In a mirrored section the stored left margin is the inside one and the
+ *  right margin the outside one, of a right-hand page (page 1 and every odd page). The gutter is extra binding space added to the inside margin; it is never stored in the margins. */
+/** The text of a header or footer on left-hand (even) pages. */
+export interface EvenBand { left?: string; center?: string; right?: string }
+export interface BookLayout { mirror?: boolean; gutter_mm?: number; gutter_position?: "left" | "right" | "top"; mirror_edges?: boolean; odd_even?: boolean; header_even?: EvenBand; footer_even?: EvenBand }
 export interface PageSetup { size?: string; orientation?: string; width_mm?: number; height_mm?: number; margins_mm?: Partial<Margins>; header_mm?: number; footer_mm?: number }
 export interface BandTextFormat { font_family?: string; font_size_pt?: number; color?: string; bold?: boolean; italic?: boolean; underline?: boolean }
 export interface BandRun { text: string; format?: BandTextFormat }
@@ -64,6 +69,7 @@ export interface WriterExt {
   /** The layer a block is on when it is not the one its kind belongs to (text on Text, pictures on Illustrations). */
   layer_of?: Record<string, string>;
   column_layouts?: Record<string, ColumnLayout>;
+  book_layouts?: Record<string, BookLayout>;
   view?: Record<string, unknown>; dictionary?: string[]; spell_ignore?: string[]; proof_ignore?: string[]; locks?: Record<string, { label?: string; summary?: string }>;
   source_status?: Record<string, { status: string; date: string; note?: string }>; signature_marks?: unknown;
 }
@@ -101,7 +107,7 @@ export type Op = { op: string; label?: string; [k: string]: unknown };
 /* ------------------------------------------------------------------------------------------------ application */
 export interface Prefs {
   theme: "system" | "light" | "dark" | "contrast"; scale: number; motion: "system" | "reduce"; autosave: boolean; autosave_seconds: number; language: string;
-  page_size: string; orientation: string; units: "mm" | "in"; zoom: number; zoom_mode: "custom" | "height" | "width"; show_rulers: boolean; show_guides: boolean;
+  page_size: string; orientation: string; units: "mm" | "in"; zoom: number; zoom_mode: "custom" | "height" | "width" | "entire"; view_pages: 1 | 2 | 3 | 4; book_view: "facing" | "single"; show_rulers: boolean; show_guides: boolean;
   spell: boolean; grammar: boolean; style: boolean; ai_enabled: boolean; ai_cloud: boolean; ai_notes: boolean; ai_budget: number; side_panel: boolean;
   cursor_default: string; cursor_drag: string; cursor_draw: string; cursor_text: string; last_folder: string; wizard_done: boolean; lookup_online: boolean;
 }

@@ -5,7 +5,9 @@
  *  page count shown here is an approximation, and the status bar says so. */
 import { h, s, glyph, openMenu, promptDialog } from "./kit.js";
 import { MM_PX, roman } from "./textops.js";
-import type { PageGeometry } from "./model.js";
+import { geometryFor, type PageGeometry } from "./model.js";
+import { lineNames, runningBand } from "./book_layout.js";
+import { arrange, fitFraction, pagesInRow, type Arrangement, type FitMode, type PerRow } from "./arrangement.js";
 import type { BandTextFormat, GuideSet, HeaderFooter, Margins } from "./types.js";
 import { regionCss, type ColumnSpec } from "./column_layout.js";
 
@@ -31,7 +33,8 @@ export interface LayoutInput {
 export interface PageEvents {
   rulerDouble(): void;
   pageDouble(sheetIndex: number, section: string | undefined, xMm: number, yMm: number): void;
-  margin(section: string | undefined, side: keyof Margins, mm: number): void;
+  /** A margin line was moved on the sheet at position `physical` (1-based): the side is the physical side of that sheet, which may be the inside or the outside margin. */
+  margin(section: string | undefined, side: keyof Margins, mm: number, physical: number): void;
   /** Where the header or the footer text sits: millimetres from the top edge (header) or the bottom edge (footer) of the page. */
   band(section: string | undefined, edge: "header" | "footer", mm: number): void;
   guideMove(axis: "v" | "h", index: number, mm: number | null): void;
@@ -39,7 +42,8 @@ export interface PageEvents {
 }
 
 export interface Sheet {
-  el: HTMLElement; body: HTMLElement; foot: HTMLElement; geometry: PageGeometry; capacity: number; blocks: HTMLElement[]; section: string | undefined; number: number;
+  /** `geometry` has the margins of this sheet's own side (see `geometryFor`); `base` is the section's geometry before that. */
+  el: HTMLElement; body: HTMLElement; foot: HTMLElement; geometry: PageGeometry; base: PageGeometry; capacity: number; blocks: HTMLElement[]; section: string | undefined; number: number;
 }
 
 const NUMBER_FORMATS: Record<string, (n: number) => string> = {
@@ -123,6 +127,9 @@ export class PageView {
   private rulerSvg: SVGSVGElement | null = null;
   sheets: Sheet[] = [];
   zoom = 1;
+  /** How the sheets sit on the desk (one, two, three or four side by side, or the two-page book view). Arrangement only: the document and the layout are untouched. */
+  private view: { perRow: PerRow; facing: boolean } = { perRow: 1, facing: false };
+  private slot: HTMLElement | null = null;
   private last: LayoutInput | null = null;
   /** The column settings of the sections that have columns, by section id. */
   private colSpecs = new Map<string, ColumnSpec>();
@@ -190,6 +197,7 @@ export class PageView {
       }
     }
     if (!this.sheets.length) open(undefined);
+    this.applyArrangement();
     this.decorate(input);
     this.fit();
     this.placed();
@@ -197,7 +205,8 @@ export class PageView {
   }
 
   private newSheet(input: LayoutInput, section: string | undefined, number: number): Sheet {
-    const geometry = input.geometry(section);
+    const base = input.geometry(section);
+    const geometry = geometryFor(base, number);
     const wPx = geometry.widthMm * MM_PX;
     const hPx = geometry.heightMm * MM_PX;
     const m = geometry.margins;
@@ -207,7 +216,7 @@ export class PageView {
     body.style.setProperty("margin", `${m.top * MM_PX}px ${m.right * MM_PX}px ${m.bottom * MM_PX}px ${m.left * MM_PX}px`);
     const foot = h("div", { class: "foot", attrs: { contenteditable: "false", role: "doc-endnotes", "aria-label": "Footnotes" } });
     body.appendChild(foot);
-    const el = h("section", { class: "sheet", data: { page: String(number), section: section ?? "" }, attrs: { "aria-label": `Page ${number}` } });
+    const el = h("section", { class: "sheet", data: { page: String(number), section: section ?? "", side: number % 2 === 1 ? "right" : "left" }, attrs: { "aria-label": `Page ${number}` } });
     el.style.setProperty("width", `${wPx}px`);
     el.style.setProperty("height", `${hPx}px`);
     if (input.background) {
@@ -215,7 +224,7 @@ export class PageView {
       el.style.setProperty("--page-ink", luminance(input.background) < 0.35 ? "#f4f4f4" : "#1b1b1b");
     }
     el.appendChild(body);
-    return { el, body, foot, geometry, capacity, blocks: [], section, number };
+    return { el, body, foot, geometry, base, capacity, blocks: [], section, number };
   }
 
   private place(sheet: Sheet, block: LayoutBlock): void {
@@ -262,8 +271,10 @@ export class PageView {
   /** A region that is the last thing on its sheet is as tall as the space left (the text fills the first column to the bottom of the page, then the next);
    *  a region with something after it on the sheet, or one set to balance, is as tall as its balanced columns need. */
   private fitRegions(sheet: Sheet): void {
+    const regions = Array.from(sheet.body.querySelectorAll<HTMLElement>(":scope > .cols"));
+    if (!regions.length) return;                          // no column region on this sheet: nothing to measure (measuring would force a layout for every block placed)
     const base = sheet.body.getBoundingClientRect().top;
-    for (const region of Array.from(sheet.body.querySelectorAll<HTMLElement>(":scope > .cols"))) {
+    for (const region of regions) {
       const spec = this.colSpecs.get(region.dataset["key"] ?? "");
       if (!spec) continue;
       const balanced = spec.balance || region.nextElementSibling !== sheet.foot;
@@ -441,10 +452,25 @@ export class PageView {
       if (!sheet.blocks.length) { sheet.el.remove(); this.sheets.splice(i, 1); }
     }
     this.sheets.forEach((sheet, i) => { sheet.number = i + 1; });
+    this.applySides();
     const changed = this.sheets.length !== before;
     this.fit();
     this.placed();
     return changed;
+  }
+
+  /** A sheet that moved to the other side of a book (a page was added or taken away before it) gets the margins of its new side. The text area has the same
+   *  width on both sides, so nothing has to be laid out again. */
+  private applySides(): void {
+    for (const sheet of this.sheets) {
+      const geometry = geometryFor(sheet.base, sheet.number);
+      sheet.el.dataset["page"] = String(sheet.number);
+      sheet.el.dataset["side"] = sheet.number % 2 === 1 ? "right" : "left";
+      if (geometry.margins.left === sheet.geometry.margins.left && geometry.margins.right === sheet.geometry.margins.right) continue;
+      sheet.geometry = geometry;
+      const m = geometry.margins;
+      sheet.body.style.setProperty("margin", `${m.top * MM_PX}px ${m.right * MM_PX}px ${m.bottom * MM_PX}px ${m.left * MM_PX}px`);
+    }
   }
 
   /** Redraw headers, footers, page numbers, margin lines, guides and rulers without moving any block. */
@@ -492,9 +518,12 @@ export class PageView {
       sheet.el.dataset["printed"] = printed ?? "";
       const values = { page: printed ?? "", pages: String(pages), title: input.title };
       const m = sheet.geometry.margins;
-      const band = (edge: "header" | "footer", spec: HeaderFooter | undefined): HTMLElement | null => {
+      const band = (edge: "header" | "footer", ordinary: HeaderFooter | undefined): HTMLElement | null => {
+        // A left-hand page may have its own text; in a book the outer edge is the left one, so the ordinary text is swapped there (see runningBand).
+        const { spec, flipped } = runningBand(edge, ordinary, sheet.geometry.book, sheet.number);
         if (!spec || (!spec.left && !spec.center && !spec.right)) return null;
-        const cell = (part: "left" | "center" | "right", cls: string): HTMLElement => {
+        const cell = (shown: "left" | "center" | "right", cls: string): HTMLElement => {
+          const part = flipped && shown !== "center" ? (shown === "left" ? "right" : "left") : shown;
           const node = h("span", { class: cls });
           const paint = (target: HTMLElement, format: BandTextFormat | undefined): void => {
             if (format?.font_family) target.style.fontFamily = format.font_family;
@@ -532,7 +561,8 @@ export class PageView {
       sheet.el.setAttribute("aria-label", `Page ${i + 1} of ${pages}`);
     });
     this.vlayer.replaceChildren();
-    this.vrulers = input.showRulers ? this.sheets.map((sheet) => ({ wrap: this.verticalRuler(sheet), sheet })) : [];
+    const rowStarts = new Set(this.arrangement.rows.map((_, row) => pagesInRow(this.arrangement, row)[0]));        // pages side by side share the scale at the left
+    this.vrulers = input.showRulers ? this.sheets.flatMap((sheet, at) => (rowStarts.has(at) ? [{ wrap: this.verticalRuler(sheet), sheet }] : [])) : [];
     for (const v of this.vrulers) this.vlayer.appendChild(v.wrap);
     this.drawRuler(input);
     this.placeVRulers();
@@ -557,8 +587,8 @@ export class PageView {
     const W = g.widthMm;
     const H = g.heightMm;
     switch (kind) {
-      case "left": return { kind, axis: "v", mm: m.left, name: "Left margin", min: 0, max: W - m.right - MIN_BODY };
-      case "right": return { kind, axis: "v", mm: W - m.right, name: "Right margin", min: m.left + MIN_BODY, max: W };
+      case "left": return { kind, axis: "v", mm: m.left, name: lineNames(g.book, sheet.number).left, min: 0, max: W - m.right - MIN_BODY };
+      case "right": return { kind, axis: "v", mm: W - m.right, name: lineNames(g.book, sheet.number).right, min: m.left + MIN_BODY, max: W };
       case "top": return { kind, axis: "h", mm: m.top, name: "Top margin", min: 0, max: H - m.bottom - MIN_BODY };
       case "bottom": return { kind, axis: "h", mm: H - m.bottom, name: "Bottom margin", min: m.top + MIN_BODY, max: H };
       case "header": return { kind, axis: "h", mm: g.headerMm, name: "Header", min: 0, max: H - g.footerMm - MIN_BODY };
@@ -569,9 +599,10 @@ export class PageView {
   private commit(sheet: Sheet, kind: LineKind, mm: number): void {
     const g = sheet.geometry;
     const value = Math.round(mm * 2) / 2;
-    if (kind === "left" || kind === "top") this.events.margin(sheet.section, kind, value);
-    else if (kind === "right") this.events.margin(sheet.section, "right", g.widthMm - value);
-    else if (kind === "bottom") this.events.margin(sheet.section, "bottom", g.heightMm - value);
+    if (kind === "left") this.events.margin(sheet.section, "left", value, sheet.number);
+    else if (kind === "top") this.events.margin(sheet.section, "top", value, sheet.number);
+    else if (kind === "right") this.events.margin(sheet.section, "right", g.widthMm - value, sheet.number);
+    else if (kind === "bottom") this.events.margin(sheet.section, "bottom", g.heightMm - value, sheet.number);
     else if (kind === "header") this.events.band(sheet.section, "header", value);
     else this.events.band(sheet.section, "footer", g.heightMm - value);
   }
@@ -791,9 +822,10 @@ export class PageView {
 
   private drawRuler(input: LayoutInput): void {
     this.hruler.replaceChildren();
-    this.hruler.toggleAttribute("hidden", !input.showRulers);
+    const multi = this.view.facing || this.view.perRow > 1;        // one ruler cannot belong to several pages side by side
+    this.hruler.toggleAttribute("hidden", !input.showRulers || multi);
     const first = this.sheets[0];
-    if (!first || !input.showRulers) { this.rulerSvg = null; return; }
+    if (!first || !input.showRulers || multi) { this.rulerSvg = null; return; }
     this.rulerSvg = this.ticks(first.geometry.widthMm, false, first, ["left", "right"], "Horizontal ruler. Handles: left and right margin");
     this.hruler.appendChild(h("div", { class: "hruler-inner" }, this.rulerSvg));
     this.placeRuler();
@@ -826,16 +858,66 @@ export class PageView {
     this.placeRuler();
   }
 
-  /** The zoom that makes a whole page fit the window by height or by width. */
-  fitZoom(mode: "height" | "width"): number {
+  /* ------------------------------------------------------------------------------------------------- arrangement */
+  /** Put the sheets one, two, three or four to a row, or in the book view (page 1 alone on the right, then 2-3, 4-5). Only where the sheets sit changes. */
+  setArrangement(perRow: PerRow, facing: boolean): void {
+    if (this.view.perRow === perRow && this.view.facing === facing) return;
+    const keep = this.anchor();
+    this.view = { perRow, facing };
+    this.applyArrangement();
+    if (this.last) { this.redecorate(); }
+    this.fit();
+    this.placeRuler();
+    this.placed();
+    this.restoreAnchor(keep);
+  }
+
+  get arrangement(): Arrangement { return arrange(this.sheets.length, this.view.perRow, this.view.facing); }
+  get arrangementMode(): { perRow: PerRow; facing: boolean } { return { ...this.view }; }
+
+  private applyArrangement(): void {
+    const { perRow, facing } = this.view;
+    const per = facing ? 2 : perRow;
+    this.host.dataset["perRow"] = String(per);
+    this.host.toggleAttribute("data-facing", facing && this.sheets.length > 0);
+    this.host.style.setProperty("--per-row", String(per));
+    this.slot?.remove();
+    this.slot = null;
     const first = this.sheets[0];
-    if (!first) return 100;
+    if (facing && first) {                                   // the empty place beside page 1: a place on the desk, never a page of the document
+      const slot = h("div", { class: "sheet-slot", attrs: { "aria-hidden": "true", contenteditable: "false" } });
+      slot.style.setProperty("width", `${first.geometry.widthMm * MM_PX}px`);
+      slot.style.setProperty("height", `${first.geometry.heightMm * MM_PX}px`);
+      this.host.insertBefore(slot, this.host.firstChild);
+      this.slot = slot;
+    }
+  }
+
+  /** The page at the top of the window and how far into it the window is, so that changing the arrangement keeps the reader where they were. */
+  private anchor(): { sheet: number; fraction: number } {
+    const view = this.scroller.getBoundingClientRect();
+    const index = Math.max(0, this.sheets.findIndex((sh) => sh.el.getBoundingClientRect().bottom > view.top + 1));
+    const sheet = this.sheets[index];
+    if (!sheet) return { sheet: 0, fraction: 0 };
+    const r = sheet.el.getBoundingClientRect();
+    return { sheet: index, fraction: Math.max(0, Math.min(1, (view.top - r.top) / Math.max(1, r.height))) };
+  }
+
+  private restoreAnchor(at: { sheet: number; fraction: number }): void {
+    const sheet = this.sheets[at.sheet];
+    if (!sheet) return;
+    const view = this.scroller.getBoundingClientRect();
+    const r = sheet.el.getBoundingClientRect();
+    this.scroller.scrollTop += r.top + at.fraction * r.height - view.top;
+  }
+
+  /** The zoom that makes the whole arrangement fit the window: its widest row across, its tallest page down, or both (`entire`). */
+  fitZoom(mode: FitMode): number {
+    if (!this.sheets.length) return 100;
     const pad = 56;
-    const availW = this.scroller.clientWidth - pad - 28;
-    const availH = this.scroller.clientHeight - pad;
-    const w = first.geometry.widthMm * MM_PX;
-    const hh = first.geometry.heightMm * MM_PX;
-    return Math.round(Math.max(10, Math.min(400, ((mode === "width" ? availW / w : availH / hh) * 100))));
+    const view = { width: Math.max(50, this.scroller.clientWidth - pad - 28), height: Math.max(50, this.scroller.clientHeight - pad) };
+    const boxes = this.sheets.map((sheet) => ({ widthMm: sheet.geometry.widthMm, heightMm: sheet.geometry.heightMm }));
+    return Math.round(fitFraction(mode, this.arrangement, boxes, view, MM_PX, 28) * 100);
   }
 
   /** Size the scrolling area to the scaled pages and centre them; panels open beside a page push the page away from the edge, never off it. */

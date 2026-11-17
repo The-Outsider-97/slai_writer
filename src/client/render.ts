@@ -146,6 +146,8 @@ function objectNode(seg: Segment, ctx: RenderContext): HTMLElement {
 /** Replace the contents of a text element with the block's formatted text. */
 export function fillText(el: HTMLElement, ctx: RenderContext, block: Block): void {
   const kids: Node[] = segments(block).map((seg) => pieceFor(seg, ctx, block));
+  // text that ends with a line break needs a placeholder, or the caret has no line to sit on (it counts for nothing in the text: see domtext.serialise)
+  if (block.text.endsWith("\n")) kids.push(h("br"));
   el.replaceChildren(...kids);
 }
 

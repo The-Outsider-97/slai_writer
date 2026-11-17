@@ -2,10 +2,17 @@
 import { api } from "./net.js";
 import { shapeOf } from "./shape.js";
 import { PAGE_MM } from "./textops.js";
-import type { Block, CommentThread, DocMeta, DocState, Margins, Op, Patch, Section, Stats, WriterExt } from "./types.js";
+import { bookOf, effectiveMargins } from "./book_layout.js";
+import type { BookLayout, Block, CommentThread, DocMeta, DocState, Margins, Op, Patch, Section, Stats, WriterExt } from "./types.js";
 
 /** `headerMm` and `footerMm` are where the header and footer text sit, measured from the top and from the bottom edge of the page. */
-export interface PageGeometry { widthMm: number; heightMm: number; margins: Margins; columns: number; section: Section; headerMm: number; footerMm: number }
+/** `margins` are those of a right-hand page (page 1 and every odd one), the gutter included once: the text area is the same on every page, so everything that only
+ *  needs its size can use them. `stored` are the margins as the document keeps them (without the gutter), and `book` the section's mirrored margins and gutter.
+ *  A sheet gets its own margins from them (see `geometryFor`). */
+export interface PageGeometry { widthMm: number; heightMm: number; margins: Margins; stored: Margins; book: BookLayout | undefined; columns: number; section: Section; headerMm: number; footerMm: number }
+
+/** The geometry of the sheet at this 1-based position in the document: its margins are those of its side of the spread. */
+export function geometryFor(g: PageGeometry, physical: number): PageGeometry { return { ...g, margins: effectiveMargins(g.stored, g.book, physical) }; }
 
 /** Where header and footer text sit when the document says nothing: in the middle of the margin. */
 export const defaultBand = (marginMm: number): number => Math.max(2, marginMm / 2 - 3);
@@ -92,9 +99,11 @@ export class DocModel {
     if (page.width_mm && page.height_mm) { w = page.width_mm; h = page.height_mm; }
     if (page.orientation === "landscape" && w < h) [w, h] = [h, w];
     const m = page.margins_mm ?? {};
-    const margins = { top: m.top ?? DEFAULT_MARGIN, right: m.right ?? DEFAULT_MARGIN, bottom: m.bottom ?? DEFAULT_MARGIN, left: m.left ?? DEFAULT_MARGIN };
+    const stored = { top: m.top ?? DEFAULT_MARGIN, right: m.right ?? DEFAULT_MARGIN, bottom: m.bottom ?? DEFAULT_MARGIN, left: m.left ?? DEFAULT_MARGIN };
+    const book = bookOf(this.meta, section.id);
+    const margins = effectiveMargins(stored, book, 1);
     return {
-      widthMm: w, heightMm: h, columns: section.columns ?? 1, section, margins,
+      widthMm: w, heightMm: h, columns: section.columns ?? 1, section, margins, stored, book,
       headerMm: page.header_mm ?? defaultBand(margins.top), footerMm: page.footer_mm ?? defaultBand(margins.bottom),
     };
   }

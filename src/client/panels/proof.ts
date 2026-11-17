@@ -7,14 +7,14 @@ import type { DocCtx, Panel } from "../docctx.js";
 import { api, errorText } from "../net.js";
 import type { DocState, Patch } from "../types.js";
 import { button, checkbox, fill, notice, selectField, statusBadge } from "../widgets.js";
-import { ProofStatus } from "../proof_status.js";
+import { ProofStatus, Recovery, retryAfterOf } from "../proof_status.js";
 
 /** One finding, as Writer's proofreading layer returns it: category, exact range, explanation, replacements, confidence and provider. */
 interface Issue {
   id: string; kind: "spelling" | "grammar" | "style"; category: string; block: string; start: number; end: number; text: string; message?: string;
   suggestions: string[]; replacement?: string | null; severity?: string; confidence?: number; rule?: string; provider?: string;
 }
-type ProofResponse = { available: boolean; reason?: string | null; issues: Issue[]; version: number; truncated?: boolean; providers?: string[]; skipped?: Array<{ block: string; reason: string }> };
+type ProofResponse = { available: boolean; reason?: string | null; retryAfter?: number | null; issues: Issue[]; version: number; truncated?: boolean; providers?: string[]; skipped?: Array<{ block: string; reason: string }> };
 const CATEGORY: Record<string, { label: string; tone: "danger" | "warn" | "idle" }> = {
   spelling: { label: "Spelling", tone: "danger" }, grammar: { label: "Grammar", tone: "warn" }, agreement: { label: "Agreement", tone: "warn" }, usage: { label: "Word choice", tone: "warn" },
   punctuation: { label: "Punctuation", tone: "warn" }, capitalization: { label: "Capital letters", tone: "warn" }, style: { label: "Style", tone: "idle" },
@@ -41,6 +41,9 @@ export function createProofPanel(ctx: DocCtx): Panel {
   let current = -1;                    // the issue Next / Previous last went to
   const pendingBlocks = new Set<string>();
   const status = new ProofStatus();   // checks that said they cannot run, and why
+  const recovery = new Recovery();            // bounded automatic retries of a service that failed to load
+  const recoveryTimers = new Map<"spell" | "grammar", number>();
+  const waiting = new Set<"spell" | "grammar">();   // retries due while the page was hidden; they run when it is visible again
   const notes = new Map<string, string>();   // reasons a check ran only in part (an optional provider is missing, a paragraph was in another language)
   const ignoredOnce = new Set<string>();     // ids of findings the person dismissed; kept for this session so a recheck does not bring them back
   const sequence = { spell: 0, grammar: 0 };
@@ -123,7 +126,11 @@ export function createProofPanel(ctx: DocCtx): Panel {
 
   const paintIssues = (): void => {
     clear(issuesBox);
-    for (const n of status.notices({ spell: app.prefs.spell, grammar: app.prefs.grammar })) issuesBox.appendChild(notice(n.reason, "warn", n.title));
+    for (const n of status.notices({ spell: app.prefs.spell, grammar: app.prefs.grammar })) {
+      issuesBox.appendChild(notice(n.reason, "warn", n.title));
+      if (recoveryTimers.has(n.kind) || waiting.has(n.kind)) issuesBox.appendChild(h("p", { class: "fine", text: "Writer will try again by itself. You can also press Check." }));
+      else if (recovery.exhausted(n.kind)) issuesBox.appendChild(h("p", { class: "fine", text: "Writer has stopped trying by itself. Press Check to try again." }));
+    }
     for (const [, reason] of notes) issuesBox.appendChild(notice(reason, "info"));
     if (checkedVersion < 0) { issuesBox.appendChild(h("p", { class: "fine", text: "Proofreading checks nearby text automatically when available. You can also check the selection or entire document using the buttons above." })); return; }
     if (checkedVersion !== ed.model.version && !ours) issuesBox.appendChild(notice("The text has changed since this check. Each suggestion is still verified against the current text before it is applied, but check again for a fresh list.", "info"));
@@ -161,23 +168,27 @@ export function createProofPanel(ctx: DocCtx): Panel {
     if (!app.prefs[what === "spell" ? "spell" : "grammar"]) return;
     if (btn) btn.disabled = true;
     const mine = ++sequence[what];
+    if (btn || whole) { cancelRecovery(what); recovery.reset(what); }          // the person asked: start over, and do not leave an old retry queued
     try {
       await ed.whenIdle();
       const blocks = changed ?? (whole ? undefined : targets());
       const sent = new Map<string, string>();
       for (const id of blocks ?? ed.model.order) sent.set(id, ed.model.block(id)?.text ?? "");
       const kinds: string[] = [...KINDS[what]].filter((k) => k !== "style" || app.prefs.style);
-      const out = await api.post<ProofResponse>(`/docs/${encodeURIComponent(ctx.sid)}/proof`, { ...(blocks ? { blocks } : {}), kinds });
+      const out = await api.post<ProofResponse>(`/docs/${encodeURIComponent(ctx.sid)}/proof`, { ...(blocks ? { blocks } : {}), kinds, retry: Boolean(btn) || whole });
       if (mine !== sequence[what]) { for (const id of blocks ?? []) pendingBlocks.add(id); return; }          // a newer check superseded this one
       if (!out.available) {
         status.report(what, out.reason ?? "This check is not available.");
         issues = issues.filter((i) => !(kinds as string[]).includes(i.kind));          // marks from before the checker became unavailable would be stale
+        scheduleRecovery(what, retryAfterOf(out));
         marks(); paintIssues();
         if (btn) toast(out.reason ?? "This check is not available.", { kind: "info", timeoutMs: 9000 });
         return;
       }
       status.report(what, null);
       if (out.reason) notes.set(what, out.reason); else notes.delete(what);
+      const again = retryAfterOf(out);                                                // an optional part failed to load: the rest ran, and the part is tried again
+      if (again !== null) scheduleRecovery(what, again); else { cancelRecovery(what); recovery.reset(what); }
       // Never attach old offsets to text changed during the check: keep the result for the blocks that are unchanged, queue the rest again.
       const fresh = (id: string): boolean => (ed.model.block(id)?.text ?? "") === sent.get(id);
       const stale = [...sent.keys()].filter((id) => !fresh(id));
@@ -195,6 +206,7 @@ export function createProofPanel(ctx: DocCtx): Panel {
       if (why) {
         status.report(what, why);
         issues = issues.filter((i) => !(KINDS[what] as readonly string[]).includes(i.kind));
+        if (e instanceof ApiError) { const wait = retryAfterOf(e.details); if (wait !== null) scheduleRecovery(what, wait); }   // only a service that failed to load is retried, never a refusal
         marks(); paintIssues();
       } else if (btn) {
         clear(issuesBox);
@@ -204,7 +216,30 @@ export function createProofPanel(ctx: DocCtx): Panel {
     } finally { if (btn) btn.disabled = false; }
   };
 
-  const clearMarks = (): void => { issues = []; checkedVersion = -1; current = -1; notes.clear(); status.reset(); marks(); paintIssues(); };
+  /** Try a service that failed to load again after the pause the server asked for. Only while the page is visible and the check is switched on; at most
+   *  RECOVERY_LIMIT times in a row. The attempt covers the first part of the document, like the first automatic check; typing is never waited for. */
+  const cancelRecovery = (what: "spell" | "grammar"): void => { window.clearTimeout(recoveryTimers.get(what)); recoveryTimers.delete(what); waiting.delete(what); };
+  const scheduleRecovery = (what: "spell" | "grammar", seconds: number | null): void => {
+    cancelRecovery(what);
+    const delay = recovery.plan(what, seconds);
+    if (delay === null) return;
+    recoveryTimers.set(what, window.setTimeout(() => {
+      recoveryTimers.delete(what);
+      if (document.visibilityState !== "visible") { waiting.add(what); return; }
+      attempt(what);
+    }, delay));
+  };
+  const attempt = (what: "spell" | "grammar"): void => {
+    waiting.delete(what);
+    if (!app.prefs[what]) return;
+    status.reset(what);
+    void check(what, undefined, ed.model.order.slice(0, 100));
+  };
+  const onVisible = (): void => { if (document.visibilityState === "visible") for (const what of [...waiting]) attempt(what); };
+  document.addEventListener("visibilitychange", onVisible);
+  const resetRecovery = (): void => { for (const what of ["spell", "grammar"] as const) cancelRecovery(what); recovery.reset(); };
+
+  const clearMarks = (): void => { resetRecovery(); issues = []; checkedVersion = -1; current = -1; notes.clear(); status.reset(); marks(); paintIssues(); };
 
   const scheduleAutomatic = (blocks: string[]): void => {
     for (const id of blocks) {
@@ -363,13 +398,14 @@ export function createProofPanel(ctx: DocCtx): Panel {
       if (e.type === "patch") {
         const changed = Object.keys(e.patch.blocks);
         if (issues.length && !ours) { issues = issues.filter((i) => !changed.includes(i.block)); marks(); paintIssues(); }
-        if (e.patch.document && "language" in e.patch.document) { status.reset(); scheduleAutomatic(ed.model.order.slice(0, 100)); }   // a new language may be covered
+        if (e.patch.document && "language" in e.patch.document) { resetRecovery(); status.reset(); scheduleAutomatic(ed.model.order.slice(0, 100)); }   // a new language may be covered
         scheduleAutomatic(changed);
       }
       if (e.type === "reloaded") { clearMarks(); scheduleAutomatic(ed.model.order.slice(0, 100)); }
     }),
     app.events.on((e) => {
       if (e.type === "prefs") {
+        resetRecovery();
         status.reset();
         paintAi();
         issues = issues.filter((i) => i.kind === "spelling" ? app.prefs.spell : i.kind === "style" ? app.prefs.style && app.prefs.grammar : app.prefs.grammar);
@@ -381,5 +417,5 @@ export function createProofPanel(ctx: DocCtx): Panel {
   ];
   // Check a bounded initial window; subsequent document edits are incremental.
   scheduleAutomatic(ed.model.order.slice(0, 100));
-  return { el: root, refresh: () => { paintAi(); }, destroy: () => { window.clearTimeout(autoTimer); stop(); off.forEach((f) => f()); ed.decor.clear("typo"); ed.decor.clear("grammar"); ed.decor.clear("style"); } };
+  return { el: root, refresh: () => { paintAi(); }, destroy: () => { window.clearTimeout(autoTimer); resetRecovery(); document.removeEventListener("visibilitychange", onVisible); stop(); off.forEach((f) => f()); ed.decor.clear("typo"); ed.decor.clear("grammar"); ed.decor.clear("style"); } };
 }

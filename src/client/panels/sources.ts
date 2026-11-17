@@ -8,6 +8,7 @@ import type { DocCtx, Panel } from "../docctx.js";
 import { api, errorText } from "../net.js";
 import type { DocState, Patch, SourceRow } from "../types.js";
 import { tocCoverAnchor } from "../toc_position.js";
+import { nameReview } from "../names_ui.js";
 import { button, checkbox, emptyState, notice, selectField, statusBadge, fill } from "../widgets.js";
 
 interface SourcesData { sources: SourceRow[]; statuses: Record<string, string>; unverified: string[] }
@@ -61,6 +62,8 @@ export async function sourceDialog(ctx: DocCtx, existing?: SourceRow): Promise<s
   const text = (key: string, label: string, hint?: string, max = 300): HTMLElement => labelled(label, h("input", { type: "text", name: key, value: String(d[key] ?? ""), maxLength: max, attrs: { autocomplete: "off" } }), hint ? { hint } : {});
   const authors = h("textarea", { rows: 3, name: "authors", maxLength: 2000, value: Array.isArray(d["authors"]) ? (d["authors"] as string[]).join("\n") : "" });
   const editors = h("textarea", { rows: 2, name: "editors", maxLength: 2000, value: Array.isArray(d["editors"]) ? (d["editors"] as string[]).join("\n") : "" });
+  const authorReview = nameReview(authors, "authors");
+  const editorReview = nameReview(editors, "editors");
   const sourceType = selectField("Source type", [["article-journal", "Journal article"], ["book", "Book"], ["chapter", "Book chapter"],
     ["webpage", "Website"], ["report", "Report"], ["thesis", "Thesis / dissertation"], ["paper-conference", "Conference paper"],
     ["article", "Preprint / article"], ["dataset", "Dataset"], ["software", "Software"], ["motion_picture", "Video"],
@@ -69,9 +72,9 @@ export async function sourceDialog(ctx: DocCtx, existing?: SourceRow): Promise<s
   const error = h("p", { class: "form-error", attrs: { role: "alert" }, hidden: true });
   const body = h("form", { class: "stack", attrs: { novalidate: true } },
     notice("Enter only what you can see on the real work. Writer will not fill in or correct missing details: anything left empty stays empty, and shows as “n.d.” or is listed as a problem.", "info"),
-    sourceType.root, text("title", "Title (required)", undefined, 1000), labelled("Authors (one per line)", authors),
+    sourceType.root, text("title", "Title (required)", undefined, 1000), labelled("Authors (one per line)", authors, { hint: "Write Family, Given (García Márquez, Gabriel) or {Organisation} to say exactly how a name reads. Anything else is Writer’s best reading, shown below." }), authorReview.root,
     h("details", {}, h("summary", { text: "Additional source-specific metadata" }),
-      labelled("Editors (one per line)", editors), text("organization", "Organization as author", undefined, 300),
+      labelled("Editors (one per line)", editors), editorReview.root, text("organization", "Organization as author", undefined, 300),
       h("div", { class: "grid-3" }, text("published", "Publication date", "YYYY-MM-DD", 10),
         text("edition", "Edition", undefined, 40), text("isbn", "ISBN", undefined, 40))),
     h("div", { class: "grid-3" }, text("year", "Year", "Four digits", 4), text("volume", "Volume", undefined, 40), text("issue", "Issue", undefined, 40)),
@@ -79,6 +82,7 @@ export async function sourceDialog(ctx: DocCtx, existing?: SourceRow): Promise<s
     h("div", { class: "grid-2" }, text("doi", "DOI", "For example 10.1000/xyz123", 200), text("url", "Link", undefined, 2000)),
     h("div", { class: "grid-2" }, text("accessed", "Date accessed", "YYYY-MM-DD", 10), text("note", "Note", undefined, 2000)),
     existing ? null : status.root, error);
+  authorReview.refresh(); editorReview.refresh();
   const read = (): Record<string, unknown> => {
     const out: Record<string, unknown> = {};
     for (const el of Array.from(body.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input[name], textarea[name]"))) out[el.name] = el.value;
@@ -175,7 +179,7 @@ export async function xrefDialog(ctx: DocCtx): Promise<void> {
     actions: [{ label: "Create cross-reference", kind: "primary", run: async () => {
       try {
         ctx.ed.refocus(sel);
-        await mutate(ctx, () => api.post<Patch>(url(ctx, "xref"), { block: sel.start.block, start: sel.start.offset, end: sel.end.offset, target: target.select.value }));
+        await mutate(ctx, () => api.post<Patch>(url(ctx, "xref"), { block: sel.start.block, start: sel.start.offset, end: sel.end.offset, target: target.select.value, base: ctx.ed.model.version }));
         return true;
       } catch (e) { toast(errorText(e), { kind: "error" }); return undefined; }
     } }],
