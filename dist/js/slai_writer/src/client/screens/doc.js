@@ -358,6 +358,7 @@ export async function docScreen(app, route) {
                     toast(`The rendered view is not available: ${why}`, { kind: "info" });
                     return;
                 }
+                ed.bands.exit(); // the Rendered View is the exported pages: there is nothing to edit in it
                 const sel = ed.recallSelection();
                 const page = editingPdfPage();
                 await ed.whenIdle(); // what was typed is sent first, so the pages drawn are of the text on screen
@@ -614,6 +615,10 @@ export async function docScreen(app, route) {
         if (e.defaultPrevented)
             return;
         const mod = e.ctrlKey || e.metaKey;
+        if (e.key === "Escape" && ed.bands.active && !e.target?.closest?.("dialog, [role=menu]") && ed.bands.escape()) {
+            e.preventDefault();
+            return;
+        }
         if (e.key === "Escape" && rendered && !e.target?.closest?.("dialog, [role=menu]")) {
             e.preventDefault();
             void setRendered(false);
@@ -661,6 +666,13 @@ export async function docScreen(app, route) {
         // New page, new section, new layer, add background, add illustration: the keys of Word, Canva and InDesign where they have one (see the shortcut list in Support)
         else if (inField)
             return; // in a text box elsewhere on the screen these keys keep their own meaning
+        else if (ed.bands.active && (k === "z" || k === "y" || k === "d") && !e.altKey) { // while a header or footer is edited the body has no focus to take these keys
+            e.preventDefault();
+            if (k === "d")
+                void ed.bands.duplicate();
+            else
+                void A.undoRedo(ed, k === "y" || e.shiftKey ? "redo" : "undo");
+        }
         else if (e.key === "Enter" && e.altKey && !e.shiftKey) {
             e.preventDefault();
             runCommand("section-break");

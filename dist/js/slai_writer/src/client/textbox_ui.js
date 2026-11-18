@@ -28,6 +28,10 @@ export async function addTextBox(ctx, preset = TEXTBOX_PRESETS[0]) {
     const { ed } = ctx;
     if (ed.readOnly)
         return undefined;
+    if (ed.bands.active) {
+        drawTextBox(ctx, preset);
+        return undefined;
+    } // in a header or footer a text box is drawn onto the page (it goes into that header or footer)
     const shape = preset.build();
     const sheet = visibleSheet(ctx);
     const body = sheet?.querySelector(".body") ?? null;

@@ -16,6 +16,10 @@ export function allTocs(ed) {
             const look = {
                 preset: stored.preset ?? "custom", leader: stored.leader ?? (core.leader_dots === false ? "none" : "dots"), page_align: stored.page_align ?? "right",
                 hyperlinks: stored.hyperlinks ?? true, numbered: stored.numbered ?? false,
+                page_position: stored.page_position ?? stored.page_align ?? "right",
+                ...(stored.number_align ? { number_align: stored.number_align } : {}), ...(stored.custom_tab_mm !== undefined ? { custom_tab_mm: stored.custom_tab_mm } : {}),
+                ...(stored.number_column_mm !== undefined ? { number_column_mm: stored.number_column_mm } : {}), ...(stored.leader_char ? { leader_char: stored.leader_char } : {}),
+                ...(stored.leader_gap_pt !== undefined ? { leader_gap_pt: stored.leader_gap_pt } : {}), ...(stored.text_align ? { text_align: stored.text_align } : {}),
             };
             info = { id: core.id, title: block, entries: info?.entries ?? [], core, look };
             found.set(core.id, info);
@@ -23,7 +27,7 @@ export function allTocs(ed) {
         else if (info)
             info.entries.push(block);
         else
-            found.set(core.id, { id: core.id, title: block, entries: [block], core, look: { preset: "custom", leader: "dots", page_align: "right", hyperlinks: true, numbered: false } });
+            found.set(core.id, { id: core.id, title: block, entries: [block], core, look: { preset: "custom", leader: "dots", page_align: "right", page_position: "right", hyperlinks: true, numbered: false } });
     }
     return [...found.values()].filter((t) => t.core.role === "title");
 }

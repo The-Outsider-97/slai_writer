@@ -4,12 +4,15 @@ import * as A from "./actions.js";
 import { announce, h, toast } from "./kit.js";
 import { errorText } from "./net.js";
 import { SHAPE_KEY, defaultShape } from "./shape.js";
+import { normalizeShapeCorners } from "./shape_format.js";
 import { openTextBoxEditor } from "./textbox_edit.js";
 import { TEXTBOX_MIN_MM } from "./textbox.js";
 import { MM_PX } from "./textops.js";
 export function beginShapePlacement(ctx, kind, options = {}) {
     if (ctx.ed.readOnly)
         return;
+    // While a header or footer is being edited the shape goes into it (the whole page is the drawing surface), not into the body.
+    const band = ctx.ed.bands.active !== null;
     const host = ctx.ed.page.host;
     const originalCursor = host.style.cursor;
     host.style.cursor = "crosshair";
@@ -43,16 +46,16 @@ export function beginShapePlacement(ctx, kind, options = {}) {
         if (event.button !== 0)
             return;
         const target = event.target;
-        const body = target instanceof Element ? target.closest(".sheet .body") : null;
+        const body = target instanceof Element ? target.closest(band ? ".sheet" : ".sheet .body") : null;
         if (!body)
             return;
-        const sheet = body.closest(".sheet");
+        const sheet = band ? body : body.closest(".sheet");
         if (!sheet)
             return;
         event.preventDefault();
         event.stopImmediatePropagation();
         const { x, y } = mmAt(body, event);
-        current = { body, sheet, startX: x, startY: y, nowX: x, nowY: y, pointerId: event.pointerId };
+        current = { body, sheet, sheetIndex: ctx.ed.page.sheets.findIndex(x => x.el === sheet), startX: x, startY: y, nowX: x, nowY: y, pointerId: event.pointerId };
         ghost = h("div", { class: "shape-insert-preview", attrs: { "aria-hidden": "true" } });
         ghost.style.left = `${x}mm`;
         ghost.style.top = `${y}mm`;
@@ -64,7 +67,7 @@ export function beginShapePlacement(ctx, kind, options = {}) {
             return;
         event.preventDefault();
         event.stopImmediatePropagation();
-        const { x, y } = mmAt(current.body, event);
+        const { x, y } = mmAt(band ? ctx.ed.page.sheets[current.sheetIndex]?.el ?? current.body : current.body, event);
         current.nowX = x;
         current.nowY = y;
         const dx = x - current.startX, dy = y - current.startY;
@@ -92,6 +95,8 @@ export function beginShapePlacement(ctx, kind, options = {}) {
         if (drag > 5) {
             shape.width_mm = Math.max(2, Math.min(1000, Math.abs(state.nowX - state.startX)));
             shape.height_mm = Math.max(2, Math.min(1000, Math.abs(state.nowY - state.startY)));
+            if (shape.kind === "rectangle")
+                shape.corners_mm = normalizeShapeCorners(shape.corners_mm, shape.width_mm, shape.height_mm);
         }
         if (shape.textbox) {
             shape.width_mm = Math.max(TEXTBOX_MIN_MM.width, shape.width_mm);
@@ -100,6 +105,19 @@ export function beginShapePlacement(ctx, kind, options = {}) {
         }
         const posX = Math.max(0, drag > 5 ? Math.min(state.startX, state.nowX) : state.startX);
         const posY = Math.max(0, drag > 5 ? Math.min(state.startY, state.nowY) : state.startY);
+        if (band) {
+            finish();
+            if (drag <= 5 && !options.template) {
+                shape.width_mm = kind === "line" ? 60 : 40;
+                shape.height_mm = kind === "line" ? 2 : 10;
+            } // a click makes a shape that fits a header or footer
+            // the pages may have been laid out again since the pointer went down: the page is found again by its position
+            void ctx.ed.bands.add(shape, { sheetIndex: state.sheetIndex, xMm: posX, yMm: posY })
+                .then(ok => { if (ok && options.edit)
+                announce("Text box added to the header or footer. Type its text in the Header & Footer tab."); })
+                .catch(error => toast(errorText(error), { kind: "error" }));
+            return;
+        }
         const anchor = state.sheet.querySelector(".blk[data-id]:not([data-floating])");
         const fallback = ctx.ed.model.order[ctx.ed.model.order.length - 1] ?? null;
         const target = anchor?.dataset["id"] ?? fallback;

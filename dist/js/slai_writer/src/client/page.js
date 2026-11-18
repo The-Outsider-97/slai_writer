@@ -9,6 +9,7 @@ import { geometryFor } from "./model.js";
 import { lineNames, runningBand } from "./book_layout.js";
 import { arrange, fitFraction, pagesInRow } from "./arrangement.js";
 import { regionCss } from "./column_layout.js";
+import { placeBand } from "./bands.js";
 const NUMBER_FORMATS = {
     decimal: (n) => String(n), "lower-roman": (n) => roman(n), "upper-roman": (n) => roman(n).toUpperCase(),
     "lower-alpha": (n) => alpha(n), "upper-alpha": (n) => alpha(n).toUpperCase(),
@@ -76,6 +77,10 @@ export class PageView {
     /** Called whenever the sheets are laid out, redrawn or zoomed (the picture tools follow the picture). */
     onPlaced(fn) { this.placeListeners.push(fn); }
     room = { left: 0, right: 0 };
+    /** Pixels the pages are shifted from the centre to keep the page that owns a panel where it is (see ``holding``). */
+    held = 0;
+    /** The left margin of each sheet that makes room for the tabs and panels between pages side by side (see ``panel_layout.ts``). Kept here because a new layout makes new sheets. */
+    seams = [];
     /** The number that shows beside a ruler while a margin, header, footer or guide line is hovered, focused or dragged. */
     readout;
     locked;
@@ -111,11 +116,49 @@ export class PageView {
         this.el = h("div", { class: "page-area" }, this.cornerLeft, this.hruler, this.cornerRight, this.scroller, this.vlayer, this.readout);
         this.scroller.addEventListener("scroll", () => this.placeVRulers(), { passive: true });
         this.scroller.addEventListener("scroll", () => this.placeRuler());
-        new ResizeObserver(() => { this.fit(); this.placeRuler(); this.placed(); }).observe(this.scroller);
+        let seenWidth = this.scroller.clientWidth;
+        new ResizeObserver(() => {
+            if (this.scroller.clientWidth !== seenWidth) {
+                seenWidth = this.scroller.clientWidth;
+                this.held = 0;
+            } // a new window width starts again from the centre; a scrollbar appearing below does not
+            this.fit();
+            this.placeRuler();
+            this.placed();
+        }).observe(this.scroller);
         this.hruler.addEventListener("dblclick", () => events.rulerDouble());
         this.host.addEventListener("dblclick", (e) => this.onDouble(e));
     }
     setHeaderFooter(fn) { this.headerFooter = fn; }
+    /** The shapes of headers and footers (they repeat on every page that uses the header or footer they belong to). */
+    bandSource = null;
+    setBandShapes(source) { this.bandSource = source; }
+    /** Called after the headers, footers and their shapes of every sheet were drawn again, so whatever edits them can put its own marks back. */
+    onDecorated = null;
+    /** The two layers of header and footer shapes of a sheet: behind the text of the page and in front of it. Clipped to the sheet, never taking a click. */
+    bandLayers(sheet, firstOfSection) {
+        const source = this.bandSource;
+        if (!source)
+            return [null, null];
+        const g = sheet.geometry;
+        const layers = { behind: null, front: null };
+        for (const edge of ["header", "footer"]) {
+            const { items, variant, mirrored } = source.shapes(sheet.section, edge, sheet.number, firstOfSection);
+            for (const item of items) {
+                const layer = item.layer === "behind" ? "behind" : "front";
+                const host = layers[layer] ?? (layers[layer] = h("div", { class: `band-layer ${layer}`, attrs: { "aria-hidden": "true", "data-band-layer": layer } }));
+                const at = placeBand(item, edge, g.widthMm, g.heightMm, g.margins.left, g.margins.right, mirrored);
+                const node = h("div", { class: "band-shape", attrs: { "data-band-id": item.id, "data-band-edge": edge, "data-band-variant": variant, "data-band-mirrored": mirrored ? "true" : "false" } });
+                node.style.setProperty("left", `${at.x}mm`);
+                node.style.setProperty("top", `${at.y}mm`);
+                node.style.setProperty("width", `${at.w}mm`);
+                node.style.setProperty("height", `${at.h}mm`);
+                node.appendChild(source.paint(item, at.w));
+                host.appendChild(node);
+            }
+        }
+        return [layers.behind, layers.front];
+    }
     /* ------------------------------------------------------------------------------------------------- layout */
     layout(input) {
         const keep = this.lineFocus();
@@ -159,6 +202,7 @@ export class PageView {
         if (!this.sheets.length)
             open(undefined);
         this.applyArrangement();
+        this.applySeams();
         this.decorate(input);
         this.fit();
         this.placed();
@@ -577,11 +621,17 @@ export class PageView {
                 extras.push(this.marginLines(sheet));
             if (input.showGuides)
                 extras.push(this.guideLines(sheet, input.guides));
+            const [behind, front] = this.bandLayers(sheet, i === 0 || this.sheets[i - 1]?.section !== sheet.section);
+            if (behind)
+                sheet.el.insertBefore(behind, sheet.el.firstChild); // under the body, whose blocks have a z-index of their own
             for (const e of extras)
                 if (e)
                     sheet.el.appendChild(e);
+            if (front)
+                sheet.el.appendChild(front);
             sheet.el.setAttribute("aria-label", `Page ${i + 1} of ${pages}`);
         });
+        this.onDecorated?.();
         this.vlayer.replaceChildren();
         const rowStarts = new Set(this.arrangement.rows.map((_, row) => pagesInRow(this.arrangement, row)[0])); // pages side by side share the scale at the left
         this.vrulers = input.showRulers ? this.sheets.flatMap((sheet, at) => (rowStarts.has(at) ? [{ wrap: this.verticalRuler(sheet), sheet }] : [])) : [];
@@ -904,9 +954,54 @@ export class PageView {
     setZoom(percent) {
         this.zoom = Math.max(0.1, Math.min(4, percent / 100));
         this.zoomer.style.setProperty("transform", `scale(${this.zoom})`);
+        this.held = 0;
         this.fit();
         this.placeRuler();
         this.placed();
+    }
+    /** Change how far apart the pages are (``change`` sets the margins that do it) while the page ``pin`` stays where it is on the screen: the pages of its row make room
+     *  by moving away from it, as far as the window allows (the window's edge keeps every tab and panel in view, so the page moves a little when it must). The pages of
+     *  other rows are not moved sideways.
+     *  The new layout is in place at once, so everything that is measured afterwards is final; the pages that moved glide from where they were (a transform, which
+     *  changes no layout and so no pagination). The shift that keeps the pinned page in place is remembered in ``held`` until the zoom, the arrangement or the window changes. */
+    holding(pin, change) {
+        const sheet = pin === null ? undefined : this.sheets[pin];
+        const was = this.sheets.map((s) => s.el.getBoundingClientRect().left);
+        const before = pin === null ? undefined : was[pin];
+        change();
+        this.fit();
+        if (sheet && before !== undefined) {
+            const moved = sheet.el.getBoundingClientRect().left - before;
+            if (Math.abs(moved) >= 0.5) {
+                this.held -= moved;
+                this.fit();
+            } // what the window's edge does not allow is not forced: the page moves as little as it must
+        }
+        this.sheets.forEach((s, i) => {
+            const d = (was[i] ?? 0) - s.el.getBoundingClientRect().left;
+            if (Math.abs(d) < 0.5)
+                return;
+            const flight = new DOMMatrixReadOnly(getComputedStyle(s.el).transform === "none" ? undefined : getComputedStyle(s.el).transform).m41; // already gliding: carry on from where it is
+            s.el.style.setProperty("transition", "none");
+            s.el.style.setProperty("transform", `translateX(${flight + d / this.zoom}px)`);
+            void s.el.offsetWidth;
+            s.el.style.removeProperty("transition");
+            s.el.style.removeProperty("transform");
+        });
+    }
+    /** The left margins that keep the tabs and panels of pages side by side apart, in page units (0 for a page that needs none). */
+    setSeams(margins) {
+        this.seams = margins.map((m) => Math.max(0, Math.round(m)));
+        this.applySeams();
+    }
+    applySeams() {
+        this.sheets.forEach((sheet, i) => {
+            const m = this.seams[i] ?? 0;
+            if (m > 0)
+                sheet.el.style.setProperty("margin-left", `${m}px`);
+            else
+                sheet.el.style.removeProperty("margin-left");
+        });
     }
     /** Room, in unscaled page units, that the panels attached to a page need beside it, so that opening one never clips it or covers the text. */
     setRoom(left, right) {
@@ -923,6 +1018,7 @@ export class PageView {
             return;
         const keep = this.anchor();
         this.view = { perRow, facing };
+        this.held = 0;
         this.applyArrangement();
         if (this.last) {
             this.redecorate();
@@ -976,16 +1072,22 @@ export class PageView {
         const pad = 56;
         const view = { width: Math.max(50, this.scroller.clientWidth - pad - 28), height: Math.max(50, this.scroller.clientHeight - pad) };
         const boxes = this.sheets.map((sheet) => ({ widthMm: sheet.geometry.widthMm, heightMm: sheet.geometry.heightMm }));
-        return Math.round(fitFraction(mode, this.arrangement, boxes, view, MM_PX, 28) * 100);
+        // side by side the pages keep the room their two tabs need between them (see panel_layout.ts)
+        const gap = this.view.facing ? 0 : this.view.perRow > 1 ? 2 * 20 + 6 : 28;
+        return Math.round(fitFraction(mode, this.arrangement, boxes, view, MM_PX, gap) * 100);
     }
-    /** Size the scrolling area to the scaled pages and centre them; panels open beside a page push the page away from the edge, never off it. */
+    /** Size the scrolling area to the scaled pages and centre them; panels open beside a page push the page away from the edge, never off it.
+     *  ``held`` moves the pages by that many pixels from where centring puts them (see ``holding``). */
     fit() {
         const z = this.zoom;
         const pad = 28 * z;
         const w = this.host.offsetWidth * z + 2 * pad;
         const hgt = this.host.offsetHeight * z + 2 * pad;
         const view = this.scroller.clientWidth;
-        const left = Math.max(this.room.left * z, 30, (view - w) / 2);
+        const least = Math.max(this.room.left * z, 30);
+        const centred = (view - w) / 2;
+        const left = Math.max(least, centred + this.held);
+        this.held = left - centred; // what was asked for, less what the window's edge refused
         this.zoomer.style.setProperty("margin-left", `${Math.round(left)}px`);
         this.sizer.style.setProperty("width", `${Math.max(view, Math.round(left + w + this.room.right * z))}px`);
         this.sizer.style.setProperty("height", `${Math.round(hgt)}px`);

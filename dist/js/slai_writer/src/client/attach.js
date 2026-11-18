@@ -7,6 +7,8 @@
 import { chevron } from "./dico.js";
 import { h } from "./kit.js";
 import { MM_PX } from "./textops.js";
+import { pagesInRow } from "./arrangement.js";
+import { conflicts, layoutSeams } from "./panel_layout.js";
 const TAB_W = 20; // page units (px at 100 %), how far a side tab sticks out of the page
 const PANEL_MM = 72; // the notes and corrections panels are at most 100 mm wide (design page 12); this is their working width
 const PANEL_MAX_MM = 100;
@@ -14,6 +16,7 @@ const EMBED_TAB_H = 20;
 const TUCK = 14; // how far a panel reaches in behind its page, so it looks as if it comes out of the page
 const MIN_TAB_PX = 14; // on screen, so the tabs stay clickable when the page is zoomed far out
 const SLIDE_MS = 380; // the length of the slide; the layout follows it frame by frame
+const GRID_GAP = 28; // the gap the page grid leaves between pages side by side (styles.css .sheets)
 const COLOUR_NAME = { red: "Corrections", yellow: "Notes", embed: "EMBED" };
 export class PageAttachments {
     page;
@@ -28,6 +31,10 @@ export class PageAttachments {
     lastAt = { red: null, yellow: null, embed: null };
     busy = false;
     pending = false;
+    following = false;
+    seamKey = "";
+    /** The page that owns the panel that is opening or closing: it stays where it is on the screen while the pages beside it move apart (``PageView.holding``). */
+    pin = null;
     onChange = () => undefined;
     constructor(page, specs, currentSheet) {
         this.page = page;
@@ -51,13 +58,28 @@ export class PageAttachments {
                 new ResizeObserver(() => this.place()).observe(panel);
         }
         page.onPlace = () => this.place();
+        // Whatever starts a slide of the pages (a panel, another arrangement) the tabs and panels follow it to its end.
+        const slides = (e) => (e.propertyName === "transform" || e.propertyName === "margin-bottom") && e.target instanceof HTMLElement && e.target.classList.contains("sheet");
+        page.host.addEventListener("transitionrun", (e) => { if (slides(e))
+            this.follow(); });
+        page.host.addEventListener("transitionend", (e) => { if (slides(e))
+            this.place(); });
     }
     isOpen(kind) { return this.openAt[kind] !== null; }
     sheetOf(kind) { return this.openAt[kind]; }
     panel(kind) { return this.panels.get(kind); }
+    /** The pages of every row, in reading order (0-based): the rows of the arrangement, so panels and pages agree with the page view in every arrangement. */
+    rows() {
+        const arrangement = this.page.arrangement;
+        return arrangement.rows.map((_, row) => pagesInRow(arrangement, row));
+    }
     open(kind, sheet = this.currentSheet(), focus = false) {
         const index = Math.max(0, Math.min(this.page.sheets.length - 1, sheet));
         const was = this.openAt[kind];
+        // Two panels never share the room between two pages: the Notes of a page and the Corrections of the page after it are that room's one panel.
+        for (const other of conflicts(this.rows(), this.openAt, kind, index))
+            this.close(other);
+        this.holdPage(index);
         this.openAt[kind] = index;
         this.place();
         this.follow();
@@ -71,6 +93,7 @@ export class PageAttachments {
         const was = this.openAt[kind];
         if (was === null)
             return;
+        this.holdPage(was);
         this.openAt[kind] = null;
         this.place();
         this.follow();
@@ -83,11 +106,17 @@ export class PageAttachments {
             this.open(kind, sheet, focus);
     }
     tab(kind, sheet) { return this.tabs.get(`${kind}:${sheet}`); }
-    /** Scroll so the panel is in view (it may be on a page that is not the one on screen). */
+    /** Bring the panel into view when it opened on a page that is not on screen. Only the page is scrolled up or down, and only when the panel is out of sight: the pages beside
+     *  it have already made room (a sideways scroll here would only throw away the place the reader was at). */
     reveal(kind) {
         const panel = this.panels.get(kind);
-        if (panel && this.openAt[kind] !== null)
-            panel.scrollIntoView({ block: "nearest", inline: "nearest" });
+        if (!panel || this.openAt[kind] === null)
+            return;
+        const scroller = this.page.scroller;
+        const view = scroller.getBoundingClientRect();
+        const box = panel.getBoundingClientRect();
+        if (box.bottom < view.top + 24 || box.top > view.bottom - 24)
+            scroller.scrollTop += box.top - view.top - 16;
     }
     /* ------------------------------------------------------------------------------------------------- placement */
     place() {
@@ -108,11 +137,22 @@ export class PageAttachments {
             this.busy = false;
         }
     }
+    holdPage(sheet) { this.pin = { sheet, until: performance.now() + SLIDE_MS + 120 }; }
     /** While a panel slides, the pages below an EMBED panel move with it, so the placement is redone every frame for the length of the slide. */
     follow() {
+        if (this.following)
+            return;
+        this.following = true;
         const start = performance.now();
-        const step = () => { this.place(); if (performance.now() - start < SLIDE_MS + 60)
-            requestAnimationFrame(step); };
+        const step = () => {
+            this.place();
+            if (performance.now() - start < SLIDE_MS + 60)
+                requestAnimationFrame(step);
+            else {
+                this.following = false;
+                this.place();
+            }
+        };
         requestAnimationFrame(step);
     }
     panelWidth() { return Math.min(PANEL_MAX_MM, PANEL_MM) * MM_PX; }
@@ -129,8 +169,22 @@ export class PageAttachments {
         const z = page.zoom;
         const tw = Math.max(TAB_W, MIN_TAB_PX / z);
         const th = Math.max(EMBED_TAB_H, MIN_TAB_PX / z);
-        /* room beside the pages so nothing is clipped at the edge of the window */
-        page.setRoom(tw + 6 + (this.openAt.red !== null ? pw : 0), tw + 6 + (this.openAt.yellow !== null ? pw : 0));
+        /* Room for the tabs and panels: beside the first and last page of a row so nothing is clipped at the edge of the window, and between two pages side by side
+           (a margin on the page after the seam: layout, never one thing drawn over another). The page that owns the panel that is opening stays where it is. */
+        const mode = page.arrangementMode;
+        const seams = layoutSeams(this.rows(), count, this.openAt, { tab: tw, panel: pw, gap: mode.facing ? 0 : GRID_GAP, facing: mode.facing });
+        const pinned = this.pin && performance.now() < this.pin.until ? this.pin.sheet : null;
+        /* the pages glide to their new places (see ``PageView.holding``): when the margins change for any reason (a panel, another arrangement, another zoom) the tabs follow them */
+        const key = seams.margins.map((m) => Math.round(m)).join(",");
+        if (key !== this.seamKey) {
+            this.seamKey = key;
+            if (!this.following)
+                this.follow();
+        }
+        page.holding(pinned, () => {
+            page.setRoom(seams.room.left, seams.room.right);
+            page.setSeams(seams.margins);
+        });
         /* the EMBED panel hangs below its page and pushes the next pages down by its own height */
         const embedAt = this.openAt.embed;
         const embedPanel = this.panels.get("embed");
@@ -168,6 +222,7 @@ export class PageAttachments {
                 wanted.add(key);
                 const open = this.openAt[kind] === i;
                 const tab = this.tabs.get(key) ?? this.makeTab(kind, i);
+                tab.toggleAttribute("hidden", seams.hidden.has(key)); // at the spine of a book, where the two pages touch, a closed tab has no room
                 tab.classList.toggle("open", open);
                 tab.setAttribute("aria-expanded", String(open));
                 const label = `${COLOUR_NAME[kind]} panel, page ${i + 1}`;

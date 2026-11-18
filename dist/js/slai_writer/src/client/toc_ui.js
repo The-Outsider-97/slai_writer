@@ -12,8 +12,10 @@ const action = (label, run, icon, title = label) => {
     b.addEventListener("click", run);
     return b;
 };
-const LEADER_LABELS = [["dots", "Dots"], ["dashes", "Dashes"], ["solid", "Solid line"], ["none", "None"]];
-const ALIGN_LABELS = [["right", "Right, at the edge"], ["inline", "Right after the title"], ["left", "Left, before the title"]];
+const LEADER_LABELS = [["dots", "Dots"], ["dashes", "Dashes"], ["solid", "Solid line"], ["custom", "Your own character"], ["none", "None"]];
+const ALIGN_LABELS = [["right", "Right, at the edge"], ["inline", "Right after the title"], ["left", "Left, before the title"], ["custom", "At a tab stop of my own"], ["hidden", "Hidden"]];
+const SIDE_LABELS = [["left", "Left"], ["center", "Centre"], ["right", "Right"]];
+const LEVEL_SIDE_LABELS = [["", "As the text"], ...SIDE_LABELS, ["justify", "Justified"]];
 const SAMPLE = [["Introduction", 1, "1"], ["Background", 2, "2"], ["Earlier work", 3, "3"], ["Method", 1, "7"]];
 function levelCss(el, look, scale = 0.8) {
     if (!look)
@@ -108,16 +110,59 @@ export async function tocSettingsDialog(ctx, info) {
     const title = h("input", { type: "text", value: info.title.text, maxLength: 80, attrs: { "aria-label": "Title" } });
     const depth = h("select", { attrs: { "aria-label": "Heading levels to show" } }, ...[1, 2, 3, 4, 5, 6].map((n) => h("option", { value: String(n), text: `${n} level${n > 1 ? "s" : ""}` })));
     depth.value = String(info.core.depth);
+    const shown = info.core.show_page_numbers !== false;
+    const stored = info.look.page_position;
+    let lastPlace = stored === "hidden" ? "right" : stored;
     const leader = selectField("Leader", LEADER_LABELS, info.look.leader);
-    const align = selectField("Page numbers", ALIGN_LABELS, info.look.page_align);
-    const show = checkbox("Show page numbers", info.core.show_page_numbers !== false);
+    const align = selectField("Page numbers", ALIGN_LABELS, shown ? stored : "hidden");
+    const show = checkbox("Show page numbers", shown);
+    const numberAlign = selectField("Page number alignment", SIDE_LABELS, info.look.number_align ?? (stored === "left" || stored === "inline" ? "left" : "right"));
+    const textAlign = selectField("Entry text alignment", SIDE_LABELS, info.look.text_align ?? "left");
+    const tab = num(info.look.custom_tab_mm ?? 120, 0, 600, 1, "Tab stop of the page numbers in millimetres from the left margin");
+    const column = num(info.look.number_column_mm, 1, 100, 0.5, "Width of the page-number column in millimetres (empty: as wide as the widest number)");
+    const leaderChar = h("input", { type: "text", value: info.look.leader_char ?? "·", maxLength: 3, attrs: { "aria-label": "Leader character" } });
+    const leaderGap = num(info.look.leader_gap_pt, 0, 40, 0.5, "Space between the leader marks in points (empty: automatic)");
+    const field = (label, control) => h("label", {}, h("span", { text: label }), control);
+    const tabField = field("Tab stop (mm from the left margin)", tab), columnField = field("Number column width (mm, empty: automatic)", column);
+    const charField = field("Leader character", leaderChar), gapField = field("Leader spacing (pt, empty: automatic)", leaderGap);
+    const refreshControls = () => {
+        const place = align.select.value, kind = leader.select.value;
+        tabField.hidden = place !== "custom";
+        const none = place === "hidden";
+        for (const el of [numberAlign.root, columnField])
+            el.hidden = none || place === "inline";
+        charField.hidden = kind !== "custom";
+        leader.root.hidden = none || place === "inline";
+        gapField.hidden = none || place === "inline" || kind === "none" || kind === "solid";
+    };
+    align.select.addEventListener("change", () => {
+        if (align.select.value === "hidden")
+            show.input.checked = false;
+        else {
+            lastPlace = align.select.value;
+            show.input.checked = true;
+        }
+        refreshControls();
+    });
+    show.input.addEventListener("change", () => {
+        if (!show.input.checked) {
+            if (align.select.value !== "hidden")
+                lastPlace = align.select.value;
+            align.select.value = "hidden";
+        }
+        else if (align.select.value === "hidden")
+            align.select.value = lastPlace;
+        refreshControls();
+    });
+    leader.select.addEventListener("change", refreshControls);
+    refreshControls();
     const links = checkbox("Entries are links to their headings", info.look.hyperlinks);
     const numbered = checkbox("Number the entries like an outline (1, 1.1, 1.1.1)", info.look.numbered);
     const refresh = selectField("Update", [["automatic", "Automatically when headings change"], ["manual", "Only when I ask"]], info.core.refresh_mode ?? "automatic");
     const fontList = h("datalist", { attrs: { id: "toc-fonts" } }, FONT_FAMILIES.map((name) => h("option", { value: name })));
     const rows = [];
     const grid = h("div", { class: "toc-levels" });
-    const header = h("div", { class: "toc-level-row toc-level-head" }, ...["", "Font", "Size", "B", "I", "Colour", "Indent", "Before", "After"].map((t) => h("span", { text: t })));
+    const header = h("div", { class: "toc-level-row toc-level-head" }, ...["", "Font", "Size", "B", "I", "Colour", "Indent", "Before", "After", "Line", "Align"].map((t) => h("span", { text: t })));
     grid.appendChild(header);
     const addRow = (key, label, props, isTitle) => {
         const font = h("input", { type: "text", value: String(props["font_family"] ?? ""), maxLength: 100, attrs: { list: "toc-fonts", "aria-label": `${label} font` } });
@@ -130,13 +175,14 @@ export async function tocSettingsDialog(ctx, info) {
         const indent = isTitle ? null : num(props["indent_mm"], 0, 200, 0.5, `${label} indent in millimetres`);
         const before = num(props["space_before_pt"], 0, 200, 0.5, `${label} space before in points`);
         const after = num(props["space_after_pt"], 0, 200, 0.5, `${label} space after in points`);
-        const alignSel = isTitle ? h("select", { attrs: { "aria-label": "Title alignment" } }, ...["left", "center", "right"].map((v) => h("option", { value: v, text: v }))) : null;
-        if (alignSel)
-            alignSel.value = String(props["align"] ?? "left");
-        const row = { key, font, size, bold, italic, colour, indent, before: isTitle ? before : before, after, align: alignSel, initial: "" };
+        const line = isTitle ? null : num(props["line_height"], 0.8, 4, 0.05, `${label} line spacing (1 = single)`);
+        const choices = isTitle ? SIDE_LABELS : LEVEL_SIDE_LABELS;
+        const alignSel = h("select", { attrs: { "aria-label": isTitle ? "Title alignment" : `${label} text alignment` } }, ...choices.map(([v, t]) => h("option", { value: v, text: t })));
+        alignSel.value = String(props["align"] ?? (isTitle ? "left" : ""));
+        const row = { key, line, font, size, bold, italic, colour, indent, before, after, align: alignSel, initial: "" };
         row.initial = JSON.stringify(read(row));
         rows.push(row);
-        grid.appendChild(h("div", { class: "toc-level-row" }, h("span", { text: label }), font, size, bold, italic, colour, indent ?? alignSel ?? h("span"), before, after));
+        grid.appendChild(h("div", { class: "toc-level-row" }, h("span", { text: label }), font, size, bold, italic, colour, indent ?? h("span"), before, after, line ?? h("span"), alignSel));
     };
     const read = (row) => {
         const out = {};
@@ -154,7 +200,9 @@ export async function tocSettingsDialog(ctx, info) {
             out["space_before_pt"] = Number(row.before.value);
         if (row.after.value !== "")
             out["space_after_pt"] = Number(row.after.value);
-        if (row.align)
+        if (row.line && row.line.value !== "")
+            out["line_height"] = Number(row.line.value);
+        if (row.align && (row.key === "title" || row.align.value !== ""))
             out["align"] = row.align.value;
         return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined));
     };
@@ -165,7 +213,7 @@ export async function tocSettingsDialog(ctx, info) {
     error.hidden = true;
     const handle = openDialog({
         title: "Table of contents settings", size: "wide",
-        body: h("div", { class: "stack" }, fontList, h("div", { class: "grid-2" }, h("label", {}, h("span", { text: "Title" }), title), h("label", {}, h("span", { text: "Levels to show" }), depth)), h("div", { class: "grid-2" }, leader.root, align.root), show.root, links.root, numbered.root, refresh.root, h("details", { open: true }, h("summary", { text: "Formatting of the title and of each level" }), grid, h("p", { class: "muted", text: "These are the paragraph styles TOC Title and TOC Level 1 to 6, so the Style Manager shows the same settings. Colour changes only if you pick one." })), notice("To change how the whole table looks at once, use Change Style. Page numbers always come from the exact page layout.", "info"), error),
+        body: h("div", { class: "stack" }, fontList, h("div", { class: "grid-2" }, h("label", {}, h("span", { text: "Title" }), title), h("label", {}, h("span", { text: "Levels to show" }), depth)), show.root, h("fieldset", { class: "toc-layout" }, h("legend", { text: "Page numbers" }), h("div", { class: "grid-2" }, align.root, numberAlign.root), h("div", { class: "grid-2" }, tabField, columnField)), h("fieldset", { class: "toc-layout" }, h("legend", { text: "Leader and text" }), h("div", { class: "grid-2" }, leader.root, textAlign.root), h("div", { class: "grid-2" }, charField, gapField)), links.root, numbered.root, refresh.root, h("details", { open: true }, h("summary", { text: "Formatting of the title and of each level" }), grid, h("p", { class: "muted", text: "These are the paragraph styles TOC Title and TOC Level 1 to 6, so the Style Manager shows the same settings. Colour changes only if you pick one." })), notice("To change how the whole table looks at once, use Change Style. Page numbers always come from the exact page layout.", "info"), error),
         actions: [{ label: "Apply", kind: "primary", run: async () => {
                     error.hidden = true;
                     const body = {};
@@ -180,14 +228,57 @@ export async function tocSettingsDialog(ctx, info) {
                         body["title"] = newTitle;
                     if (Number(depth.value) !== info.core.depth)
                         body["depth"] = Number(depth.value);
-                    if (show.input.checked !== (info.core.show_page_numbers !== false))
-                        body["showPageNumbers"] = show.input.checked;
                     if (refresh.select.value !== (info.core.refresh_mode ?? "automatic"))
                         body["refreshMode"] = refresh.select.value;
                     if (leader.select.value !== info.look.leader)
                         look["leader"] = leader.select.value;
-                    if (align.select.value !== info.look.page_align)
-                        look["page_align"] = align.select.value;
+                    const place = align.select.value;
+                    if (place !== "hidden" && place !== (shown ? info.look.page_position : "hidden"))
+                        look["page_position"] = place;
+                    if (place === "hidden" && shown)
+                        body["showPageNumbers"] = false;
+                    const side = (select, was, fallback, key) => {
+                        if (select.value !== (was ?? fallback))
+                            look[key] = select.value;
+                    };
+                    if (place !== "hidden") {
+                        side(numberAlign.select, info.look.number_align, stored === "left" || stored === "inline" ? "left" : "right", "number_align");
+                        if (place === "custom" && (tab.value !== "" && Number(tab.value) !== (info.look.custom_tab_mm ?? 120) || stored !== "custom")) {
+                            if (tab.value === "" || !(Number(tab.value) >= 0 && Number(tab.value) <= 600)) {
+                                error.textContent = "The tab stop is between 0 and 600 mm.";
+                                error.hidden = false;
+                                return undefined;
+                            }
+                            look["custom_tab_mm"] = Number(tab.value);
+                        }
+                        if (column.value !== String(info.look.number_column_mm ?? "")) {
+                            if (column.value !== "" && !(Number(column.value) > 0 && Number(column.value) <= 100)) {
+                                error.textContent = "The number column is between 0.5 and 100 mm wide.";
+                                error.hidden = false;
+                                return undefined;
+                            }
+                            look["number_column_mm"] = column.value === "" ? null : Number(column.value);
+                        }
+                    }
+                    side(textAlign.select, info.look.text_align, "left", "text_align");
+                    if (leader.select.value === "custom" && leaderChar.value !== (info.look.leader_char ?? "·")) {
+                        if (!leaderChar.value || /^\s+$/.test(leaderChar.value)) {
+                            error.textContent = "Type one to three visible characters for the leader.";
+                            error.hidden = false;
+                            return undefined;
+                        }
+                        look["leader_char"] = leaderChar.value;
+                    }
+                    else if (leader.select.value === "custom" && info.look.leader !== "custom")
+                        look["leader_char"] = leaderChar.value;
+                    if (leaderGap.value !== String(info.look.leader_gap_pt ?? "")) {
+                        if (leaderGap.value !== "" && !(Number(leaderGap.value) >= 0 && Number(leaderGap.value) <= 40)) {
+                            error.textContent = "The leader spacing is between 0 and 40 points.";
+                            error.hidden = false;
+                            return undefined;
+                        }
+                        look["leader_gap_pt"] = leaderGap.value === "" ? null : Number(leaderGap.value);
+                    }
                     if (links.input.checked !== info.look.hyperlinks)
                         look["hyperlinks"] = links.input.checked;
                     if (numbered.input.checked !== info.look.numbered)
