@@ -29,6 +29,7 @@ from .dependencies import require
 from .session import DocumentSession, load_bytes, sldc
 from .shape_export import prepare_shapes
 from .shape_validation import SHAPE_KEY
+from .table_styles import TABLE_LOOK_KEY, export_look
 
 EXPORT_FORMATS = ("sldc", "pdf", "docx", "odt", "rtf", "html", "md", "txt", "xml")
 IMPORT_FORMATS = ("sldc", "docx", "doc", "odt", "rtf", "html", "md", "txt", "xml", "csv", "pdf")
@@ -128,6 +129,21 @@ class Exchange:
     def _settled(self, session: DocumentSession) -> Any:
         with session.lock:
             return session._settled(session.pkg.copy())                         # noqa: SLF001
+
+    @staticmethod
+    def _table_looks(package: Any) -> None:
+        """Hand every table's resolved look to the file writers (one resolver, ``table_styles.export_look``), so PDF, Word, OpenDocument and RTF
+        draw the borders, fills, widths and heights the editor shows. It rides on the export copy only; the document is not changed."""
+        doc = package.document
+        custom = ((doc.get("extensions") or {}).get("slai.writer") or {}).get("table_styles") or {}
+        for block in doc["blocks"]:
+            if block.get("type") != "table" or not isinstance(block.get("table"), dict):
+                continue
+            try:
+                look = export_look(block, custom)
+            except Exception:                                                       # noqa: BLE001 - a malformed table is drawn with the writer's plain grid
+                continue
+            block.setdefault("extensions", {})[TABLE_LOOK_KEY] = look
 
     def _shape_export_package(self, package: Any, fmt: str, dm: Any) -> tuple[Any, list[str]]:
         """Prefer Documaster's native vector adapter; retain a truthful legacy fallback."""
@@ -292,7 +308,9 @@ class Exchange:
             return self._export_sldc(session, package, out_dir, stem, password, pre)
         dm = self._dm()
         converted, shape_warnings = self._shape_export_package(package, fmt, dm)
+        self._table_looks(converted)
         toc_warnings = self._toc_page_labels(session, converted, fmt)
+        toc_warnings += self._band_shape_notes(converted, fmt)
         files = dm.module("files")
         writers = dm.module("docmodel.writers")
         verify = dm.module("docmodel.verify")
@@ -341,6 +359,14 @@ class Exchange:
                                       ". Viewers normally have them, but a print shop or archive may require embedded fonts; choose an installed font family in the export options to embed it."]
         return report
 
+    def _band_shape_notes(self, package: Any, fmt: str) -> list[str]:
+        """Shapes in headers and footers are drawn by the PDF and Word writers; the other formats have nowhere to put them, which the person is told."""
+        from .bands import store_of
+        if fmt in ("pdf", "docx") or not store_of(package.document):
+            return []
+        names = {"odt": "OpenDocument", "rtf": "RTF", "html": "HTML", "md": "Markdown", "txt": "plain text", "xml": "XML"}
+        return [f"The shapes in the headers and footers are not carried by {names.get(fmt, fmt.upper())} files; the text of the headers and footers is. Use PDF or Word to keep them."]
+
     def _toc_page_labels(self, session: DocumentSession, package: Any, fmt: str) -> list[str]:
         """Word and RTF get a page reference in each contents entry. The number cached in it is the one from Writer's own PDF layout (the writer
         cannot measure pages); Word refreshes it when the fields are updated, so the file says so."""
@@ -358,8 +384,13 @@ class Exchange:
             return []
         mine = doc.setdefault("extensions", {}).setdefault("slai.writer", {})
         mine["toc_page_labels"] = labels
-        return ["The page numbers in the table of contents were measured with Writer's own page layout; "
-                f"{'Word' if fmt == 'docx' else 'your word processor'} may paginate differently, so update the fields there (Ctrl+A, then F9) after editing."]
+        notes = ["The page numbers in the table of contents were measured with Writer's own page layout; "
+                 f"{'Word' if fmt == 'docx' else 'your word processor'} may paginate differently, so update the fields there (Ctrl+A, then F9) after editing."]
+        custom = [b for b in doc["blocks"] if ((b.get("extensions") or {}).get("slai.writer.toc_style") or {}).keys() & {"leader_gap_pt", "number_column_mm"}]
+        if custom:
+            notes.append("The table of contents sets its page numbers and leaders with tab stops, which is how Word and RTF do it: the spacing between the marks of a leader "
+                         "and the width of the number column are the program's own there, and a heading that wraps may run up to the number instead of stopping short of it.")
+        return notes
 
     def _export_sldc(self, session: DocumentSession, package: Any, out_dir: Path, stem: str, password: str | None, pre: dict[str, Any]) -> dict[str, Any]:
         recipients = [sldc().password_recipient(password)] if password else ([sldc().password_recipient(session.password)] if session.password else None)
@@ -421,6 +452,7 @@ class Exchange:
         writers, files, errors = dm.module("docmodel.writers"), dm.module("files"), dm.module("errors")
         package = self._settled(session)
         package, _shape_warnings = self._shape_export_package(package, "pdf", dm)
+        self._table_looks(package)
         with tempfile.TemporaryDirectory(prefix="wr-pdf-", dir=self._tmp()) as tmp:
             target = Path(tmp) / "preview.pdf"
             try:

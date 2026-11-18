@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from .opcore import OpError
-from .tablegrid import BORDERS_KEY, CELLS_KEY, STYLE_KEY, Grid
+from .tablegrid import BORDERS_KEY, CELLS_KEY, LAYOUT_KEY, STYLE_KEY, Grid
 
 DATA: dict[str, Any] = json.loads((Path(__file__).parent / "table_styles.json").read_text(encoding="utf-8"))
 PRESETS: dict[str, Any] = DATA["presets"]
@@ -241,3 +241,72 @@ def resolve(block: dict[str, Any], custom: dict[str, Any] | None = None) -> dict
             "borders": {"top": h_edge(r, c), "bottom": h_edge(cell.bottom, c), "left": v_edge(r, c), "right": v_edge(r, cell.right)},
         }
     return out
+
+
+# ------------------------------------------------------------------------------------------------ the look the writers draw
+TABLE_LOOK_KEY = "slai.writer.table_look"
+_STYLE_RANK = {"double": 3, "solid": 2, "dashed": 1, "dotted": 0}
+
+
+def collapse(first: dict[str, Any] | None, second: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The one border two neighbouring cells leave on the edge they share: the CSS 2.1 collapsing rules the editor's browser applies.
+
+    A drawn border beats "no border"; the wider one wins; at equal width the style ranks double > solid > dashed > dotted; at a tie the cell above
+    or to the left (``first``) wins. Writing the rule down here means PDF, Word, OpenDocument and RTF settle a disagreement exactly as the editor does.
+    """
+    drawn = [b for b in (first, second) if b is not None and b.get("width_pt", 0) > 0]
+    if not drawn:
+        return None
+    if len(drawn) == 1:
+        return drawn[0]
+    a, b = drawn
+    if a["width_pt"] != b["width_pt"]:
+        return a if a["width_pt"] > b["width_pt"] else b
+    if _STYLE_RANK.get(a["style"], 0) != _STYLE_RANK.get(b["style"], 0):
+        return a if _STYLE_RANK.get(a["style"], 0) > _STYLE_RANK.get(b["style"], 0) else b
+    return a
+
+
+def export_look(block: dict[str, Any], custom: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Everything a file writer needs to draw one table the way the editor shows it, resolved once, here.
+
+    ``cells``  "row,column" (grid position of the cell's top-left corner) -> fill, text colour, bold, vertical alignment, padding (mm)
+    ``h``      "line,column" -> the border on that horizontal grid line (line 0 is the top of the table, ``rows`` the bottom)
+    ``v``      "row,line"    -> the border on that vertical grid line
+    plus the table's own layout (widths, heights, alignment, padding). Edges inside a merged cell are left out; an edge two cells share is settled
+    by :func:`collapse`. A border is ``{color, width_pt, style}``; an edge with no border is absent.
+    """
+    ext = block.get("extensions") or {}
+    grid = Grid(block["table"])
+    looks = resolve(block, custom)
+    own = ext.get(CELLS_KEY) or {}
+    layout = dict(ext.get(LAYOUT_KEY) or {})
+    cells: dict[str, dict[str, Any]] = {}
+    h_votes: dict[tuple[int, int], list[tuple[int, int, dict[str, Any] | None]]] = {}
+    v_votes: dict[tuple[int, int], list[tuple[int, int, dict[str, Any] | None]]] = {}
+    for cell in grid.cells:
+        look, mine = looks[cell.key or f"{cell.r},{cell.c}"], own.get(cell.key or "", {})
+        entry: dict[str, Any] = {"fill": look["fill"], "color": look["color"], "bold": look["bold"]}
+        for name in ("valign", "padding_mm"):
+            if mine.get(name) is not None:
+                entry[name] = mine[name]
+        cells[f"{cell.r},{cell.c}"] = entry
+        for column in range(cell.c, cell.right):
+            h_votes.setdefault((cell.r, column), []).append((cell.r, cell.c, look["borders"]["top"]))
+            h_votes.setdefault((cell.bottom, column), []).append((cell.r, cell.c, look["borders"]["bottom"]))
+        for row in range(cell.r, cell.bottom):
+            v_votes.setdefault((row, cell.c), []).append((cell.r, cell.c, look["borders"]["left"]))
+            v_votes.setdefault((row, cell.right), []).append((cell.r, cell.c, look["borders"]["right"]))
+
+    def settle(votes: list[tuple[int, int, dict[str, Any] | None]]) -> dict[str, Any] | None:
+        votes = sorted(votes, key=lambda x: (x[0], x[1]))           # the cell above or to the left first
+        result = votes[0][2]
+        for _, _, spec in votes[1:]:
+            result = collapse(result, spec)
+        return dict(result) if result and result.get("width_pt", 0) > 0 else None
+
+    h = {f"{line},{col}": s for (line, col), votes in sorted(h_votes.items()) if (s := settle(votes))}
+    v = {f"{row},{line}": s for (row, line), votes in sorted(v_votes.items()) if (s := settle(votes))}
+    return {"columns": grid.columns, "rows": grid.n_rows, "header_rows": min(grid.header_rows, grid.n_rows), "cells": cells, "h": h, "v": v,
+            **{k: layout[k] for k in ("width_mm", "column_widths_mm", "row_heights_mm", "row_height_rule", "align", "indent_mm", "fit", "cell_padding_mm",
+                                      "keep_rows_together", "allow_row_split") if k in layout}}

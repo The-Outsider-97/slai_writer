@@ -46,7 +46,7 @@ from .opcore import (  # noqa: F401 - the kernel's names stay importable from he
     handler,
     LABELS,
 )
-from . import tableops, columns, book  # noqa: F401 - importing them registers the table, column, Scripture and margin operations
+from . import tableops, columns, book, bands  # noqa: F401 - importing them registers the table, column, Scripture and margin operations
 from .columns import _read_layouts, group_members, inherit, reconcile, validate_document
 from .shape_validation import SHAPE_KEY, validate_shape
 from .tableops import cell_of, validate_table_extensions
@@ -916,8 +916,10 @@ def apply_operation(doc: dict[str, Any], op: dict[str, Any]) -> tuple[Undo, dict
         result = HANDLERS[op["op"]](tracker, op)
         reconcile(tracker)
         book.reconcile(tracker)
+        bands.reconcile(tracker)
         validate_document(doc)
         book.validate_document(doc)
+        bands.validate_document(doc)
         # Shape-bearing paragraph blocks are inert SLDC carriers, not editable
         # text paragraphs. Reject any mutation that would hide or corrupt them.
         candidate_shapes = (doc["blocks"] if tracker.structural else

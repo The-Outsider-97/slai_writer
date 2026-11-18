@@ -514,8 +514,8 @@ class Academic:
         if preset not in ("standard", "compact", "academic"):
             raise BadRequest("Choose a supported TOC preset.")
         look = look or {}
-        if not isinstance(look, dict) or set(look) - {"preset", "leader", "page_align", "hyperlinks", "numbered", "levels", "title"}:
-            raise BadRequest("TOC look settings are preset, leader, page_align, hyperlinks, numbered, levels and title.")
+        if not isinstance(look, dict) or set(look) - toc_presets.LOOK_KEYS:
+            raise BadRequest("TOC look settings are " + ", ".join(sorted(toc_presets.LOOK_KEYS)) + ".")
         if type(show_page_numbers) is not bool or type(leader_dots) is not bool:
             raise BadRequest("TOC page-number and leader-dot settings must be booleans.")
         if refresh_mode not in ("automatic", "manual"):
@@ -586,6 +586,10 @@ class Academic:
             current = dict((old_title or {}).get("extensions", {}).get(toc_presets.EXTENSION) or
                            {"preset": "custom", "leader": "dots" if leader_dots else "none", "page_align": "right", "hyperlinks": True, "numbered": False})
             spec = toc_presets.PRESETS[chosen] if chosen else None
+            try:
+                layout = toc_presets.check_layout(look)
+            except ValueError as exc:
+                raise BadRequest(str(exc)) from exc
 
             def pick(key: str, default: Any) -> Any:
                 if look.get(key) is not None:
@@ -600,6 +604,31 @@ class Academic:
                 raise BadRequest("Choose dots, dashes, a solid line or no leader, and page numbers on the right, after the title or on the left.")
             if type(settings["hyperlinks"]) is not bool or type(settings["numbered"]) is not bool:
                 raise BadRequest("TOC hyperlink and numbering settings must be booleans.")
+            # the layout of an entry: what was stored, a gallery look's own position when one is chosen, then what the request says
+            for key in ("page_position", "custom_tab_mm", "number_align", "number_column_mm", "leader_char", "leader_gap_pt", "text_align"):
+                if key in current:
+                    settings[key] = current[key]
+            if spec is not None and chosen != "custom" and "page_position" not in layout:
+                settings["page_position"] = spec["page_align"]                                  # choosing a look brings its own place for the numbers
+                for key in ("custom_tab_mm", "number_align", "number_column_mm"):
+                    settings.pop(key, None)
+            for key, value in layout.items():
+                if value is None:
+                    settings.pop(key, None)
+                else:
+                    settings[key] = value
+            position = settings.get("page_position") or toc_presets.LEGACY_POSITION.get(settings["page_align"], "right")
+            settings["page_position"] = position
+            settings["page_align"] = position if position in toc_presets.ALIGNS else "right"   # what older versions read
+            if position == "custom" and "custom_tab_mm" not in settings:
+                settings["custom_tab_mm"] = 120.0
+            if position != "hidden":
+                if "page_position" in layout or "page_align" in look:
+                    show_page_numbers = True                                                      # choosing a place for the numbers shows them again
+            else:
+                show_page_numbers = False
+            if "leader" in look and look["leader"] == "custom" and "leader_char" not in settings:
+                settings["leader_char"] = "·"
             leader_dots = settings["leader"] != "none"
             if spec is not None:
                 preset = spec["core"]
@@ -610,6 +639,12 @@ class Academic:
             for n in range(1, 7):
                 fallback = {"font_size_pt": max(8, round(11 - (n - 1) * 0.35, 2)), "space_after_pt": 3, **({"bold": True} if n == 1 else {})}
                 level_props[n] = dict(spec["levels"][n - 1]) if base_ready else dict(named_now.get(f"TOC Level {n}") or fallback)
+                if "text_align" in layout:                                                        # one alignment for the text of every level, unless a level has its own
+                    if layout["text_align"] in (None, "left"):
+                        level_props[n].pop("align", None)
+                    else:
+                        level_props[n]["align"] = layout["text_align"]
+                    restyle = True
                 level_props[n].update(over_levels.get(n, {}))
             title_props_new.update(over_title)
         ops: list[dict[str, Any]] = []
@@ -688,8 +723,11 @@ class Academic:
                                                "source_text": label, "level": item["level"]}}}
             if not attributes:
                 entry.pop("attributes")
+            kept = [dict(sp) for sp in (previous or {}).get("spans", []) if sp.get("type") != "xref"] if previous and previous["text"] == label and not restyle else []
             if settings is None or settings["hyperlinks"]:
-                entry["spans"] = [{"type": "xref", "start": 0, "end": len(label), "target": item["block"]}]
+                kept.append({"type": "xref", "start": 0, "end": len(label), "target": item["block"]})
+            if kept:
+                entry["spans"] = kept                                                   # formatting the writer gave words inside an entry survives an update
             own = previous.get("style") if previous else None
             if own and (settings is None or (not own.startswith("TOC Level") and not restyle)):
                 entry["style"] = own                                                   # a style the writer chose by hand stays

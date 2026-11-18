@@ -4,7 +4,9 @@ A look is made of ordinary Writer things, so nothing here is a second style engi
 
 * the paragraph styles ``TOC Title`` and ``TOC Level 1`` .. ``TOC Level 6`` (typeface, size, weight, colour, indent, spacing) in the document's ``styles``;
 * the options stored on the table's title block in the namespaced extension ``slai.writer.toc_style``: ``preset``, ``leader``, ``page_align``,
-  ``hyperlinks`` and ``numbered``. (Showing page numbers and "leader" on/off stay in the native ``slai.sldc.toc`` extension every SLDC reader knows.)
+  ``hyperlinks`` and ``numbered``, and the layout of an entry (where the page number goes and how it is aligned, the leader, the alignment of the text): ``page_position``,
+  ``custom_tab_mm``, ``number_align``, ``number_column_mm``, ``leader_char``, ``leader_gap_pt`` and ``text_align``. (Showing page numbers and "leader" on/off stay in the
+  native ``slai.sldc.toc`` extension every SLDC reader knows.) ``page_align`` is what older versions wrote; ``page_position`` is the full setting and wins when both are there.
 
 The core ``slai.sldc.toc`` extension only knows three presets, so every look here also names the nearest of those (``core``) and writes that.
 """
@@ -13,9 +15,16 @@ from __future__ import annotations
 from typing import Any
 
 EXTENSION = "slai.writer.toc_style"
-LEADERS = ("dots", "dashes", "solid", "none")
+LEADERS = ("dots", "dashes", "solid", "custom", "none")
 ALIGNS = ("right", "inline", "left")
-LEVEL_KEYS = frozenset({"font_family", "font_size_pt", "bold", "italic", "small_caps", "color", "indent_mm", "space_before_pt", "space_after_pt", "line_height"})
+POSITIONS = ("right", "left", "inline", "custom", "hidden")
+LEGACY_POSITION = {"right": "right", "inline": "inline", "left": "left"}
+NUMBER_ALIGNS = ("left", "center", "right")
+TEXT_ALIGNS = ("left", "center", "right")
+LEVEL_ALIGNS = ("left", "center", "right", "justify")
+LOOK_KEYS = frozenset({"preset", "leader", "page_align", "page_position", "custom_tab_mm", "number_align", "number_column_mm", "leader_char", "leader_gap_pt", "text_align",
+                       "hyperlinks", "numbered", "levels", "title"})
+LEVEL_KEYS = frozenset({"font_family", "font_size_pt", "bold", "italic", "small_caps", "color", "indent_mm", "space_before_pt", "space_after_pt", "line_height", "align"})
 TITLE_KEYS = frozenset({"font_family", "font_size_pt", "bold", "italic", "small_caps", "color", "align", "space_after_pt", "space_before_pt"})
 ORDER = ["classic", "modern", "minimalist", "academic", "professional", "formal", "compact", "elegant", "technical", "book", "outline", "custom"]
 
@@ -145,6 +154,8 @@ def check_levels(levels: Any) -> dict[int, dict[str, Any]]:
             raise ValueError("Level formatting is given per level number (1 to 6).") from None
         if not 1 <= n <= 6 or not isinstance(props, dict) or set(props) - LEVEL_KEYS:
             raise ValueError(f"Level {key} can only change: {', '.join(sorted(LEVEL_KEYS))}.")
+        if "align" in props and props["align"] not in LEVEL_ALIGNS:
+            raise ValueError(f"Level {key}: the text alignment is left, center, right or justify.")
         out[n] = dict(props)
     return out
 
@@ -155,3 +166,42 @@ def check_title(props: Any) -> dict[str, Any]:
     if not isinstance(props, dict) or set(props) - TITLE_KEYS:
         raise ValueError(f"The title can only change: {', '.join(sorted(TITLE_KEYS))}.")
     return dict(props)
+
+
+def _number(value: Any, name: str, low: float, high: float) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+        raise ValueError(f"{name} is a number from {low:g} to {high:g}.")
+    return float(value)
+
+
+def check_layout(look: dict[str, Any]) -> dict[str, Any]:
+    """The layout settings of an entry that the request carries, validated: ``{"page_position": "custom", "custom_tab_mm": 120.0, ...}``. A key left out is not changed;
+    a key set to None clears it (the look's own default applies again)."""
+    out: dict[str, Any] = {}
+    position = look.get("page_position")
+    if position is None and look.get("page_align") is not None:
+        position = look["page_align"]
+    if position is not None and position not in POSITIONS:
+        raise ValueError("Page numbers go on the right, on the left, right after the title, at a tab stop of your own, or nowhere.")
+    if "page_position" in look or "page_align" in look:
+        out["page_position"] = position
+    if "leader" in look and look["leader"] not in LEADERS:
+        raise ValueError("Choose dots, dashes, a solid line, a character of your own or no leader.")
+    for key, options, what in (("number_align", NUMBER_ALIGNS, "The page number is aligned left, center or right in its column."),
+                               ("text_align", TEXT_ALIGNS, "The text of the entries is aligned left, center or right.")):
+        if key in look:
+            if look[key] is not None and look[key] not in options:
+                raise ValueError(what)
+            out[key] = look[key]
+    for key, name, low, high in (("custom_tab_mm", "The tab stop of the page numbers", 0, 600), ("number_column_mm", "The width of the page-number column", 1, 100),
+                                 ("leader_gap_pt", "The space between the marks of the leader", 0, 40)):
+        if key in look:
+            out[key] = _number(look[key], name, low, high)
+    if "leader_char" in look:
+        char = look["leader_char"]
+        if char is not None and (not isinstance(char, str) or not 0 < len(char) <= 3 or not char.isprintable() or char.isspace()):
+            raise ValueError("The leader character is one to three visible characters.")
+        out["leader_char"] = char
+    return out
