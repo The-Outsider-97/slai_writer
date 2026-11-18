@@ -57,7 +57,9 @@ class PDFLayoutTests(Workbench):
         pdf = PdfReader(BytesIO(exchange.print_pdf(session)))
         self.assertEqual(len(pdf.pages), layout["pages"])
         printed_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-        self.assertIn("...", printed_text, "TOC leader dots must appear in the actual PDF, not just in the UI")
+        # The leader is a row of dots, each set on the leader grid of its line (``toc_layout``), so a text extractor may return them one per line, not as "...".
+        import re
+        self.assertRegex(printed_text, r"(?:\.\s*){12,}", "TOC leader dots must appear in the actual PDF, not just in the UI")
         for heading in headings:
             self.assertIn(heading["text"], printed_text)
 

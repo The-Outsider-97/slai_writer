@@ -146,7 +146,7 @@ try {
     await refsTab();
     await page.getByRole("button", { name: /^Edit settings/i }).click();
     const dlg = page.getByRole("dialog");
-    await dlg.getByLabel("Leader").selectOption("dashes");
+    await dlg.getByLabel("Leader", { exact: true }).selectOption("dashes");
     await dlg.getByLabel("Page numbers", { exact: true }).selectOption("inline");
     await dlg.getByLabel("Number the entries like an outline (1, 1.1, 1.1.1)").check();
     await dlg.getByLabel("Level 1 size in points").fill("15");
@@ -158,7 +158,7 @@ try {
     eq((await tocEntries())[0].text, "1 Chapter 1", "numbered");
     eq((await tocEntries())[1].text, "1.1 Section 1.1", "numbered below");
     eq((await styles())["TOC Level 1"].font_size_pt, 15, "level formatting is the style");
-    await until(async () => (await page.locator('#main .blk[data-toc-entry][data-toc-leader=dashes]').count()) > 0, "dashed leaders drawn");
+    await until(async () => (await page.locator('#main .blk[data-toc-entry][data-toc-painted][data-toc-leader-kind=none]').count()) > 0, "numbers right after the title have no leader");
     await dlg.waitFor({ state: "detached" });
   });
 
