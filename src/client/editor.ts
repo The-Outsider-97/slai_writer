@@ -15,6 +15,9 @@ import { DocModel, OpQueue, layerOf } from "./model.js";
 import { api, errorText } from "./net.js";
 import { PageView, type LayoutBlock, type PageEvents } from "./page.js";
 import { EDIT_MODE, footnoteNumbers, listMarkers, refreshBlock, renderBlock, syncLayer, type RenderContext } from "./render.js";
+import { resolveLook, type TocLayoutSettings, type TocLook } from "./toc_layout.js";
+import { paintTocEntries, type TocEntryInput } from "./toc_paint.js";
+import { BandEditor } from "./band_edit.js";
 import { cleanInsert, diffText, MM_PX, splitLines, toCodepoints } from "./textops.js";
 import { COLUMN_BREAK, OBJECT_CHAR, TEXT_TYPES, type Block, type CommentThread, type DocState, type HeaderFooter, type Op, type Patch, type Prefs, type Reference } from "./types.js";
 
@@ -76,6 +79,10 @@ export class Editor {
   private heldSaid = false;
   private printLayoutTimer: number | undefined;
   private tocRefreshTimer: number | undefined;
+  private tocPaintFrame: number | undefined;
+  private lastTocLabels: Record<string, string> = {};
+  /** How many times the contents entries were painted (the browser tests wait for it). */
+  tocPaintCount = 0;
   private lastTocHeadingSignature = "";
   private destroyed = false;
   stale = false;
@@ -106,20 +113,27 @@ export class Editor {
       if (sec?.role) hf.role = sec.role;
       return hf;
     });
+    this.bands = new BandEditor(this);
     this.renderAll();
     this.lastTocHeadingSignature = this.headingSignature();
     this.schedulePrintLayout();
     document.addEventListener("selectionchange", this.onSelectionChange);
+    void document.fonts?.ready.then(() => this.scheduleTocPaint());                      // the entries are measured again once the fonts are there
   }
+
+  /** The shapes of headers and footers: what the sheets draw of them, and the mode in which they are edited. */
+  readonly bands: BandEditor;
 
   destroy(): void {
     this.destroyed = true;
+    this.bands.destroy();
     document.removeEventListener("selectionchange", this.onSelectionChange);
     window.clearTimeout(this.reflowTimer);
     window.clearTimeout(this.settleTimer);
     window.clearTimeout(this.flushTimer);
     window.clearTimeout(this.printLayoutTimer);
     window.clearTimeout(this.tocRefreshTimer);
+    if (this.tocPaintFrame !== undefined) window.cancelAnimationFrame(this.tocPaintFrame);
     this.decor.clear();
   }
 
@@ -237,30 +251,37 @@ export class Editor {
     this.events.emit({ type: "layout" });
   }
 
-  /** Exact TOC page labels are non-editable CSS decorations, not serialized text. */
+  /** Exact TOC page labels and leaders are non-editable CSS decorations, not serialized text: `toc_paint.ts` measures every entry and draws them with the
+   *  same engine as the exported pages, from the table's own settings (where the number goes, how it and the text are aligned, the leader). */
   private paintTocNumbers(): void {
-    const labels = this.printLayout?.blockLabels ?? {};
-    const titles = new Map<string, { show_page_numbers?: boolean; leader_dots?: boolean; leader?: string; align?: string }>();
+    // while the pages are measured again the numbers of the last measurement stay (they are right until the layout says otherwise): nothing flickers
+    if (this.printLayout?.blockLabels) this.lastTocLabels = this.printLayout.blockLabels;
+    const labels = this.printLayout?.blockLabels ?? this.lastTocLabels;
+    const tables = new Map<string, TocLook>();
     for (const block of this.model.list()) {
       const toc = block.extensions?.["slai.sldc.toc"] as { role?: string; id?: string; show_page_numbers?: boolean; leader_dots?: boolean } | undefined;
-      const look = block.extensions?.["slai.writer.toc_style"] as { leader?: string; page_align?: string } | undefined;
-      if (toc?.role === "title" && toc.id) titles.set(toc.id, { ...toc, ...(look?.leader ? { leader: look.leader } : {}), ...(look?.page_align ? { align: look.page_align } : {}) });
+      if (toc?.role !== "title" || !toc.id) continue;
+      tables.set(toc.id, resolveLook(block.extensions?.["slai.writer.toc_style"] as TocLayoutSettings | undefined, toc.show_page_numbers !== false, toc.leader_dots !== false));
     }
+    const items: TocEntryInput[] = [];
     for (const element of this.els.values()) {
       const heading = element.dataset["tocEntry"];
       if (!heading) continue;
       const text = element.querySelector<HTMLElement>("[data-edit=text]");
       if (!text) continue;
-      const options = titles.get(element.dataset["tocId"] ?? "");
-      const label = options?.show_page_numbers === false ? "" : labels[heading] ?? "";
-      // Keep the editable text element's inline formatting and selection model
-      // untouched; page references are decorations on its block wrapper.
-      if (label) element.dataset["tocPage"] = label;
-      else delete element.dataset["tocPage"];
-      element.toggleAttribute("data-no-leaders", options?.leader_dots === false || options?.leader === "none");
-      if (options?.leader && options.leader !== "dots") element.dataset["tocLeader"] = options.leader; else delete element.dataset["tocLeader"];
-      if (options?.align && options.align !== "right") element.dataset["tocAlign"] = options.align; else delete element.dataset["tocAlign"];
+      const id = element.dataset["tocId"] ?? "";
+      const look = tables.get(id) ?? resolveLook(null);
+      // The editable text element keeps its inline formatting and selection model untouched; page references are decorations on its block wrapper.
+      items.push({ wrapper: element, text, label: look.position === "hidden" ? "" : labels[heading] ?? "", group: id, look });
     }
+    paintTocEntries(items);
+    this.tocPaintCount += 1;
+  }
+
+  /** Entries are measured again after their text changes or the fonts arrive: one repaint per frame at most. */
+  private scheduleTocPaint(): void {
+    if (this.tocPaintFrame !== undefined) return;
+    this.tocPaintFrame = window.requestAnimationFrame(() => { this.tocPaintFrame = undefined; if (!this.destroyed) this.paintTocNumbers(); });
   }
 
   private headingSignature(): string {
@@ -296,7 +317,7 @@ export class Editor {
   schedulePrintLayout(): void {
     window.clearTimeout(this.printLayoutTimer);
     this.printLayout = null;
-    this.paintTocNumbers();
+    this.scheduleTocPaint();
     this.printLayoutTimer = window.setTimeout(async () => {
       if (this.destroyed || this.queue.pending) { if (!this.destroyed) this.schedulePrintLayout(); return; }
       const version = this.model.version;

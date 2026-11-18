@@ -1,5 +1,6 @@
 /** The bars around the page: the top bar (menu, Save, Undo/Redo, open documents, file name, search), the formatting bar and the status bar. */
 import { buildTextBoxRibbon, homeStyleToBox } from "./textbox_ribbon.js";
+import { buildBandRibbon } from "./band_ribbon.js";
 import { activeTextBoxId, applyTextBoxAction } from "./textbox_edit.js";
 import { ApiError, announce, glyph, h, openDialog, openMenu, toast, type MenuEntry } from "./kit.js";
 import { chevron, crossIcon, dico } from "./dico.js";
@@ -412,7 +413,8 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
   const illustrations = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Insert illustrations" } },
     referenceGroup("Illustrations", ribbonButton("Insert Picture", fire("picture"), "image"), ribbonButton("Insert Shape", fire("shape"), "layers")),
     referenceGroup("Tables", ribbonButton("Table", fire("table"), "table"), ribbonButton("Markdown to table", fire("markdown-table"), "table")),
-    referenceGroup("Text", ribbonButton("Text Box", fire("textbox"), "paragraph"), ribbonButton("Draw Text Box", fire("textbox-draw"), "pen")));
+    referenceGroup("Text", ribbonButton("Text Box", fire("textbox"), "paragraph"), ribbonButton("Draw Text Box", fire("textbox-draw"), "pen")),
+    referenceGroup("Header & Footer", ribbonButton("Header", fire("band-header"), "layers"), ribbonButton("Footer", fire("band-footer"), "layers")));
   // Contextual shape formatting uses the same canonical shape_set operation as
   // the full dialog; there is no separate undo, document store, or renderer.
   const selectedShape = (): { id: string; shape: ShapeData } | null => {
@@ -452,6 +454,8 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     referenceGroup("Shape Text", ribbonButton("Edit Shape Text", openShape, "paragraph")),
     referenceGroup("Effects", ribbonButton("Shadows & Effects", openShape, "sparkle")),
     referenceGroup("Arrange", ribbonButton("Arrange & Group", openShape, "layers")));
+  const bandRibbon = buildBandRibbon(ctx, referenceGroup, ribbonButton);
+  bandRibbon.el.hidden = true;
   const textBoxRibbon = buildTextBoxRibbon(ctx, referenceGroup, ribbonButton);
   textBoxRibbon.el.hidden = true;
   const home = h("div", { class: "format-ribbon", attrs: { role: "toolbar", "aria-label": "Home formatting ribbon" } }, fontGroup, paragraphGroup);
@@ -459,6 +463,7 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
   const insertTab = h("button", { type: "button", class: "ribbon-tab", text: "Insert", attrs: { role: "tab", "aria-selected": "false" } });
   const shapeTab = h("button", { type: "button", class: "ribbon-tab", text: "Shape Format", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
   const textTab = h("button", { type: "button", class: "ribbon-tab", text: "Text Box", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
+  const bandTab = h("button", { type: "button", class: "ribbon-tab", text: "Header & Footer", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
   const refsTab = h("button", { type: "button", class: "ribbon-tab", text: "References", attrs: { role: "tab", "aria-selected": "false" } });
   const tableRibbons = buildTableRibbons(ctx);
   const layoutRibbon = buildLayoutRibbon(ctx);
@@ -466,9 +471,10 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
   const layoutTab = h("button", { type: "button", class: "ribbon-tab", text: "Layout", attrs: { role: "tab", "aria-selected": "false" } });
   const designTab = h("button", { type: "button", class: "ribbon-tab", text: "Table Design", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
   const tableLayoutTab = h("button", { type: "button", class: "ribbon-tab", text: "Table Layout", hidden: true, attrs: { role: "tab", "aria-selected": "false" } });
-  let activeTab: "home" | "references" | "insert" | "layout" | "shape" | "textbox" | "tdesign" | "tlayout" = "home";
+  let activeTab: "home" | "references" | "insert" | "layout" | "shape" | "textbox" | "tdesign" | "tlayout" | "band" = "home";
   let hadShape = false;
   let hadBox = false;
+  let hadBand = false;
   let hadTable = false;
   const showTab = (which: typeof activeTab): void => {
     activeTab = which;
@@ -476,6 +482,10 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     // The text box ribbon is only in the page while its tab is showing, so its controls never share a label with the Home controls they mirror.
     if (which === "textbox") { if (!textBoxRibbon.el.isConnected) shapeRibbon.after(textBoxRibbon.el); textBoxRibbon.el.hidden = false; }
     else textBoxRibbon.el.remove();
+    // Like the text box ribbon, this one is in the page only while its tab shows.
+    if (which === "band") { if (!bandRibbon.el.isConnected) shapeRibbon.after(bandRibbon.el); bandRibbon.el.hidden = false; bandRibbon.update(); }
+    else bandRibbon.el.remove();
+    bandTab.setAttribute("aria-selected", String(which === "band"));
     tableRibbons.design.hidden = which !== "tdesign"; tableRibbons.layout.hidden = which !== "tlayout";
     layoutRibbon.el.hidden = which !== "layout"; layoutTab.setAttribute("aria-selected", String(which === "layout"));
     if (which === "layout") layoutRibbon.update();
@@ -492,10 +502,11 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
   layoutTab.addEventListener("click", () => showTab("layout"));
   shapeTab.addEventListener("click", () => showTab("shape"));
   textTab.addEventListener("click", () => showTab("textbox"));
+  bandTab.addEventListener("click", () => showTab("band"));
   designTab.addEventListener("click", () => showTab("tdesign"));
   tableLayoutTab.addEventListener("click", () => showTab("tlayout"));
   const el = h("div", { class: "bar writer-ribbon" },
-    h("div", { class: "ribbon-tabs", attrs: { role: "tablist", "aria-label": "Ribbon tabs" } }, homeTab, insertTab, layoutTab, refsTab, shapeTab, textTab, designTab, tableLayoutTab), home, illustrations, layoutRibbon.el, refs, shapeRibbon, tableRibbons.design, tableRibbons.layout);
+    h("div", { class: "ribbon-tabs", attrs: { role: "tablist", "aria-label": "Ribbon tabs" } }, homeTab, insertTab, layoutTab, refsTab, bandTab, shapeTab, textTab, designTab, tableLayoutTab), home, illustrations, layoutRibbon.el, refs, shapeRibbon, tableRibbons.design, tableRibbons.layout);
   showTab("home");
   const GROUPS_KEY = "writer.ribbonGroups.v1";
   const groupRows = [{ id: "font", label: "Font", element: fontGroup }, { id: "paragraph", label: "Paragraph / Alignment", element: paragraphGroup }];
@@ -563,8 +574,14 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     return current;
   };
   const update = (): void => {
-    const activeBox = textBoxRibbon.selected();
-    const activeShape = activeBox ? null : selectedShape();
+    const bandOn = ed.bands.active !== null;
+    bandTab.hidden = !bandOn;
+    if (bandOn && !hadBand) showTab("band");
+    else if (!bandOn && activeTab === "band") showTab("insert");
+    hadBand = bandOn;
+    if (bandOn) bandRibbon.update();
+    const activeBox = bandOn ? null : textBoxRibbon.selected();
+    const activeShape = activeBox || bandOn ? null : selectedShape();
     const hasShape = Boolean(activeShape) || Boolean(activeBox);
     shapeTab.hidden = !activeShape;
     textTab.hidden = !activeBox;
@@ -659,6 +676,7 @@ export function buildFormatBar(ctx: DocCtx): { el: HTMLElement; update(): void }
     await Promise.allSettled([...used].map((name) => ensureBundledFont(name)));
     ed.layout();
   }).catch(() => { /* The editor remains usable with installed system fonts when the shared catalogue is unavailable. */ });
+  ed.bands.listen(() => update());                                   // entering or leaving a header or footer shows or hides its tab
   update();
   return { el, update };
 }

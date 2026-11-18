@@ -13,7 +13,7 @@ def render() -> str:
     data = {"order": toc_presets.ORDER, "presets": {k: toc_presets.PRESETS[k] for k in toc_presets.ORDER}}
     body = json.dumps(data, indent=1, ensure_ascii=False)
     return ("/* Generated from toc_presets.py by scripts/gen_toc_presets.py: do not edit by hand. */\n"
-            "export interface TocLevelLook { font_family?: string; font_size_pt?: number; bold?: boolean; italic?: boolean; small_caps?: boolean; color?: string; indent_mm?: number; space_before_pt?: number; space_after_pt?: number; line_height?: number }\n"
+            "export interface TocLevelLook { font_family?: string; font_size_pt?: number; bold?: boolean; italic?: boolean; small_caps?: boolean; color?: string; indent_mm?: number; space_before_pt?: number; space_after_pt?: number; line_height?: number; align?: string }\n"
             "export interface TocTitleLook { font_family?: string; font_size_pt?: number; bold?: boolean; italic?: boolean; small_caps?: boolean; color?: string; align?: string; space_after_pt?: number; space_before_pt?: number }\n"
             "export interface TocPreset { name: string; description: string; core: string; leader: \"dots\" | \"dashes\" | \"solid\" | \"none\"; page_align: \"right\" | \"inline\" | \"left\"; numbered: boolean; title: TocTitleLook | null; levels: TocLevelLook[] | null }\n"
             f"export const TOC_PRESETS: {{ order: string[]; presets: Record<string, TocPreset> }} = {body};\n")

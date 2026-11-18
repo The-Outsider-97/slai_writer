@@ -9,9 +9,16 @@ export const TOC_KEY = "slai.sldc.toc";
 export const TOC_STYLE_KEY = "slai.writer.toc_style";
 
 export interface TocCore { id: string; role: "title" | "entry"; depth: number; preset?: string; show_page_numbers?: boolean; leader_dots?: boolean; refresh_mode?: "automatic" | "manual"; heading?: string; level?: number }
-export interface TocLook { preset: string; leader: "dots" | "dashes" | "solid" | "none"; page_align: "right" | "inline" | "left"; hyperlinks: boolean; numbered: boolean }
+export type TocPositionKind = "right" | "left" | "inline" | "custom" | "hidden";
+export interface TocLook {
+  preset: string; leader: "dots" | "dashes" | "solid" | "custom" | "none"; page_align: "right" | "inline" | "left"; hyperlinks: boolean; numbered: boolean;
+  /** Where the page number goes, how it is aligned in its column, the column and tab stop, the leader's own character and spacing, the alignment of the text. */
+  page_position: TocPositionKind; number_align?: "left" | "center" | "right"; custom_tab_mm?: number; number_column_mm?: number; leader_char?: string; leader_gap_pt?: number;
+  text_align?: "left" | "center" | "right";
+}
 export interface TocInfo { id: string; title: Block; entries: Block[]; core: TocCore; look: TocLook }
-export interface TocLookRequest { preset?: string; leader?: string; page_align?: string; hyperlinks?: boolean; numbered?: boolean; levels?: Record<string, Record<string, unknown>>; title?: Record<string, unknown> }
+export interface TocLookRequest { preset?: string; leader?: string; page_align?: string; hyperlinks?: boolean; numbered?: boolean; page_position?: string; number_align?: string | null;
+  custom_tab_mm?: number | null; number_column_mm?: number | null; leader_char?: string | null; leader_gap_pt?: number | null; text_align?: string | null; levels?: Record<string, Record<string, unknown>>; title?: Record<string, unknown> }
 
 /** The managed tables of contents of the document. */
 export function allTocs(ed: Editor): TocInfo[] {
@@ -25,11 +32,15 @@ export function allTocs(ed: Editor): TocInfo[] {
       const look: TocLook = {
         preset: stored.preset ?? "custom", leader: stored.leader ?? (core.leader_dots === false ? "none" : "dots"), page_align: stored.page_align ?? "right",
         hyperlinks: stored.hyperlinks ?? true, numbered: stored.numbered ?? false,
+        page_position: stored.page_position ?? stored.page_align ?? "right",
+        ...(stored.number_align ? { number_align: stored.number_align } : {}), ...(stored.custom_tab_mm !== undefined ? { custom_tab_mm: stored.custom_tab_mm } : {}),
+        ...(stored.number_column_mm !== undefined ? { number_column_mm: stored.number_column_mm } : {}), ...(stored.leader_char ? { leader_char: stored.leader_char } : {}),
+        ...(stored.leader_gap_pt !== undefined ? { leader_gap_pt: stored.leader_gap_pt } : {}), ...(stored.text_align ? { text_align: stored.text_align } : {}),
       };
       info = { id: core.id, title: block, entries: info?.entries ?? [], core, look };
       found.set(core.id, info);
     } else if (info) info.entries.push(block);
-    else found.set(core.id, { id: core.id, title: block, entries: [block], core, look: { preset: "custom", leader: "dots", page_align: "right", hyperlinks: true, numbered: false } });
+    else found.set(core.id, { id: core.id, title: block, entries: [block], core, look: { preset: "custom", leader: "dots", page_align: "right", page_position: "right", hyperlinks: true, numbered: false } });
   }
   return [...found.values()].filter((t) => t.core.role === "title");
 }

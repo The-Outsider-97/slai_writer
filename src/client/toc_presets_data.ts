@@ -1,5 +1,5 @@
 /* Generated from toc_presets.py by scripts/gen_toc_presets.py: do not edit by hand. */
-export interface TocLevelLook { font_family?: string; font_size_pt?: number; bold?: boolean; italic?: boolean; small_caps?: boolean; color?: string; indent_mm?: number; space_before_pt?: number; space_after_pt?: number; line_height?: number }
+export interface TocLevelLook { font_family?: string; font_size_pt?: number; bold?: boolean; italic?: boolean; small_caps?: boolean; color?: string; indent_mm?: number; space_before_pt?: number; space_after_pt?: number; line_height?: number; align?: string }
 export interface TocTitleLook { font_family?: string; font_size_pt?: number; bold?: boolean; italic?: boolean; small_caps?: boolean; color?: string; align?: string; space_after_pt?: number; space_before_pt?: number }
 export interface TocPreset { name: string; description: string; core: string; leader: "dots" | "dashes" | "solid" | "none"; page_align: "right" | "inline" | "left"; numbered: boolean; title: TocTitleLook | null; levels: TocLevelLook[] | null }
 export const TOC_PRESETS: { order: string[]; presets: Record<string, TocPreset> } = {

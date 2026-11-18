@@ -33,7 +33,10 @@ export interface Command {
 }
 
 const tocNeeded = (ctx: DocCtx): string | null => (ctx.ed.readOnly ? "This document is read-only." : TOC.tocTarget(ctx.ed) ? null : TOC.allTocs(ctx.ed).length ? "Place the cursor in the table of contents first." : "There is no table of contents yet.");
-const EDITING = (ctx: DocCtx): string | null => (ctx.ed.readOnly ? "This document is read-only." : null);
+/** The document can be changed at all. */
+const WRITABLE = (ctx: DocCtx): string | null => (ctx.ed.readOnly ? "This document is read-only." : null);
+/** The body of the document can be changed: not while a header or footer is being edited (its own commands work there). */
+const EDITING = (ctx: DocCtx): string | null => WRITABLE(ctx) ?? (ctx.ed.bands.active ? "Close the header and footer first (Escape), then change the body." : null);
 const needsCaret = (ctx: DocCtx): string | null => EDITING(ctx) ?? (ctx.ed.recallSelection() ? null : "Place the cursor in the text first.");
 const AI_NOTE = "AI is off or unavailable; writing works without it.";
 
@@ -120,10 +123,10 @@ export const COMMANDS: Command[] = [
   { id: "shape-format", label: "Shape Format…", group: "Insert", icon: "layers", keywords: "shape text fill outline shadow rotate arrange group", 
     unavailable: c => EDITING(c) ?? (shapeOf(c.ed.model.block(c.ed.selectedBlock ?? "")) ? null : "Select a shape first."),
     run: c => c.ed.selectedBlock ? editShape(c,c.ed.selectedBlock) : undefined },
-  { id: "textbox", label: "Text Box…", group: "Insert", icon: "paragraph", keywords: "text box textbox callout sidebar pull quote frame floating", unavailable: EDITING, run: (c) => insertTextBox(c) },
-  { id: "textbox-draw", label: "Draw Text Box", group: "Insert", icon: "pen", keywords: "text box textbox draw drag", unavailable: EDITING, run: (c) => drawTextBox(c) },
-  { id: "textbox-default", label: "Text Box (default size)", group: "Insert", icon: "paragraph", keywords: "text box textbox default quick", unavailable: EDITING, run: async (c) => { await addTextBox(c); } },
-  { id: "shape", label: "Insert Shape…", group: "Insert", icon: "layers", keywords: "vector rectangle ellipse line star arrow triangle diamond pentagon hexagon cross", unavailable: EDITING, run: (c) => insertShape(c) },
+  { id: "textbox", label: "Text Box…", group: "Insert", icon: "paragraph", keywords: "text box textbox callout sidebar pull quote frame floating", unavailable: WRITABLE, run: (c) => insertTextBox(c) },
+  { id: "textbox-draw", label: "Draw Text Box", group: "Insert", icon: "pen", keywords: "text box textbox draw drag", unavailable: WRITABLE, run: (c) => drawTextBox(c) },
+  { id: "textbox-default", label: "Text Box (default size)", group: "Insert", icon: "paragraph", keywords: "text box textbox default quick", unavailable: WRITABLE, run: async (c) => { await addTextBox(c); } },
+  { id: "shape", label: "Insert Shape…", group: "Insert", icon: "layers", keywords: "vector rectangle ellipse line star arrow triangle diamond pentagon hexagon cross", unavailable: WRITABLE, run: (c) => insertShape(c) },
   { id: "picture", label: "Add illustration (picture)…", group: "Insert", icon: "image", keywords: "image photo figure illustration place", shortcut: "Ctrl+D", unavailable: EDITING, run: (c) => pickPicture(c) },
   { id: "equation", label: "Equation (block)…", group: "Insert", icon: "sigma", keywords: "math formula latex", unavailable: EDITING, run: (c) => equationDialog(c) },
   { id: "equation-inline", label: "Equation (inline)…", group: "Insert", icon: "sigma", keywords: "math formula latex", unavailable: needsCaret, run: (c) => equationDialog(c, undefined, true) },
@@ -152,6 +155,9 @@ export const COMMANDS: Command[] = [
     run: async (c) => { await C.setColumns(c.ed, C.defaultScope(c.ed), { columns: n, widths_mm: null }); } })),
   { id: "column-break", label: "Column break", group: "Insert", icon: "page", keywords: "next column break", unavailable: needsCaret, run: async (c) => { await C.insertColumnBreak(c.ed); } },
   { id: "scripture", label: "Scripture paragraph style", group: "Paragraph", icon: "book", keywords: "scripture verse passage bible quote columns", unavailable: needsCaret, run: async (c) => { await C.applyScripture(c.ed); } },
+  { id: "band-header", label: "Edit header (with its shapes)", group: "Insert", icon: "layout", keywords: "header shapes line logo rectangle repeat every page", unavailable: WRITABLE, run: (c) => { c.ed.bands.enter("header", c.ed.bands.pageInView()); } },
+  { id: "band-footer", label: "Edit footer (with its shapes)", group: "Insert", icon: "layout", keywords: "footer shapes line logo rectangle repeat every page", unavailable: WRITABLE, run: (c) => { c.ed.bands.enter("footer", c.ed.bands.pageInView()); } },
+  { id: "band-close", label: "Close header and footer", group: "Insert", icon: "close", keywords: "header footer exit editing", unavailable: (c) => (c.ed.bands.active ? null : "No header or footer is being edited."), run: (c) => { c.ed.bands.exit(); } },
   { id: "header-footer", label: "Header and footer…", group: "Document", icon: "layout", keywords: "page number running head", unavailable: EDITING, run: (c) => headerFooterDialog(c) },
   { id: "page-setup", label: "Page dimensions and margins…", group: "Document", icon: "ruler", keywords: "size paper a4 letter orientation margins", unavailable: EDITING, run: (c) => pageSetupDialog(c) },
   { id: "background", label: "Add background (page colour)…", group: "Document", icon: "background", keywords: "page colour color", shortcut: "Ctrl+Alt+B", unavailable: EDITING, run: (c) => backgroundDialog(c) },

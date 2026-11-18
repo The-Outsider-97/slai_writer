@@ -27,6 +27,7 @@ function visibleSheet(ctx: DocCtx): HTMLElement | null {
 export async function addTextBox(ctx: DocCtx, preset: TextBoxPreset = TEXTBOX_PRESETS[0] as TextBoxPreset): Promise<string | undefined> {
   const { ed } = ctx;
   if (ed.readOnly) return undefined;
+  if (ed.bands.active) { drawTextBox(ctx, preset); return undefined; }           // in a header or footer a text box is drawn onto the page (it goes into that header or footer)
   const shape: ShapeData = preset.build();
   const sheet = visibleSheet(ctx);
   const body = sheet?.querySelector<HTMLElement>(".body") ?? null;
