@@ -268,7 +268,8 @@
   --ctl-bg: rgba(255, 255, 255, .12); --ctl-border: rgba(255, 255, 255, .3); --ctl-shadow: none; --ctl-shadow-down: none; --danger: #ffb4ac; --danger-soft: rgba(255, 120, 110, .16); --ok: #9be8bb; --ok-soft: rgba(120, 230, 170, .14); --warn-bg: rgba(255, 220, 120, .16); }
 .ppanel.red { transform: translateX(100%); } .ppanel.yellow { transform: translateX(-100%); } .ppanel.embed { transform: translateY(-100%); }
 .ppanel.open { visibility: visible; transform: none; transition-delay: 0s; }
-.sheet { transition: margin-bottom .38s cubic-bezier(.4, 0, .2, 1); }
+.sheet { transition: margin-bottom .38s cubic-bezier(.4, 0, .2, 1), transform .38s cubic-bezier(.4, 0, .2, 1); }   /* a page glides to its new place (see PageView.holding); the layout itself is final at once */
+.ptab[hidden] { display: none; }
 @media (prefers-reduced-motion: reduce) { .ppanel, .ptab, .sheet { transition: none !important; } }
 .ppanel.red { background: rgba(128, 24, 24, .92); border-radius: 24px 0 0 24px; padding-right: 28px; }
 .ppanel.yellow { background: rgba(112, 100, 28, .92); border-radius: 0 24px 24px 0; padding-left: 28px; }
@@ -377,31 +378,18 @@
 .imgbar .ib[aria-pressed="true"] { background: light-dark(#dbe8ff, #334a78); }
 .imgbar .ib:focus-visible { outline: 2px solid #3b82f6; outline-offset: 1px; }
 .imgbar .ib-gap { width: 1px; align-self: stretch; margin: 3px 4px; background: light-dark(#ddd, #444); }
-.blk[data-toc-entry][data-toc-page] { position: relative; }
-.blk[data-toc-entry][data-toc-page] > .txt { padding-right: 3.5em; }
-.blk[data-toc-entry][data-toc-page]::before {
-  content: "";
-  position: absolute;
-  left: 55%;
-  right: 3.6em;
-  bottom: 0.5em;
-  border-bottom: 1px dotted currentColor;
-  opacity: 0.48;
-  pointer-events: none;
+/* Table of contents entries: the page number and the leader are decorations drawn from the custom properties toc_paint.ts measures (see toc_layout.ts). */
+.blk[data-toc-entry][data-toc-painted] { position: relative; }
+/* a transparent border, not padding: the renderer gives the paragraph's indent as inline padding, which would win */
+.blk[data-toc-entry][data-toc-painted] > .txt { border-left: var(--toc-pl, 0px) solid transparent; border-right: var(--toc-pr, 0px) solid transparent; }
+.blk[data-toc-entry][data-toc-painted][data-toc-page]::after,
+.blk[data-toc-entry][data-toc-painted][data-toc-leader-kind]:not([data-toc-leader-kind=none])::before {
+  position: absolute; top: var(--toc-ny, 0px); height: var(--toc-nh, 1em); box-sizing: border-box; overflow: hidden; white-space: nowrap; pointer-events: none;
+  font-style: var(--toc-fst, normal); font-weight: var(--toc-fw, normal); font-size: var(--toc-fs, 1em); font-family: var(--toc-ff, inherit); line-height: var(--toc-nh, 1.2); color: var(--toc-color, inherit);
 }
-.blk[data-toc-entry][data-no-leaders]::before {
-  border: 0;
-}
-.blk[data-toc-entry][data-toc-page]::after {
-  content: attr(data-toc-page);
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 3em;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  pointer-events: none;
-}
+.blk[data-toc-entry][data-toc-painted][data-toc-page]::after { content: attr(data-toc-page); left: var(--toc-nx, auto); }
+.blk[data-toc-entry][data-toc-painted][data-toc-leader-kind]:not([data-toc-leader-kind=none])::before { content: var(--toc-lc, ""); left: var(--toc-lx, 0px); width: var(--toc-lw, 0px); letter-spacing: var(--toc-ls, 0px); }
+.blk[data-toc-entry][data-toc-painted][data-toc-leader-kind=solid]:not([data-toc-leader-kind=none])::before { content: ""; height: calc(var(--toc-nh, 1em) * 0.82); border-bottom: 1px solid currentColor; }
 
 /* Shape formatting uses the same compact dialog and ribbon components as pictures. */
 .shape-gallery { display: grid; grid-template-columns: repeat(5, minmax(90px, 1fr)); gap: 8px; }
@@ -440,15 +428,6 @@
 .tbl-preview td { padding: 1px 2px; height: 8px; overflow: hidden; white-space: nowrap; }
 .gallery-current { max-width: 8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Table of contents: leader kinds and where the page number sits (the numbers are drawn from the exact page layout, not stored in the text). */
-.blk[data-toc-entry][data-toc-leader=dashes]::before { border-bottom-style: dashed; }
-.blk[data-toc-entry][data-toc-leader=solid]::before { border-bottom-style: solid; opacity: .6; }
-.blk[data-toc-entry][data-toc-align=inline], .blk[data-toc-entry][data-toc-align=left] { display: flex; align-items: baseline; }
-.blk[data-toc-entry][data-toc-align=inline]::before, .blk[data-toc-entry][data-toc-align=left]::before { display: none; }
-.blk[data-toc-entry][data-toc-align=inline][data-toc-page] > .txt, .blk[data-toc-entry][data-toc-align=left][data-toc-page] > .txt { padding-right: 0; flex: 0 1 auto; }
-.blk[data-toc-entry][data-toc-align=inline][data-toc-page]::after { position: static; width: auto; margin-left: .7em; text-align: left; }
-.blk[data-toc-entry][data-toc-align=left][data-toc-page] { flex-direction: row-reverse; justify-content: flex-end; }
-.blk[data-toc-entry][data-toc-align=left][data-toc-page]::after { position: static; width: auto; margin-right: .7em; text-align: left; }
 /* The style gallery and the settings dialog of a table of contents. */
 .toc-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; max-height: 56vh; overflow: auto; padding: 2px; }
 .toc-card { display: flex; flex-direction: column; gap: 4px; text-align: left; padding: 8px; border: 1px solid light-dark(#d4d4d8, #4b4f58); border-radius: 8px; background: light-dark(#fff, #25272c); color: inherit; cursor: pointer; font: inherit; }
@@ -461,8 +440,11 @@
 .toc-pv-row { display: flex; align-items: baseline; line-height: 1.35; white-space: nowrap; }
 .toc-pv-fill { flex: 1 1 auto; margin: 0 3px; min-width: 6px; transform: translateY(-3px); }
 .toc-pv-page { flex: none; font-variant-numeric: tabular-nums; }
+.toc-layout { border: 1px solid light-dark(#d4d4d8, #4b4f58); border-radius: 6px; padding: 6px 10px 10px; margin: 0; display: grid; gap: 8px; }
+.toc-layout legend { font-size: 11px; padding: 0 4px; color: light-dark(#555, #aaa); }
+.toc-layout label[hidden] { display: none; }
 .toc-levels { display: grid; gap: 4px; overflow-x: auto; }
-.toc-level-row { display: grid; grid-template-columns: 62px minmax(110px, 1.4fr) 54px 24px 24px 44px 58px 58px 58px; gap: 4px; align-items: center; }
+.toc-level-row { display: grid; grid-template-columns: 62px minmax(110px, 1.4fr) 54px 24px 24px 44px 58px 58px 58px 58px 92px; gap: 4px; align-items: center; }
 .toc-level-row input[type=text], .toc-level-row input[type=number], .toc-level-row select { width: 100%; min-width: 0; }
 .toc-level-head { font-size: 11px; color: light-dark(#666, #aaa); }
 
@@ -499,3 +481,35 @@
 .textbox-ribbon [aria-pressed="true"] { background: #d7e6fb; border-color: #296bc4; }
 .textbox-ribbon :disabled { opacity: .5; cursor: not-allowed; }
 .textbox-ribbon .ribbon-controls { flex-wrap: nowrap; }
+
+/* ---- shapes of headers and footers: drawn from the document on every page that uses the header or footer, and the mode in which they are edited */
+.band-layer { position: absolute; inset: 0; overflow: hidden; border-radius: inherit; pointer-events: none; }
+.band-layer.behind { z-index: 0; }
+.band-layer.front { z-index: 4; }
+.band-shape { position: absolute; pointer-events: none; }
+.band-shape > .writer-shape { position: absolute; left: 0; top: 0; margin: 0; cursor: inherit; }
+.band-edit-layer { position: absolute; inset: 0; z-index: 6; border-radius: inherit; pointer-events: none; user-select: none; -webkit-user-select: none; }
+.band-zone { position: absolute; left: 0; right: 0; box-sizing: border-box; pointer-events: auto; background: rgba(58, 167, 196, .07); border: 0 dashed #3aa7c4; cursor: default; }
+.band-zone.header { border-bottom-width: 1.5px; }
+.band-zone.footer { border-top-width: 1.5px; }
+.band-chip { position: absolute; left: 6px; padding: 0 6px; font: 600 10px/16px system-ui, sans-serif; color: #fff; background: #3aa7c4; border-radius: 3px; pointer-events: none; white-space: nowrap; }
+.band-zone.header .band-chip { top: 2px; } .band-zone.footer .band-chip { bottom: 2px; }
+.band-hit { position: absolute; box-sizing: border-box; pointer-events: auto; cursor: move; touch-action: none; outline: 1px dashed rgba(58, 167, 196, .85); outline-offset: 0; }
+.band-hit[data-selected] { outline: 2px solid var(--focus, #3b82f6); }
+.band-hit[data-locked] { cursor: not-allowed; }
+.band-hit:focus-visible { outline: 2px solid var(--focus, #3b82f6); outline-offset: 2px; }
+.band-handle { position: absolute; width: 9px; height: 9px; box-sizing: border-box; background: #fff; border: 1.5px solid var(--focus, #3b82f6); touch-action: none; }
+.band-handle.nw { left: -5px; top: -5px; cursor: nwse-resize; } .band-handle.n { left: calc(50% - 4px); top: -5px; cursor: ns-resize; }
+.band-handle.ne { right: -5px; top: -5px; cursor: nesw-resize; } .band-handle.e { right: -5px; top: calc(50% - 4px); cursor: ew-resize; }
+.band-handle.se { right: -5px; bottom: -5px; cursor: nwse-resize; } .band-handle.s { left: calc(50% - 4px); bottom: -5px; cursor: ns-resize; }
+.band-handle.sw { left: -5px; bottom: -5px; cursor: nesw-resize; } .band-handle.w { left: -5px; top: calc(50% - 4px); cursor: ew-resize; }
+.page-area[data-band-edit] .sheet .body { opacity: .38; pointer-events: none; user-select: none; -webkit-user-select: none; }
+.page-area[data-band-edit] .sheets { caret-color: transparent; }
+.band-ribbon .band-where { display: flex; flex-direction: column; gap: 2px; font-size: 11px; min-width: 11rem; }
+.band-ribbon .band-status { font-weight: 600; font-size: 12px; }
+.band-ribbon .band-pages { color: #666; }
+.band-ribbon .band-number { width: 4.4rem; }
+.band-ribbon .band-text { width: 11rem; resize: vertical; font: inherit; font-size: 12px; }
+.band-ribbon .ribbon-field-label { font-size: 10px; color: #666; }
+.band-ribbon .ribbon-options { grid-template-columns: auto; }
+@media print { .band-edit-layer { display: none; } }
