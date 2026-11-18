@@ -1,5 +1,17 @@
 # Change summary
 
+## Advanced ToC, table fidelity, header/footer shapes, multi-page panels (2026-11-17)
+
+Full report, root causes, verification and limits: `ADVANCED_TOC_TABLES_BANDS_PANELS.md`.
+
+* **Table of contents:** twelve looks and an entry layout engine shared by editor and PDF (`toc_presets.py`, `src/client/toc_*.ts`, `Documaster/.../toc_layout.py`).
+* **Tables:** the editor's resolved look reaches the Rendered View, PDF, Word, ODT and RTF (`export.py::_table_looks`, `table_styles.export_look`).
+* **Header/footer shapes:** `bands.py`, `slai.writer.band_shapes`, `src/client/bands.ts`, `band_edit.ts`, `band_ribbon.ts` (Insert → Header & Footer), Documaster PDF/DOCX writers
+  (`band_shapes.py`). Tests: `tests/test_band_shapes*.py`, `tests/test_page_bands.py`, `tests_ts/bands.test.ts`, `tests_e2e/band_shapes.mjs`.
+* **Side panels:** seam model in `src/client/panel_layout.ts`, `attach.ts`, `page.ts` (`setSeams`, `holding`); one panel per seam. Tests: `tests_ts/panel_layout.test.ts`, `tests_e2e/side_panels.mjs`
+  (screenshots in `tests_e2e/evidence/`).
+* **Test fixes:** `test_print_layout.py` (leader dots are drawn one at a time), `band_shapes.mjs` (waits for the redraw).
+
 ## v2.4 final weekly upgrade (2026-11-17)
 
 Rendered View, 1–4 pages side by side, book layouts and margins, writing-experience fixes, app/api consolidation (`opcore.py`, `tablegrid.py`,

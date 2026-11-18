@@ -151,3 +151,7 @@ Browser side of the same workflow: `page_views.mjs`, `book_layout.mjs`.
 * **Not done from an earlier request:** `.sldc` forward-compatibility in Reader, SPlanner and Documaster.
 * **Known noise:** three-word names such as "Mary Jane Watson" carry a "check this reading" note by design (the reading cannot be known); the correction
   controls (or retyping as `Watson, Mary Jane`) remove it.
+
+## 10. Later in the same day
+
+The table-of-contents, table-fidelity, header/footer-shape and side-panel work of 2026-11-17 is reported in `ADVANCED_TOC_TABLES_BANDS_PANELS.md`.

@@ -242,6 +242,15 @@ motion and text scaling are honoured; the "contrast" theme raises contrast of pa
   overlay in `shapetools.ts` (chrome never enters the document). Export: `shape_export.py` draws the real paragraphs into the PNG fallback; `export.py` switches the native
   shape writers off for text boxes. Detail: `TEXTBOX_V24.md`.
 
+## 9c. Header/footer shapes and page-side panels (v2.4 round 3)
+
+* **Band shapes.** A header or footer is a definition repeated by every page that uses it; its shapes live with the definition in `slai.writer.band_shapes`
+  (keyed by section; variants default/even/first; explicit link to the previous section). `bands.py` (server) and `src/client/bands.ts` are one arithmetic tied by
+  `tests/fixtures/band_shapes_golden.json`; `band_edit.ts` edits them through ordinary operations (undo, validation, locks enforced by the server); the Documaster
+  PDF and DOCX writers draw them. The body is inert while a band is edited.
+* **Panels between pages.** `src/client/panel_layout.ts` is pure arithmetic (which panels conflict, how wide a seam must be); `attach.ts` applies it and `PageView.setSeams`/`holding`
+  (`page.ts`) keep the pinned page where it is and let the others glide (transform: no layout change, no repagination). A seam holds one panel; nothing is hidden with z-index.
+
 ## 12. Directory map
 
 ```
