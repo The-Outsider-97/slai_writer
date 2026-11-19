@@ -28,6 +28,7 @@ function fakeEditor(blocks: Block[], newIds: string[], sel: Sel | null, sent: Op
     model, readOnly: false, els: new Map(), selectedBlock: null, lastSel: null, readSelection: () => sel,
     newId: () => { const id = ids.shift(); if (!id) throw new Error("more ids requested than the scenario provides"); return id; },
     flush: async () => undefined, op: async (op: Op) => { sent.push(op); return {}; },
+    autocorrect: { ruleOnEnter: async () => false, beforeEnter: async (_block: string, offset: number) => offset },      // AutoCorrect has its own tests; here it never acts
     scrollToBlock: () => undefined, focusBlock: () => undefined, events: { emit: () => undefined }, ...extra,
   } as unknown as Editor;
 }
