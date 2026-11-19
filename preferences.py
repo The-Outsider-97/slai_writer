@@ -43,10 +43,16 @@ PREF_SCHEMA = {
     "last_folder": Pref(str, max_len=1024, pattern=r"[^\x00-\x1f]*"),
     "wizard_done": Pref(bool),
     "lookup_online": Pref(bool),
+    "autocorrect_capitalize": Pref(bool),
+    "autocorrect_dash": Pref(bool),
+    "autocorrect_rule": Pref(bool),
+    "autocorrect_regions": Pref(bool),
+    "autocorrect_paste": Pref(bool),
 }
 PREF_DEFAULTS: dict[str, Any] = {
     "theme": "system", "scale": 1.0, "motion": "system", "autosave": True, "autosave_seconds": 60, "language": "en", "page_size": "A4",
     "orientation": "portrait", "units": "mm", "zoom": 100, "zoom_mode": "height", "view_pages": 1, "book_view": "facing", "show_rulers": True, "show_guides": True, "spell": True,
     "grammar": True, "style": False, "ai_enabled": False, "ai_cloud": False, "ai_notes": False, "ai_budget": 0, "side_panel": False,
     "cursor_default": "default", "cursor_drag": "grab", "cursor_draw": "crosshair", "cursor_text": "text", "last_folder": "", "wizard_done": False, "lookup_online": False,
+    "autocorrect_capitalize": True, "autocorrect_dash": True, "autocorrect_rule": True, "autocorrect_regions": True, "autocorrect_paste": False,
 }

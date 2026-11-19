@@ -254,7 +254,7 @@ class DocumentSession:
                 return self._patch(undo, result, tracker, changed=False)
             if tracker.structural or op["op"] in ("page_setup", "meta", "style_define", "reference_put", "reference_delete", "embed_put",
                                                   "embed_delete", "section_break", "inline_object", "span", "figure_set", "shape_set", "equation_set",
-                                                  "batch", "table_edit", "ext_set", "block_set"):
+                                                  "batch", "table_edit", "ext_set", "block_set", "rule_insert", "rule_set"):
                 try:
                     sldc().validate_sldc(self.doc)
                 except sldc().SLDCError as exc:

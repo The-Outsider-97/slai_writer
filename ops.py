@@ -46,7 +46,7 @@ from .opcore import (  # noqa: F401 - the kernel's names stay importable from he
     handler,
     LABELS,
 )
-from . import tableops, columns, book, bands  # noqa: F401 - importing them registers the table, column, Scripture and margin operations
+from . import tableops, columns, book, bands, hrule  # noqa: F401 - importing them registers the table, column, Scripture, margin and horizontal-rule operations
 from .columns import _read_layouts, group_members, inherit, reconcile, validate_document
 from .shape_validation import SHAPE_KEY, validate_shape
 from .tableops import cell_of, validate_table_extensions
@@ -904,6 +904,9 @@ def op_batch(tr: Tracker, op: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(inner, dict) or inner.get("op") not in HANDLERS or inner.get("op") == "batch":
             raise OpError("A batch holds ordinary operations only")
         results.append(HANDLERS[inner["op"]](tr, inner))
+    # A batch is one deliberate step (a paste, an AutoCorrect change ...). Its inner ``text`` operations must not leave it marked as a run of typing, or the
+    # next keystrokes would be merged into it and one Undo would take both away (see Session._push).
+    tr.undo.typing = None
     return {"results": results}
 
 
@@ -927,6 +930,8 @@ def apply_operation(doc: dict[str, Any], op: dict[str, Any]) -> tuple[Undo, dict
         for item in candidate_shapes:
             if item["type"] == "table" and item.get("extensions"):
                 validate_table_extensions(item, doc)
+            if hrule.RULE_KEY in item.get("extensions", {}):
+                hrule.check_block(item)
             if SHAPE_KEY not in item.get("extensions", {}):
                 continue
             if item["type"] != "paragraph" or item["text"]:
