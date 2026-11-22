@@ -1,0 +1,262 @@
+"""Validated, data-only vector-shape extension for SLDC 1.x Writer blocks.
+
+The extension is attached to a dedicated empty paragraph block rather than
+adding an unrecognized SLDC block kind. Readers without shape support retain
+the inert extension, but cannot claim that they render it. No SVG/HTML is
+accepted from the document; the browser constructs geometry from known kinds.
+"""
+from __future__ import annotations
+
+import copy
+import math
+import re
+from typing import Any
+
+from .opcore import OpError
+
+SHAPE_KEY = "slai.writer.shape"
+SHAPE_KINDS = frozenset({"rectangle", "ellipse", "line", "triangle", "diamond",
+                         "pentagon", "hexagon", "star", "arrow", "plus"})
+_HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
+_ALLOWED = frozenset({"version", "kind", "width_mm", "height_mm", "rotation_deg", "fill",
+                       "outline", "opacity", "corners_mm", "text", "shadows", "layout", "z_index", "group_id", "flip_horizontal", "flip_vertical", "textbox"})
+
+
+def _object(value: Any, name: str, keys: set[str] | frozenset[str]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise OpError(f"{name} must be an object")
+    if set(value) - keys:
+        raise OpError(f"{name} contains unsupported fields")
+    return value
+
+
+def _num(value: Any, name: str, low: float, high: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise OpError(f"{name} must be a finite number")
+    if not low <= value <= high:
+        raise OpError(f"{name} must be between {low} and {high}")
+    return float(value)
+
+
+def _color(value: Any, name: str) -> None:
+    if not isinstance(value, str) or not _HEX.fullmatch(value):
+        raise OpError(f"{name} must be #RRGGBB")
+
+
+def _bool(value: Any, name: str) -> None:
+    if not isinstance(value, bool):
+        raise OpError(f"{name} must be boolean")
+
+
+def _validate_spans(spans: list[Any], content: str, name: str) -> None:
+    """Format spans over ``content``; offsets are UTF-16 code units, like the browser's."""
+    utf16_length = len(content.encode("utf-16-le", errors="surrogatepass")) // 2
+    for index, entry in enumerate(spans):
+        span = _object(entry, f"{name}.spans[{index}]",
+                       {"type", "start", "end", "bold", "italic", "underline", "strike",
+                        "superscript", "subscript", "color", "background",
+                        "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"})
+        if span.get("type") != "format":
+            raise OpError("Shape text supports format spans only")
+        start, end = span.get("start"), span.get("end")
+        if (type(start) is not int or type(end) is not int
+                or not 0 <= start < end <= utf16_length):
+            raise OpError("Shape text formatting span has invalid offsets")
+        for key in ("bold", "italic", "underline", "strike", "superscript", "subscript"):
+            if key in span:
+                _bool(span[key], f"{name}.spans[{index}].{key}")
+        if span.get("superscript") and span.get("subscript"):
+            raise OpError("Shape text cannot be both superscript and subscript")
+        if "color" in span:
+            _color(span["color"], "span color")
+        if "background" in span:
+            _color(span["background"], "span highlight")
+        if "font_family" in span:
+            family = span["font_family"]
+            if not isinstance(family, str) or not 1 <= len(family) <= 100 or any(
+                    ch in family for ch in '\x00\r\n<>;{}'):
+                raise OpError("Invalid shape text font family")
+        if "font_size_pt" in span:
+            _num(span["font_size_pt"], "span font size", 5, 144)
+        for key in ("letter_spacing_pt", "word_spacing_pt"):
+            if key in span:
+                _num(span[key], f"span {key}", -10, 100)
+
+
+TEXTBOX_VERSION = 1
+TEXTBOX_ROLES = ("normal", "heading1", "heading2", "heading3", "quote")
+TEXTBOX_STYLE_PATTERN = re.compile(r"^[^\x00-\x1f\x7f{};<>\\\"'`]{1,100}$")
+TEXTBOX_MAX_PARAGRAPHS = 200
+TEXTBOX_MAX_CHARACTERS = 20000
+
+
+def validate_textbox(box: Any, shape: dict[str, Any]) -> None:
+    """A text box is a rectangle shape whose text is a list of styled paragraphs.
+
+    ``text.content`` stays a plain-text mirror (paragraphs joined by a newline), so a reader that
+    knows shapes but not text boxes still shows the words, and so does the legacy export path.
+    """
+    box = _object(box, "textbox", {"version", "paragraphs", "vertical_align", "auto_expand", "pinned", "locked", "name"})
+    if box.get("version") != TEXTBOX_VERSION or type(box.get("version")) is not int:
+        raise OpError("Unsupported text box schema version")
+    if shape.get("kind") != "rectangle":
+        raise OpError("A text box is always a rectangle")
+    paragraphs = box.get("paragraphs")
+    if not isinstance(paragraphs, list) or not 1 <= len(paragraphs) <= TEXTBOX_MAX_PARAGRAPHS:
+        raise OpError(f"A text box holds between 1 and {TEXTBOX_MAX_PARAGRAPHS} paragraphs")
+    total = 0
+    for index, entry in enumerate(paragraphs):
+        para = _object(entry, f"textbox.paragraphs[{index}]",
+                       {"text", "role", "style", "align", "list", "spans", "line_height", "space_after_pt"})
+        text = para.get("text")
+        if not isinstance(text, str) or "\n" in text or "\r" in text:
+            raise OpError("Text box paragraph text must be a single line of text")
+        total += len(text) + 1
+        if para.get("role", "normal") not in TEXTBOX_ROLES:
+            raise OpError("Unsupported text box paragraph role")
+        if "style" in para and (not isinstance(para["style"], str) or not TEXTBOX_STYLE_PATTERN.fullmatch(para["style"])):
+            raise OpError("Invalid text box paragraph style name")
+        if para.get("align", "left") not in ("left", "center", "right", "justify"):
+            raise OpError("Unsupported text box paragraph alignment")
+        if para.get("list", "none") not in ("none", "bullet", "number"):
+            raise OpError("Unsupported text box list kind")
+        if "line_height" in para:
+            _num(para["line_height"], "textbox line_height", 0.8, 3)
+        if "space_after_pt" in para:
+            _num(para["space_after_pt"], "textbox space_after_pt", 0, 72)
+        spans = para.get("spans", [])
+        if not isinstance(spans, list) or len(spans) > 300:
+            raise OpError("A text box paragraph allows at most 300 formatting spans")
+        _validate_spans(spans, text, f"textbox.paragraphs[{index}]")
+    if total - 1 > TEXTBOX_MAX_CHARACTERS:
+        raise OpError(f"A text box holds at most {TEXTBOX_MAX_CHARACTERS} characters")
+    if box.get("vertical_align", "top") not in ("top", "middle", "bottom"):
+        raise OpError("Unsupported text box vertical alignment")
+    for key in ("auto_expand", "pinned", "locked"):
+        if key in box:
+            _bool(box[key], f"textbox.{key}")
+    if "name" in box and (not isinstance(box["name"], str) or not 1 <= len(box["name"]) <= 80
+                          or any(ord(c) < 32 for c in box["name"])):
+        raise OpError("Text box name must be 1 to 80 printable characters")
+    if shape["text"]["content"] != "\n".join(p["text"] for p in paragraphs):
+        raise OpError("Text box paragraphs and the shape text mirror disagree")
+
+
+def validate_shape(value: Any) -> dict[str, Any]:
+    """Validate a full replacement atomically, then return an independent copy."""
+    shape = _object(value, "shape", _ALLOWED)
+    if shape.get("version") != 1 or type(shape.get("version")) is not int:
+        raise OpError("Unsupported vector shape schema version")
+    kind = shape.get("kind")
+    if kind not in SHAPE_KINDS:
+        raise OpError("Unsupported vector shape kind")
+    w = _num(shape.get("width_mm"), "width_mm", 2, 1000)
+    h = _num(shape.get("height_mm"), "height_mm", 2, 1000)
+    _num(shape.get("rotation_deg"), "rotation_deg", -360, 360)
+    _num(shape.get("opacity"), "opacity", 0, 1)
+    for key in ("flip_horizontal", "flip_vertical"):
+        if key in shape:
+            _bool(shape[key], key)
+
+    fill = _object(shape.get("fill"), "fill", {"color", "opacity", "enabled"})
+    _color(fill.get("color"), "fill.color")
+    _num(fill.get("opacity"), "fill.opacity", 0, 1)
+    _bool(fill.get("enabled"), "fill.enabled")
+
+    outline = _object(shape.get("outline"), "outline",
+                      {"color", "opacity", "enabled", "width_pt", "style"})
+    _color(outline.get("color"), "outline.color")
+    _num(outline.get("opacity"), "outline.opacity", 0, 1)
+    _num(outline.get("width_pt"), "outline.width_pt", 0.1, 72)
+    _bool(outline.get("enabled"), "outline.enabled")
+    if outline.get("style") not in ("solid", "dashed", "dotted", "double"):
+        raise OpError("Unsupported outline style")
+
+    corners = shape.get("corners_mm")
+    if not isinstance(corners, list) or len(corners) != 4:
+        raise OpError("corners_mm needs four corner radii")
+    if kind != "rectangle" and any(corners):
+        raise OpError("Corner radii are currently supported for rectangles only")
+    for index, radius in enumerate(corners):
+        _num(radius, f"corners_mm[{index}]", 0, min(w, h) / 2)
+    if corners[0] + corners[1] > w or corners[3] + corners[2] > w \
+            or corners[0] + corners[3] > h or corners[1] + corners[2] > h:
+        raise OpError("Corner radii overlap")
+
+    text = _object(shape.get("text"), "text",
+                   {"content", "color", "font_size_pt", "bold", "italic", "align", "padding_mm", "spans", "fit", "font_family"})
+    if not isinstance(text.get("content"), str) or len(text["content"]) > 4000:
+        raise OpError("Shape text must be at most 4000 characters")
+    _color(text.get("color"), "text.color")
+    _num(text.get("font_size_pt"), "text.font_size_pt", 5, 144)
+    _num(text.get("padding_mm"), "text.padding_mm", 0, min(w, h) / 4)
+    _bool(text.get("bold"), "text.bold")
+    _bool(text.get("italic"), "text.italic")
+    if text.get("align") not in ("left", "center", "right"):
+        raise OpError("Unsupported text alignment")
+    if "font_family" in text:
+        family = text["font_family"]
+        if not isinstance(family, str) or not 1 <= len(family) <= 100 or any(ch in family for ch in '\x00\r\n<>;{}'):
+            raise OpError("Invalid shape text font family")
+    if text.get("fit", "keep") not in ("keep", "shrink"):
+        raise OpError("text.fit must be keep or shrink")
+    spans = text.get("spans", [])
+    if not isinstance(spans, list) or len(spans) > 300:
+        raise OpError("Shape text allows at most 300 formatting spans")
+    _validate_spans(spans, text["content"], "text")
+
+    if "textbox" in shape:
+        validate_textbox(shape["textbox"], shape)
+
+    layout = shape.get("layout")
+    if layout is not None:
+        fields = _object(layout, "layout", {"mode", "anchor", "target", "x_mm", "y_mm", "wrap", "layer"})
+        if fields.get("mode") not in ("inline", "floating"):
+            raise OpError("Unknown shape positioning mode")
+        if fields["mode"] == "inline":
+            if set(fields) != {"mode"}:
+                raise OpError("Inline shapes cannot have floating placement fields")
+        else:
+            if fields.get("anchor") not in ("block", "page"):
+                raise OpError("A floating shape must be anchored to a block or page")
+            if fields["anchor"] == "block":
+                target = fields.get("target")
+                if not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", target):
+                    raise OpError("A block-anchored shape needs a valid target ID")
+            elif "target" in fields:
+                raise OpError("A page anchor cannot specify a block target")
+            _num(fields.get("x_mm"), "layout.x_mm", -5000, 5000)
+            _num(fields.get("y_mm"), "layout.y_mm", -5000, 5000)
+            if fields.get("wrap", "none") not in ("none", "square", "top_bottom"):
+                raise OpError("Unknown wrapping mode")
+            if fields.get("layer", "content") not in ("content", "behind_text", "in_front_of_text"):
+                raise OpError("Unknown shape layer")
+            if fields.get("layer", "content") != "content" and fields.get("wrap", "none") != "none":
+                raise OpError("Shapes behind or in front of text cannot wrap text")
+            if fields["anchor"] == "page" and fields.get("wrap", "none") != "none":
+                raise OpError("Page-anchored shapes cannot wrap text")
+    if "z_index" in shape:
+        z = shape["z_index"]
+        if type(z) is not int or not -1000 <= z <= 1000:
+            raise OpError("Shape z_index must be an integer between -1000 and 1000")
+    if "group_id" in shape:
+        g = shape["group_id"]
+        if g is not None and (not isinstance(g, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", g)):
+            raise OpError("Shape group_id is not valid")
+
+    shadows = shape.get("shadows")
+    if not isinstance(shadows, list) or len(shadows) > 8:
+        raise OpError("A shape can have at most eight shadow layers")
+    for i, entry in enumerate(shadows):
+        sh = _object(entry, f"shadows[{i}]",
+                     {"color", "opacity", "offset_x_mm", "offset_y_mm",
+                      "blur_mm", "spread_mm", "enabled"})
+        _color(sh.get("color"), f"shadows[{i}].color")
+        _num(sh.get("opacity"), f"shadows[{i}].opacity", 0, 1)
+        _num(sh.get("offset_x_mm"), f"shadows[{i}].offset_x_mm", -100, 100)
+        _num(sh.get("offset_y_mm"), f"shadows[{i}].offset_y_mm", -100, 100)
+        _num(sh.get("blur_mm"), f"shadows[{i}].blur_mm", 0, 30)
+        _num(sh.get("spread_mm"), f"shadows[{i}].spread_mm", -20, 30)
+        _bool(sh.get("enabled"), f"shadows[{i}].enabled")
+
+    return copy.deepcopy(shape)
