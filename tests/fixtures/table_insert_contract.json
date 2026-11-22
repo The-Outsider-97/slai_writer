@@ -1,0 +1,785 @@
+{
+ "about": "Operations the Writer client emits for table insertion and typed Markdown tables. tests_ts/table_insert.test.ts checks the client produces exactly these; tests/test_table_insert_contract.py applies them to a real DocumentSession and checks the resulting block order, persistence and undo.",
+ "scenarios": [
+  {
+   "name": "caret at the start of the first paragraph puts the table first",
+   "action": "insertTable",
+   "rows": 2,
+   "columns": 3,
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "First"
+    },
+    {
+     "id": "p2",
+     "type": "paragraph",
+     "text": "Second"
+    }
+   ],
+   "point": {
+    "selection": {
+     "start": {
+      "block": "p1",
+      "offset": 0,
+      "field": "text"
+     },
+     "end": {
+      "block": "p1",
+      "offset": 0,
+      "field": "text"
+     },
+     "collapsed": true
+    },
+    "object": null
+   },
+   "newIds": [
+    "tbl"
+   ],
+   "ops": [
+    {
+     "op": "batch",
+     "ops": [
+      {
+       "op": "block_insert",
+       "after": null,
+       "block": {
+        "id": "tbl",
+        "type": "table",
+        "text": "",
+        "rows": 2,
+        "columns": 3
+       }
+      }
+     ],
+     "label": "insert table"
+    }
+   ],
+   "order": [
+    "tbl",
+    "p1",
+    "p2"
+   ]
+  },
+  {
+   "name": "caret in the middle of a paragraph splits it around the table",
+   "action": "insertTable",
+   "rows": 2,
+   "columns": 2,
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "BeforeAfter"
+    }
+   ],
+   "point": {
+    "selection": {
+     "start": {
+      "block": "p1",
+      "offset": 6,
+      "field": "text"
+     },
+     "end": {
+      "block": "p1",
+      "offset": 6,
+      "field": "text"
+     },
+     "collapsed": true
+    },
+    "object": null
+   },
+   "newIds": [
+    "tbl",
+    "tail"
+   ],
+   "ops": [
+    {
+     "op": "batch",
+     "ops": [
+      {
+       "op": "split",
+       "block": "p1",
+       "at": 6,
+       "new_id": "tail"
+      },
+      {
+       "op": "block_insert",
+       "after": "p1",
+       "block": {
+        "id": "tbl",
+        "type": "table",
+        "text": "",
+        "rows": 2,
+        "columns": 2
+       }
+      }
+     ],
+     "label": "insert table"
+    }
+   ],
+   "order": [
+    "p1",
+    "tbl",
+    "tail"
+   ],
+   "texts": {
+    "p1": "Before",
+    "tail": "After"
+   }
+  },
+  {
+   "name": "caret at the end of a paragraph in the middle goes right after it, not at the document end",
+   "action": "insertTable",
+   "rows": 2,
+   "columns": 2,
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "One"
+    },
+    {
+     "id": "p2",
+     "type": "paragraph",
+     "text": "Two"
+    },
+    {
+     "id": "p3",
+     "type": "paragraph",
+     "text": "Three"
+    }
+   ],
+   "point": {
+    "selection": {
+     "start": {
+      "block": "p2",
+      "offset": 3,
+      "field": "text"
+     },
+     "end": {
+      "block": "p2",
+      "offset": 3,
+      "field": "text"
+     },
+     "collapsed": true
+    },
+    "object": null
+   },
+   "newIds": [
+    "tbl"
+   ],
+   "ops": [
+    {
+     "op": "batch",
+     "ops": [
+      {
+       "op": "block_insert",
+       "after": "p2",
+       "block": {
+        "id": "tbl",
+        "type": "table",
+        "text": "",
+        "rows": 2,
+        "columns": 2
+       }
+      }
+     ],
+     "label": "insert table"
+    }
+   ],
+   "order": [
+    "p1",
+    "p2",
+    "tbl",
+    "p3"
+   ]
+  },
+  {
+   "name": "caret at the start of a later paragraph goes between the two paragraphs",
+   "action": "insertTable",
+   "rows": 2,
+   "columns": 2,
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "One"
+    },
+    {
+     "id": "p2",
+     "type": "paragraph",
+     "text": "Two"
+    }
+   ],
+   "point": {
+    "selection": {
+     "start": {
+      "block": "p2",
+      "offset": 0,
+      "field": "text"
+     },
+     "end": {
+      "block": "p2",
+      "offset": 0,
+      "field": "text"
+     },
+     "collapsed": true
+    },
+    "object": null
+   },
+   "newIds": [
+    "tbl"
+   ],
+   "ops": [
+    {
+     "op": "batch",
+     "ops": [
+      {
+       "op": "block_insert",
+       "after": "p1",
+       "block": {
+        "id": "tbl",
+        "type": "table",
+        "text": "",
+        "rows": 2,
+        "columns": 2
+       }
+      }
+     ],
+     "label": "insert table"
+    }
+   ],
+   "order": [
+    "p1",
+    "tbl",
+    "p2"
+   ]
+  },
+  {
+   "name": "a caret after an emoji is counted in code points, not UTF-16 units",
+   "action": "insertTable",
+   "rows": 2,
+   "columns": 2,
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "😀ab"
+    }
+   ],
+   "point": {
+    "selection": {
+     "start": {
+      "block": "p1",
+      "offset": 2,
+      "field": "text"
+     },
+     "end": {
+      "block": "p1",
+      "offset": 2,
+      "field": "text"
+     },
+     "collapsed": true
+    },
+    "object": null
+   },
+   "newIds": [
+    "tbl",
+    "tail"
+   ],
+   "ops": [
+    {
+     "op": "batch",
+     "ops": [
+      {
+       "op": "split",
+       "block": "p1",
+       "at": 1,
+       "new_id": "tail"
+      },
+      {
+       "op": "block_insert",
+       "after": "p1",
+       "block": {
+        "id": "tbl",
+        "type": "table",
+        "text": "",
+        "rows": 2,
+        "columns": 2
+       }
+      }
+     ],
+     "label": "insert table"
+    }
+   ],
+   "order": [
+    "p1",
+    "tbl",
+    "tail"
+   ],
+   "texts": {
+    "p1": "😀",
+    "tail": "ab"
+   }
+  },
+  {
+   "name": "caret inside a table cell puts the new table after that table",
+   "action": "insertTable",
+   "rows": 2,
+   "columns": 2,
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "One"
+    },
+    {
+     "id": "t1",
+     "type": "table",
+     "text": "",
+     "table": {
+      "columns": 1,
+      "header_rows": 1,
+      "rows": [
+       [
+        {
+         "text": "x"
+        }
+       ]
+      ]
+     }
+    },
+    {
+     "id": "p2",
+     "type": "paragraph",
+     "text": "Two"
+    }
+   ],
+   "point": {
+    "selection": {
+     "start": {
+      "block": "t1",
+      "offset": 0,
+      "field": "cell",
+      "row": 0,
+      "col": 0
+     },
+     "end": {
+      "block": "t1",
+      "offset": 0,
+      "field": "cell",
+      "row": 0,
+      "col": 0
+     },
+     "collapsed": true
+    },
+    "object": null
+   },
+   "newIds": [
+    "tbl"
+   ],
+   "ops": [
+    {
+     "op": "batch",
+     "ops": [
+      {
+       "op": "block_insert",
+       "after": "t1",
+       "block": {
+        "id": "tbl",
+        "type": "table",
+        "text": "",
+        "rows": 2,
+        "columns": 2
+       }
+      }
+     ],
+     "label": "insert table"
+    }
+   ],
+   "order": [
+    "p1",
+    "t1",
+    "tbl",
+    "p2"
+   ]
+  },
+  {
+   "name": "a selected object gets the table right after it, whatever the last caret was",
+   "action": "insertTable",
+   "rows": 2,
+   "columns": 2,
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "One"
+    },
+    {
+     "id": "t1",
+     "type": "table",
+     "text": "",
+     "table": {
+      "columns": 1,
+      "header_rows": 1,
+      "rows": [
+       [
+        {
+         "text": "x"
+        }
+       ]
+      ]
+     }
+    },
+    {
+     "id": "p2",
+     "type": "paragraph",
+     "text": "Two"
+    }
+   ],
+   "point": {
+    "selection": null,
+    "object": "t1"
+   },
+   "newIds": [
+    "tbl"
+   ],
+   "ops": [
+    {
+     "op": "batch",
+     "ops": [
+      {
+       "op": "block_insert",
+       "after": "t1",
+       "block": {
+        "id": "tbl",
+        "type": "table",
+        "text": "",
+        "rows": 2,
+        "columns": 2
+       }
+      }
+     ],
+     "label": "insert table"
+    }
+   ],
+   "order": [
+    "p1",
+    "t1",
+    "tbl",
+    "p2"
+   ]
+  },
+  {
+   "name": "with no caret and no object the table goes after the last block, as typing does",
+   "action": "insertTable",
+   "rows": 2,
+   "columns": 2,
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "One"
+    },
+    {
+     "id": "p2",
+     "type": "paragraph",
+     "text": "Two"
+    }
+   ],
+   "point": {
+    "selection": null,
+    "object": null
+   },
+   "newIds": [
+    "tbl"
+   ],
+   "ops": [
+    {
+     "op": "batch",
+     "ops": [
+      {
+       "op": "block_insert",
+       "after": "p2",
+       "block": {
+        "id": "tbl",
+        "type": "table",
+        "text": "",
+        "rows": 2,
+        "columns": 2
+       }
+      }
+     ],
+     "label": "insert table"
+    }
+   ],
+   "order": [
+    "p1",
+    "p2",
+    "tbl"
+   ]
+  },
+  {
+   "name": "Enter at the end of a delimiter line under a header line makes a table with one empty row",
+   "action": "enter",
+   "blocks": [
+    {
+     "id": "p0",
+     "type": "paragraph",
+     "text": "Intro"
+    },
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "| Name | Qty |"
+    },
+    {
+     "id": "p2",
+     "type": "paragraph",
+     "text": "| --- | ---: |"
+    }
+   ],
+   "caret": {
+    "block": "p2",
+    "offset": 14
+   },
+   "newIds": [
+    "tbl"
+   ],
+   "ops": [
+    {
+     "op": "batch",
+     "ops": [
+      {
+       "op": "block_insert",
+       "after": "p0",
+       "block": {
+        "id": "tbl",
+        "type": "table",
+        "text": "",
+        "rows": 2,
+        "columns": 2,
+        "table": {
+         "columns": 2,
+         "header_rows": 1,
+         "rows": [
+          [
+           {
+            "text": "Name"
+           },
+           {
+            "text": "Qty"
+           }
+          ],
+          [
+           {
+            "text": ""
+           },
+           {
+            "text": ""
+           }
+          ]
+         ]
+        }
+       }
+      },
+      {
+       "op": "block_delete",
+       "blocks": [
+        "p1",
+        "p2"
+       ]
+      }
+     ],
+     "label": "insert table"
+    }
+   ],
+   "order": [
+    "p0",
+    "tbl"
+   ]
+  },
+  {
+   "name": "a typed table at the very start of the document",
+   "action": "enter",
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "A | B"
+    },
+    {
+     "id": "p2",
+     "type": "paragraph",
+     "text": "--- | ---"
+    }
+   ],
+   "caret": {
+    "block": "p2",
+    "offset": 9
+   },
+   "newIds": [
+    "tbl"
+   ],
+   "ops": [
+    {
+     "op": "batch",
+     "ops": [
+      {
+       "op": "block_insert",
+       "after": null,
+       "block": {
+        "id": "tbl",
+        "type": "table",
+        "text": "",
+        "rows": 2,
+        "columns": 2,
+        "table": {
+         "columns": 2,
+         "header_rows": 1,
+         "rows": [
+          [
+           {
+            "text": "A"
+           },
+           {
+            "text": "B"
+           }
+          ],
+          [
+           {
+            "text": ""
+           },
+           {
+            "text": ""
+           }
+          ]
+         ]
+        }
+       }
+      },
+      {
+       "op": "block_delete",
+       "blocks": [
+        "p1",
+        "p2"
+       ]
+      }
+     ],
+     "label": "insert table"
+    }
+   ],
+   "order": [
+    "tbl"
+   ]
+  },
+  {
+   "name": "a delimiter with another column count stays ordinary text and Enter splits as usual",
+   "action": "enter",
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "| A | B |"
+    },
+    {
+     "id": "p2",
+     "type": "paragraph",
+     "text": "| --- |"
+    }
+   ],
+   "caret": {
+    "block": "p2",
+    "offset": 7
+   },
+   "newIds": [
+    "tail"
+   ],
+   "ops": [
+    {
+     "op": "split",
+     "block": "p2",
+     "at": 7,
+     "new_id": "tail"
+    }
+   ],
+   "order": [
+    "p1",
+    "p2",
+    "tail"
+   ]
+  },
+  {
+   "name": "Enter inside the delimiter line, not at its end, splits as usual",
+   "action": "enter",
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "| A | B |"
+    },
+    {
+     "id": "p2",
+     "type": "paragraph",
+     "text": "| --- | --- |"
+    }
+   ],
+   "caret": {
+    "block": "p2",
+    "offset": 5
+   },
+   "newIds": [
+    "tail"
+   ],
+   "ops": [
+    {
+     "op": "split",
+     "block": "p2",
+     "at": 5,
+     "new_id": "tail"
+    }
+   ],
+   "order": [
+    "p1",
+    "p2",
+    "tail"
+   ]
+  },
+  {
+   "name": "Enter after an emoji splits at the code point, not the UTF-16 unit",
+   "action": "enter",
+   "blocks": [
+    {
+     "id": "p1",
+     "type": "paragraph",
+     "text": "😀ab"
+    }
+   ],
+   "caret": {
+    "block": "p1",
+    "offset": 2
+   },
+   "newIds": [
+    "tail"
+   ],
+   "ops": [
+    {
+     "op": "split",
+     "block": "p1",
+     "at": 1,
+     "new_id": "tail"
+    }
+   ],
+   "order": [
+    "p1",
+    "tail"
+   ],
+   "texts": {
+    "p1": "😀",
+    "tail": "ab"
+   }
+  }
+ ]
+}

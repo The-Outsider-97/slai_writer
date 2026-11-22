@@ -1,0 +1,253 @@
+{
+ "about": "Margins of a page by its position in the document (1-based). left/right are the physical sides of that page, the gutter included once. Read by Python and TypeScript tests.",
+ "cases": [
+  {
+   "name": "plain",
+   "page": {
+    "size": "A4",
+    "margins_mm": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    }
+   },
+   "expect": {
+    "1": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    },
+    "2": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    }
+   }
+  },
+  {
+   "name": "mirrored",
+   "page": {
+    "size": "A4",
+    "margins_mm": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    }
+   },
+   "book": {
+    "mirror": true
+   },
+   "expect": {
+    "1": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    },
+    "2": {
+     "top": 25,
+     "bottom": 25,
+     "left": 15,
+     "right": 20
+    },
+    "3": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    },
+    "4": {
+     "top": 25,
+     "bottom": 25,
+     "left": 15,
+     "right": 20
+    }
+   }
+  },
+  {
+   "name": "mirrored with gutter",
+   "page": {
+    "size": "A4",
+    "margins_mm": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    }
+   },
+   "book": {
+    "mirror": true,
+    "gutter_mm": 5
+   },
+   "expect": {
+    "1": {
+     "top": 25,
+     "bottom": 25,
+     "left": 25,
+     "right": 15
+    },
+    "2": {
+     "top": 25,
+     "bottom": 25,
+     "left": 15,
+     "right": 25
+    },
+    "3": {
+     "top": 25,
+     "bottom": 25,
+     "left": 25,
+     "right": 15
+    }
+   }
+  },
+  {
+   "name": "binding on the left",
+   "page": {
+    "size": "A4",
+    "margins_mm": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    }
+   },
+   "book": {
+    "gutter_mm": 10
+   },
+   "expect": {
+    "1": {
+     "top": 25,
+     "bottom": 25,
+     "left": 30,
+     "right": 15
+    },
+    "2": {
+     "top": 25,
+     "bottom": 25,
+     "left": 30,
+     "right": 15
+    }
+   }
+  },
+  {
+   "name": "binding on the right",
+   "page": {
+    "size": "A4",
+    "margins_mm": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    }
+   },
+   "book": {
+    "gutter_mm": 10,
+    "gutter_position": "right"
+   },
+   "expect": {
+    "1": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 25
+    },
+    "2": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 25
+    }
+   }
+  },
+  {
+   "name": "binding at the top",
+   "page": {
+    "size": "A4",
+    "margins_mm": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    }
+   },
+   "book": {
+    "gutter_mm": 10,
+    "gutter_position": "top"
+   },
+   "expect": {
+    "1": {
+     "top": 35,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    },
+    "2": {
+     "top": 35,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    }
+   }
+  },
+  {
+   "name": "mirrored with the gutter at the top",
+   "page": {
+    "size": "A4",
+    "margins_mm": {
+     "top": 25,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    }
+   },
+   "book": {
+    "mirror": true,
+    "gutter_mm": 10,
+    "gutter_position": "top"
+   },
+   "expect": {
+    "1": {
+     "top": 35,
+     "bottom": 25,
+     "left": 20,
+     "right": 15
+    },
+    "2": {
+     "top": 35,
+     "bottom": 25,
+     "left": 15,
+     "right": 20
+    }
+   }
+  },
+  {
+   "name": "landscape letter, defaults",
+   "page": {
+    "size": "Letter",
+    "orientation": "landscape"
+   },
+   "book": {
+    "mirror": true,
+    "gutter_mm": 6
+   },
+   "expect": {
+    "1": {
+     "top": 25,
+     "bottom": 25,
+     "left": 31,
+     "right": 25
+    },
+    "2": {
+     "top": 25,
+     "bottom": 25,
+     "left": 25,
+     "right": 31
+    }
+   }
+  }
+ ]
+}
