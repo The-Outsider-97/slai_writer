@@ -1,0 +1,263 @@
+# SLAI Writer: architecture
+
+SLAI Writer is a local-first document authoring application. A Python process serves a TypeScript browser client on `127.0.0.1` and owns every
+document in memory; the browser is a view that sends small, versioned operations. Documents are SLDC packages (`.sldc`), written by the
+single SLDC implementation in `src/utils/sldc.py`. Writer contains no second SLDC parser, serializer, encryption format, signing scheme or
+revision engine.
+
+Source of truth: `SLAI_Writer_main.pdf` (Document A). `SLAI_Writer_-_ChatGPT_Application_concept_v1.1.pdf` (Document B) supplements it.
+Where they disagree Writer follows A and the difference is recorded in `REQUIREMENTS_MATRIX.md`, section "Discrepancies".
+
+## 1. Layers and what is reused
+
+```
+Browser (TypeScript, no bundler)          applications/slai_writer/src/client/*.ts  ──►  dist/ (tsc output + styles.css)
+   │  kit imports only through src/client/kit.ts
+   ▼
+Shared web kit                            applications/tools/web   (slai-ui.css, h(), dialogs, menus, toasts, API client, themes, icons)
+   │  HTTP, JSON envelope {ok,data} / {ok:false,error}
+   ▼
+Shared server                             applications/tools/server (loopback ThreadingHTTPServer, token → HttpOnly cookie, Host/Origin checks,
+   │                                       CSP, marker header on writes, body limits, static files, router)
+   ▼
+Writer API                                applications/slai_writer/api/
+   │   routing.py     one shared router and request validation / access readers
+   │   routes/*.py    canonical HTTP handlers (see API.md); root routes_*.py are compatibility imports
+   ▼
+Writer application                        applications/slai_writer/app/ and top-level *.py
+   │   app/runtime.py the application runtime (re-exported by app/__init__.py)
+   │   app/services/document_lifecycle.py  create / Save As, saved-version views, failed-create cleanup
+   │   app/commands/documents.py           version-checked history travel, unsaved-close protection
+   │   app/queries/documents.py            consistent undo/redo menu snapshots
+   │   session.py     one DocumentSession per open document: model, undo/redo, revisions, autosave, recovery, snapshots, merge
+   │   opcore.py      what every edit shares (errors, undo, tracker, handler registry)
+   │   ops.py         the document-level operations (text, format, blocks, pages, styles, sources, embeds, ext…); re-exports opcore
+   │   tableops.py / tablegrid.py / columns.py / book.py   tables, column sections, book layout (depend on opcore only)
+   │   names.py       author-name reading (APA 7)
+   │   textmodel.py   block/span arithmetic shared by ops
+   │   accounts.py    signup, e-mail code, login, TOTP, recovery codes, trusted devices, sessions, throttling, audit
+   │   totp.py        RFC 6238 on hashlib/hmac only
+   │   signing.py     signature graphics + signing/verification through SLDC's own signing API
+   │   academic.py    sources, citations, footnotes, bibliography, contents; verification statuses
+   │   embeds.py      EMBED catalogue, schema validation, locked/inert components, revision-bound patches
+   │   assist.py      proofing and AI Assistant orchestration (explicit, scoped, reviewable, reversible)
+   │   export.py      import/export/print preview/PDF preflight with honest loss reports
+   │   docmaster.py   the link to Documaster's readers and writers (not copied, never modified)
+   │   workspace.py   shared-workspace boundary: always "not connected" here; merge-a-copy is real
+   │   plans.py       plan catalogue/entitlements from configs/plans.yaml; no payment code
+   │   store.py       Writer's SQLite store (via applications/tools storage + database)
+   │   library.py     library folders, recents, favorites, unique names
+   │   templates.py   8 templates, built through SLDC
+   │   cursors.py, picker.py, mailer.py, protect.py
+   ▼
+SLAI core                                 src/utils/sldc.py (SLDC), src/utils/configuration (ConfigRepository, optional), applications/Documaster
+```
+
+Reused rather than rebuilt: the server, storage, database, config, errors, validation, SLAI locator and web kit in `applications/tools`; the
+logo/icon set in `applications/assets`; SLDC in `src/utils/sldc.py`; Documaster's format converters. The only edits to shared code are listed in
+`CHANGES.md` ("Shared tools") and are covered by tests.
+
+### API/application ownership and intentional non-modules
+
+* `api/routes/{accounts,core,documents,tools}.py` owns the route adapters, with no duplicate registrations. The historical
+  `routes_{account,core,docs,tools}.py` modules and `routing.py` remain import-compatible facades. The public `routes.router` is
+  the identical object to `api.routing.router`.
+* The document lifecycle and history use cases are extracted only where they coordinate multiple established components.
+  Editing, session transactions (`session.py`), storage (`store.py`), SLDC format handling and account policies remain single-source
+  implementations.
+* **Editing kernel.** `opcore.py` holds what every edit shares (`OpError`, `Undo`, `Tracker`, the `HANDLERS`/`LABELS` registries, argument
+  helpers, `repair_sections`). `tablegrid.py` holds the table grid model. `ops.py` registers the document-level operations and **re-exports every
+  kernel name**, so `from applications.slai_writer.ops import ...` keeps working. `tableops`, `columns`, `book`, `table_styles` and
+  `shape_validation` depend on `opcore`/`tablegrid` only, never on `ops`: there is no import cycle at module or function level
+  (`tests/test_architecture.py` checks this on every run).
+* **Application runtime.** `app/runtime.py` is the old `app.py`; `app/__init__.py` re-exports it (PEP 562), so `applications.slai_writer.app`
+  keeps its public names whichever module is imported first. `preferences.py` owns the preference schema and defaults (the API reads it from
+  there, not from the runtime), `dependencies.py` owns "is this optional package installed" (`installed`, `require`) so no module uses an
+  exception around an import to find out.
+* **Removed as dead.** `app/ports/`, `app/utils/`, `api/middleware/`, `api/utils/` held only empty placeholder modules; the shared SLAI server
+  already owns middleware and errors. `tests/test_architecture.py` fails if an empty placeholder module is added to `app/` or `api/` again.
+  Outside this scope and left untouched: `domain/`, `utils/` (empty placeholder modules), `configs/sw_config.yaml`, `configs/slai_profile.yaml`,
+  `version.py`.
+* **Names.** `names.py` is the only place an author name is read (family, given, suffix, particle, institution, ambiguity note); the citation
+  engine, the legacy in-text marks, the reference line, the year-suffix grouping and the source warnings all use it. The editor never reads a name itself: it
+  asks `POST /api/names/read` and shows the answer (`src/client/names_ui.ts`: Confirm, Keep as one name, Change… write the corrected line, nothing else).
+* **Odd/even running heads.** Stored with the section's book layout (`odd_even`, `header_even`, `footer_even`), never in the core SLDC header. One rule
+  (right-hand page: the ordinary band; left-hand page: its own text, else the ordinary band swapped when mirrored) in `book.py`, the client's `runningBand` and
+  Documaster's `even_page_template`.
+
+## 2. Server-authoritative editing
+
+The server is the only place a document changes. The browser never edits a private copy.
+
+* Every edit is `POST /api/docs/{sid}/ops` with `{op, base}`. `base` is the version the browser last saw. A stale base is refused with 409
+  `details.kind = "stale_version"`; the client then offers "Load the latest version". Nothing is merged silently.
+* The server answers with a **patch**: changed blocks, optional new order, document metadata, dirty flag, counts, undo/redo depth, revision,
+  signature count and notices. The client merges it (`model.ts`) and re-renders only what changed (`render.ts`, `editor.ts`).
+* Operations that change many things (open reference list, restore a version, merge, AI apply) answer with a whole `state` instead, and the client
+  resynchronises (`Editor.resync`).
+* Undo/redo are server-side stacks per session. A single-step undo answers with a patch, a multi-step undo with a state.
+* The client sends operations through one serial `OpQueue`, so versions never cross. Other server work (citations, EMBED apply, AI apply) runs in the
+  same queue (`OpQueue.run`).
+* Keys pressed while a structural edit (Enter, Backspace, Undo, replacing a selection) is waiting for the server are held and replayed in order,
+  consecutive characters merged into one insertion (`input.ts`). Save, export and search wait for held keys (`Editor.whenIdle`), and so does every command.
+* If the caret is outside any paragraph (after Ctrl+End past a picture, for example) a keystroke is held, the caret is put in a real paragraph,
+  and the key is replayed. Text is never shown that the server does not have.
+
+### Persistence, recovery and conflicts
+
+* `Save` writes the SLDC package atomically; `Save as` never overwrites without an explicit confirmation; a name the person did not choose gets a
+  free variant (`Untitled document (2)`), a name they typed never does.
+* Autosave is per document (on/off and interval), plus a crash-recovery copy of unsaved work a few seconds after each edit (`recovery_seconds`).
+* Snapshots (version history) are taken on save, sign, restore, merge and on demand. **Restore creates a new revision**; the old one stays.
+* If the file on disk changed while there are unsaved edits, Save is refused (409 `external_change`) and the person chooses: merge (conflicts
+  are shown first, then merged keeping their text), keep both (save theirs as a separate file), overwrite (a snapshot is kept first) or reload.
+* The package version is upgraded from SLDC 1.0 to 1.1 exactly once, when the content needs it (equations, inline pictures, EMBED…); a notice tells
+  the person that older 1.0-only readers may not open the file.
+* `.sdoc` is a compatibility import only: it is read through SLDC's migration path and written as `.sldc`; it is never renamed in place or
+  reinterpreted silently.
+
+## 3. The browser client
+
+Strict TypeScript (`noUncheckedIndexedAccess`, `noUnusedLocals`), compiled by the shared `build-static.mjs`. There is no framework and no inline
+style or script (the CSP forbids both).
+
+| Concern | Files |
+|---|---|
+| Boot, routing, session, preferences, open documents | `main.ts`, `app.ts`, `net.ts`, `shell.ts` |
+| Pre-editor screens | `screens/auth.ts` (startup, signup, verify, login, 2FA, recovery), `home.ts`, `newdoc.ts`, `settings.ts`, `plans.ts`, `profile.ts`, `help.ts`, `signatures.ts`, `signing.ts`, `versions.ts` |
+| Editor engine | `editor.ts` (one `contenteditable` root, diffed typing), `input.ts` (beforeinput/keys/drag/drop), `actions.ts` (every edit as ops), `model.ts`, `render.ts`, `domtext.ts`, `textops.ts`, `page.ts` (sheets, zoom, rulers, guides), `decor.ts` (highlights via the CSS Custom Highlight API) |
+| Editor screen | `screens/doc.ts` (assembly), `docbars.ts` (top bar, status bar, optional formatting bar), `navmenu.ts` (sandwich menu), `docsave.ts`, `find.ts`, `commands.ts` (one command table for toolbar, `/` search, context menu), `dialogs.ts`, `sigdialog.ts`, `notesapi.ts`, `dico.ts` (the design's icons), `editor.css` |
+| Application panels (collapsed by default) | `sidepanels.ts` (left Tools rail/panel, right organisation rail/panel, arrows in the ruler row), `panels/tools.ts`, `panels/right.ts` (pages/chapters/sections, layers, background, illustrations) |
+| Page-attached panels (collapsed by default) | `attach.ts`: three tabs per page (pink left, gold right, grey bottom) and the panels they open, in an overlay `layer` beside the scaled pages, never inside the editable root. Content: `panels/proof.ts` (corrections + AI), `notes.ts`, `sources.ts`, `embed.ts` |
+| Shared | `kit.ts` is the **only** import point for `applications/tools/web` |
+
+Pagination is block-granular and approximate; the status bar says "approx." and the print preview (rasterised from the real PDF the PDF writer
+produces) is the only exact page count. Zoom is a CSS transform (10–400 %) on the pages only; the panel layer is positioned from each sheet's on-screen rectangle (`PageView.sheetRect`, re-run by `onPlace` after layout, zoom, reflow and resize), so panels follow their page without being scaled or printed. The EMBED panel pushes the following pages down with the sheet's bottom margin. Rulers are SVG. Search matches, typos, grammar marks, notes and comments
+are highlights over the live text, not wrapper elements, so they never change what is typed.
+
+### Page bands, pictures and layers (last round)
+
+* **Page bands.** `header_mm` / `footer_mm` live in the section's `page` (SLDC feature `page-bands`, format 1.1.0). `PageView` draws six draggable
+  slider-role lines per sheet and the ruler handles from one `LineSpec` list; changes go through the `page_setup` op. Defaults: `max(2, margin/2 - 3)` mm.
+* **Pictures.** `figlayout.ts` is the single place that turns the figure properties (width/height, crop, rotation, mirroring, placement) into sizes;
+  `render.ts` paints with it and `imageedit.ts` edits with it (overlay in `PageView.overlay`, in front of the sheets). Every edit is a `figure_set` op, checked by
+  `ops._check_figure_props`. Unused pictures are dropped by `prune_assets()` when the file is written (`session._rid`).
+* **Layers.** Writer-only data in `extensions["slai.writer"]`: `layers` (name, visible, locked, custom) and `layer_of` (block id → layer), set by `ext_set` and validated in `ops._check_layers`.
+
+## 4. Accounts and security
+
+* **Guest** needs no account: create, edit, save, reopen and export all work offline.
+* **Signup:** e-mail + password → a 25-character code is e-mailed (5-minute life, resend invalidates the previous code, throttled, failed attempts rate
+  limited, "change e-mail" cancels the pending signup) → authenticator enrolment (QR + secret shown only in the protected setup step, confirmed
+  with a code before 2FA is enabled) → recovery codes shown once.
+* **Login:** password, then a six-digit TOTP code on new devices, expired trust or high-risk changes; "remember this device" is limited to the
+  configured days and can be revoked; recovery codes; "lost authenticator" starts a delayed secure recovery.
+* E-mail is sent through SMTP only (`configs/config.yaml` `mail:`; the password comes from `SLAI_WRITER_SMTP_PASSWORD`). With no SMTP configured
+  signup says so; no code is ever shown on screen or logged. Tests use an in-memory `Outbox`.
+* Passwords are stored as scrypt hashes and codes only as keyed hashes; secrets (TOTP seeds, signing keys) are encrypted at rest with the data-folder master key
+  (`master.key`, created with owner-only permissions).
+* The server listens on loopback only (`--host` other than 127.0.0.1 is refused), requires the launch token (exchanged for an HttpOnly,
+  SameSite=Strict cookie), checks `Host` and `Origin`, requires the marker header on writes, sends a strict CSP, caps request and upload sizes, and
+  never logs document text or secrets.
+* File paths from the browser are validated (`clean_path`): absolute, no traversal, no device names; archives are read through SLDC's bounded
+  reader (size, entry count and compression-ratio limits).
+
+## 5. Signatures
+
+A visual signature (drawn, uploaded or saved) is a picture and **never** proof. The graphics dialog says so, and a visual mark is never described
+as verified. Cryptographic signing uses SLDC's own signing API on the frozen revision; verification evaluates the current draft and signed history
+separately ("Modified since signed revision N"). Later edits start a new revision and never alter signed bytes. Limits (2 distinct signatures, 20
+uploads) are configuration, not security.
+
+## 6. Academic writing
+
+Sources have a status that says who vouches for them: `user` (typed by the person), `imported`, `ai` (suggested, must be checked), `checked`
+(the person confirmed against the real work) and `registry` (a DOI-registry match, only after an explicit online lookup the person enabled).
+Writer never invents authors, dates, DOIs, page numbers or quotations; AI-suggested sources start as `ai` and are labelled in the list, in the
+citation and in the reference list. A reference list is built from each source's own fields.
+
+## 7. Proofing and AI
+
+Spelling, grammar and the AI Assistant never run by themselves. Each is started by a button, scoped (selection, section or document), checked
+against the plan and the person's AI setting, returned as proposals (hunks with original and replacement) and applied only for hunks the person
+accepts; additions that introduce unverified references need a second confirmation. Every apply is one undoable edit, and a stale proposal is
+refused because it names the exact text it expects. With AI off or its agent unavailable the panel says so and writing is unaffected. There is no
+stub model: unavailable means unavailable.
+
+## 8. EMBED
+
+An EMBED block is an inert, locked component: a declarative definition (`kind`, `schema_version`, `params`, `inputs`) validated against a schema from
+the catalogue (`writer.stats`, `writer.excerpt`, `writer.table_total`). It cannot run code. Preview shows the exact output and its SHA-256 without
+changing the document; Apply is bound to the document revision and input hashes and is refused (409) if either moved. A locked view shows a public
+summary and an access-denied state; "Request access" is an honest "needs a workspace" answer. An AI request is never an authorisation. The lock
+is an interface-level lock, not encryption of the declaration (recorded as a discrepancy).
+
+## 9. Import, export, print
+
+Formats: SLDC (native), PDF, DOCX, ODT, RTF, HTML, Markdown, text, XML (and CSV/DOC/PDF import) through Documaster. Before export the dialog lists
+what the target format loses; the result report repeats it and adds PDF facts (pages, fonts not embedded). Print preview rasterises the real PDF.
+If Documaster or a PDF library is missing the feature says exactly what is missing (503 `dependency_missing`) and nothing is faked.
+
+## 10. Collaboration and plans
+
+There is no workspace server in this installation, so shared editing, roles and "request access" report "not connected" rather than simulating
+people. What is real: merging an edited **copy** of the same document (conflicts shown, local text kept on conflict, their whole version saved to
+history). Plans (Guest, Essential, Creator, Professional, Workspace) come from `configs/plans.yaml` with the values of Document A page 4;
+gating is enforced server-side (`strict`) and a paid plan can only become active through a real billing integration. The app never reports a
+successful payment it did not receive.
+
+## 11. Accessibility
+
+Every control has an accessible name; dialogs trap and restore focus; menus and the `/` palette are keyboard operable; status is never colour
+alone (text + icon + dot); live regions announce save, search counts, errors and mode changes; Esc closes page panels, menus, palettes and Hide; reduced
+motion and text scaling are honoured; the "contrast" theme raises contrast of page marks and highlights.
+
+## 9a. Tables, columns, Scripture, contents (v2.4 round)
+
+* **No core change.** Page columns use the sections' existing `columns` (1 to 8, Writer offers 1 to 4) and `column_gap_mm`. Everything else is in
+  `slai.writer.*` extensions (block extensions `table_layout`, `table_cell_styles`, `table_borders`, `table_style`, `column_break`, `toc_style`; document
+  extension keys `column_layouts` (per section id: separator, unequal widths, balance, flow, continuous) and `table_styles` (saved styles)) and in paragraph styles (`Scripture`,
+  `TOC Title`, `TOC Level 1..6`). The native `slai.sldc.toc` extension is unchanged, so a table of contents is still one every SLDC reader knows.
+* **Server.** `tableops.py` (grid model, rows/columns/merge/split, styles), `table_styles.py` + `table_styles.json` (the 12 looks, one source for server, client and
+  tests), `columns.py` (scopes, selection → continuous sections, `reconcile` after every operation, `inherit` on section breaks, `group_members` so page set-up
+  stays shared by sections on one sheet), `toc_presets.py` and `academic.py` (looks, ids kept on refresh). All are registered handlers in `ops.py`, so undo/redo,
+  versions, conflict handling and validation are the existing machinery.
+* **Client.** `table_geometry/table_style/table_actions/table_ui.ts`, `column_layout/column_actions/column_ui.ts`, `toc_actions/toc_ui.ts`; generated data files
+  (`table_styles_data.ts`, `toc_presets_data.ts`, from the Python sources by `scripts/gen_*.py`). The page engine lays columns out as real CSS columns inside each
+  sheet and cuts long tables between rows. Page numbers drawn in a contents are the exact ones from the Documaster PDF layout (`/layout`).
+* **Export.** The Documaster writers read the same extensions when present and fall back to the old behaviour when absent. PDF: `BalancedColumns` for a
+  selection on a page (blocks inside are still measured, so contents numbers stay right), frames for whole-page columns, leaders and number placement. Word/RTF:
+  continuous sections, column properties, bookmarks and `PAGEREF` fields. Writer adds the measured page numbers to the converted copy only
+  (`slai.writer.toc_page_labels`), never to the document.
+
+## 9b. Start-up, proofreading, text boxes (v2.4 round 2)
+
+* **Start-up.** The loader (`applications/tools/web/startup/loader.js`, `loader.css`, shared with the other SLAI applications and copied to `dist/startup/` by `tools/build/publish-startup.mjs`) is plain files loaded before the application script; `app.ts` reports stages to the loader through `App.report`;
+  `main.ts` ends it when the first screen is interactive.
+* **Proofreading.** `proofing.py` wraps SLAI's providers (lexicon, rule engine, verifier, normaliser); `assist.py` serves `/api/docs/{id}/proof`; the client paints results as
+  CSS highlights and ignores results computed for older text. Detail: `PROOFING_V24.md`.
+* **Text boxes.** A text box is the shape carrier (`slai.writer.shape`, `kind: "rectangle"`) plus an optional `textbox` object validated by `shape_validation.py`; the
+  stable id is the block id. Pin/lock are enforced in `ops.py` (`op_shape_set`, `op_move`, `op_block_delete`, also inside `batch`). Client: `textbox.ts` (model and painting),
+  `textbox_edit.ts` (editing session, one `shape_set` per editing session, ordered changes), `textbox_ui.ts` (insert/draw), `textbox_ribbon.ts` (the Text Box tab), the page
+  overlay in `shapetools.ts` (chrome never enters the document). Export: `shape_export.py` draws the real paragraphs into the PNG fallback; `export.py` switches the native
+  shape writers off for text boxes. Detail: `TEXTBOX_V24.md`.
+
+## 9c. Header/footer shapes and page-side panels (v2.4 round 3)
+
+* **Band shapes.** A header or footer is a definition repeated by every page that uses it; its shapes live with the definition in `slai.writer.band_shapes`
+  (keyed by section; variants default/even/first; explicit link to the previous section). `bands.py` (server) and `src/client/bands.ts` are one arithmetic tied by
+  `tests/fixtures/band_shapes_golden.json`; `band_edit.ts` edits them through ordinary operations (undo, validation, locks enforced by the server); the Documaster
+  PDF and DOCX writers draw them. The body is inert while a band is edited.
+* **Panels between pages.** `src/client/panel_layout.ts` is pure arithmetic (which panels conflict, how wide a seam must be); `attach.ts` applies it and `PageView.setSeams`/`holding`
+  (`page.ts`) keep the pinned page where it is and let the others glide (transform: no layout change, no repagination). A seam holds one panel; nothing is hidden with z-index.
+
+## 12. Directory map
+
+```
+applications/slai_writer/
+  *.py              server side            tests/            Python tests (406)
+  src/client/       browser client         tests_ts/         TypeScript unit tests (183)
+  configs/          config.yaml, plans.yaml tests_e2e/        Playwright scenarios (8 suites), run.mjs
+  assets/           Writer-only images     docs/             this documentation
+  dist/             build output (generated)
+```

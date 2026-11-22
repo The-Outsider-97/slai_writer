@@ -1,0 +1,35 @@
+"""Regenerates docs/API.md from the @router.route decorators. Run from the slai_writer folder: python3 docs/gen_api.py"""
+import glob
+import re
+from collections import OrderedDict
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+groups: "OrderedDict[str, list[tuple[str, str, str]]]" = OrderedDict()
+for f in sorted(glob.glob(str(HERE / "api" / "routes" / "*.py"))) + [str(HERE / "export.py")]:
+    lines = Path(f).read_text(encoding="utf-8").split("\n")
+    for i, line in enumerate(lines):
+        m = re.match(r'@router\.route\("(\w+)",\s*"([^"]+)"', line)
+        if m:
+            j = i + 1
+            while not lines[j].lstrip().startswith(("def ", "async def ")):
+                j += 1
+            owner = f"api/routes/{Path(f).name}" if Path(f).parent.name == "routes" else Path(f).name
+            groups.setdefault(owner, []).append((m.group(1), m.group(2), lines[j].split("(")[0].replace("def ", "").strip()))
+out = ["# Writer HTTP API (generated from the route table)\n",
+       "Every route is under `/api`, loopback only, requires the session cookie and (for writes) the `X-SLAI-Writer` header, and answers `{ok, data}` or "
+       "`{ok:false, error:{code,message,hint,details}}`. Regenerate with `python3 docs/gen_api.py`.\n"]
+for name, items in groups.items():
+    out.append(f"\n## {name}\n\n| Method | Path | Handler |\n|---|---|---|")
+    out.extend(f"| {m} | `{p}` | `{fn}` |" for m, p, fn in items)
+out.append("""
+## Notes on requests that carry a version or a retry
+
+* Edits by position (`/ops`, `/xref`, `/footnote`, `/cite`, `/embed`) send `base`, the version the browser last saw; a stale one is refused with 409
+  `details.kind = "stale_version"` and changes nothing. `/contents` and the bibliography are built on the server from the current text and need no base.
+* `POST /api/docs/{sid}/proof` accepts `retry: true` (the Check button): it skips the pause the server keeps after a checker failed to load. Answers
+  and the `dependency_missing` (503) error carry `retryAfter`, the seconds left of that pause.
+* `GET /api/docs/{sid}/pages` and `/pages/{n}.png` serve the pages of the export PDF for the Rendered view.
+""")
+(HERE / "docs" / "API.md").write_text("\n".join(out) + "\n", encoding="utf-8")
+print(sum(len(v) for v in groups.values()), "routes")
