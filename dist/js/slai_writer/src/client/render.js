@@ -1,0 +1,464 @@
+/** Turns blocks into DOM. Everything is built with createElement/textContent (no innerHTML); styles go through the CSSOM, which the CSP allows. */
+import { h, glyph } from "./kit.js";
+import { assetUrl } from "./net.js";
+import { plaintextOnlySupported } from "./domtext.js";
+import { segments, MM_PX } from "./textops.js";
+import { paintFigure } from "./figlayout.js";
+import { shapeOf, paintShape } from "./shape.js";
+import { ruleElement } from "./rule.js";
+import { ruleOf } from "./rule_look.js";
+import { FRONT_MATTER_STYLES } from "./named_styles.js";
+import { resolveTable, borderCss, CELLS_KEY, LAYOUT_KEY } from "./table_style.js";
+export const EDIT_MODE = plaintextOnlySupported() ? "plaintext-only" : "true";
+/** A style with its `based_on` chain folded in (parent first). */
+export function resolveStyle(meta, kind, name) {
+    const group = meta.styles?.[kind] ?? {};
+    const chain = [];
+    let current = name;
+    const seen = new Set();
+    while (current && group[current] && !seen.has(current)) {
+        seen.add(current);
+        chain.unshift(group[current]);
+        current = group[current]["based_on"];
+    }
+    return Object.assign({}, ...chain);
+}
+const FONT_SAFE = /^[^\x00-\x1f\x7f{};<>\\"'`]{1,100}$/;
+const COLOUR = /^#[0-9a-fA-F]{6}$/;
+export function applyStyle(el, props, paragraph) {
+    const set = (k, v) => el.style.setProperty(k, v);
+    if (typeof props["font_family"] === "string" && FONT_SAFE.test(props["font_family"]))
+        set("font-family", `"${props["font_family"]}", serif`);
+    if (typeof props["font_size_pt"] === "number")
+        set("font-size", `${props["font_size_pt"]}pt`);
+    for (const [key, css, low, high] of [["letter_spacing_pt", "letter-spacing", -5, 50], ["word_spacing_pt", "word-spacing", -20, 100]]) {
+        const value = props[key];
+        if (typeof value === "number" && Number.isFinite(value) && value >= low && value <= high)
+            set(css, `${value}pt`);
+    }
+    if (props["bold"])
+        set("font-weight", "700");
+    if (props["italic"])
+        set("font-style", "italic");
+    const deco = [props["underline"] ? "underline" : "", props["strike"] ? "line-through" : ""].filter(Boolean).join(" ");
+    if (deco)
+        set("text-decoration", deco);
+    if (props["small_caps"])
+        set("font-variant", "small-caps");
+    if (typeof props["color"] === "string" && COLOUR.test(props["color"]))
+        set("color", props["color"]);
+    if (typeof props["background"] === "string" && COLOUR.test(props["background"]))
+        set("background-color", props["background"]);
+    if (!paragraph)
+        return;
+    if (typeof props["align"] === "string")
+        set("text-align", props["align"]);
+    if (typeof props["line_height"] === "number")
+        set("line-height", String(props["line_height"]));
+    if (typeof props["space_before_pt"] === "number")
+        set("margin-top", `${props["space_before_pt"]}pt`);
+    if (typeof props["space_after_pt"] === "number")
+        set("margin-bottom", `${props["space_after_pt"]}pt`);
+    if (typeof props["indent_mm"] === "number")
+        set("padding-left", `${props["indent_mm"]}mm`);
+    if (typeof props["first_line_indent_mm"] === "number")
+        set("text-indent", `${props["first_line_indent_mm"]}mm`);
+}
+/** Applies a named paragraph style inside a text box, from the document's own definitions (Scripture, Title and so on are defined once). */
+export function paragraphStyler(meta) {
+    return (el, name) => {
+        let props = resolveStyle(meta, "paragraph", name);
+        if (!Object.keys(props).length && FRONT_MATTER_STYLES[name])
+            props = FRONT_MATTER_STYLES[name];
+        applyStyle(el, props, true);
+    };
+}
+const SAFE_LINK = /^(https?:|mailto:)/i;
+function pieceFor(seg, ctx, block) {
+    if (seg.object)
+        return objectNode(seg, ctx);
+    let node = document.createTextNode(seg.text);
+    const wrap = (el) => { el.appendChild(node); node = el; return el; };
+    const f = seg.flags;
+    if (f.code)
+        wrap(h("code", { class: "i-code" }));
+    if (f.bold)
+        wrap(h("strong"));
+    if (f.italic)
+        wrap(h("em"));
+    if (f.underline)
+        wrap(h("u"));
+    if (f.strike)
+        wrap(h("s"));
+    if (f.superscript)
+        wrap(h("sup"));
+    if (f.subscript)
+        wrap(h("sub"));
+    if (seg.color || seg.background || seg.style || seg.font_family || seg.font_size_pt || seg.letter_spacing_pt !== undefined || seg.word_spacing_pt !== undefined) {
+        const el = wrap(h("span", { class: "i-fmt" }));
+        if (seg.style)
+            applyStyle(el, resolveStyle(ctx.meta, "character", seg.style), false);
+        if (seg.color && /^#[0-9a-fA-F]{6}$/.test(seg.color))
+            el.style.setProperty("color", seg.color);
+        if (seg.background && /^#[0-9a-fA-F]{6}$/.test(seg.background))
+            el.style.setProperty("background-color", seg.background);
+        if (seg.font_family && FONT_SAFE.test(seg.font_family))
+            el.style.setProperty("font-family", `"${seg.font_family}", serif`);
+        if (typeof seg.font_size_pt === "number" && Number.isFinite(seg.font_size_pt) && seg.font_size_pt >= 4 && seg.font_size_pt <= 400)
+            el.style.setProperty("font-size", `${seg.font_size_pt}pt`);
+        for (const [key, css, low, high] of [["letter_spacing_pt", "letter-spacing", -5, 50], ["word_spacing_pt", "word-spacing", -20, 100]]) {
+            const value = seg[key];
+            if (typeof value === "number" && Number.isFinite(value) && value >= low && value <= high)
+                el.style.setProperty(css, `${value}pt`);
+        }
+    }
+    if (seg.href) {
+        const safe = SAFE_LINK.test(seg.href);
+        wrap(h("a", { class: "i-link", attrs: { href: safe ? seg.href : null, "data-href": seg.href, title: `${seg.href} (Ctrl+click to open)`, rel: "noopener noreferrer" } }));
+    }
+    if (seg.ref) {
+        const footnote = ctx.footnotes.get(seg.ref);
+        const ref = ctx.meta.references?.find((r) => r.id === seg.ref);
+        wrap(h("span", { class: footnote ? "i-fn" : "i-cite", data: { ref: seg.ref, n: footnote ? String(footnote) : undefined },
+            attrs: { title: referenceTitle(ref), role: "doc-noteref" } }));
+    }
+    if (seg.target)
+        wrap(h("a", { class: "i-xref", data: { target: seg.target }, attrs: { href: `#${seg.target}`, title: "Cross-reference (Ctrl+click to go there)" } }));
+    void block;
+    return node;
+}
+function referenceTitle(ref) {
+    if (!ref)
+        return "Reference not found";
+    if (ref.kind === "footnote")
+        return `Footnote: ${ref.text ?? ""}`;
+    return [ref.authors?.join(", "), ref.year ? `(${ref.year})` : "", ref.title].filter(Boolean).join(" ");
+}
+function objectNode(seg, ctx) {
+    const span = seg.object;
+    if (span?.type === "equation" && span.equation) {
+        return h("span", { class: "i-eq", data: { obj: "equation" }, attrs: { "data-obj": "", contenteditable: "false", role: "math", "aria-label": `Equation: ${span.equation.source}`, title: "Equation (double-click to edit)" } }, h("code", { text: span.equation.source }));
+    }
+    const figure = span?.figure;
+    return h("span", { class: "i-img", attrs: { "data-obj": "", contenteditable: "false", "data-kind": "image" } }, figure ? h("img", { attrs: { src: assetUrl(ctx.sid, figure.asset), alt: figure.decorative ? "" : figure.alt ?? "" }, css: { "max-height": "1.6em" } }) : "");
+}
+/** Replace the contents of a text element with the block's formatted text. */
+export function fillText(el, ctx, block) {
+    const kids = segments(block, "codepoints").map((seg) => pieceFor(seg, ctx, block));
+    // text that ends with a line break needs a placeholder, or the caret has no line to sit on (it counts for nothing in the text: see domtext.serialise)
+    if (block.text.endsWith("\n"))
+        kids.push(h("br"));
+    el.replaceChildren(...kids);
+}
+function textElement(block, ctx) {
+    const tag = block.type === "heading" ? `h${Math.min(6, Math.max(1, block.attributes?.level ?? 1))}` : block.type === "quote" ? "blockquote" : block.type === "code" ? "pre" : block.type === "list_item" ? "div" : "p";
+    const el = h(tag, { class: `txt t-${block.type}`, attrs: { "data-edit": "text", contenteditable: ctx.readOnly ? "false" : EDIT_MODE, spellcheck: "false", "aria-multiline": "true", tabindex: "0" } });
+    if (block.type === "list_item")
+        el.setAttribute("role", "listitem");
+    if (block.type === "code")
+        el.setAttribute("data-lang", String(block.attributes?.language ?? ""));
+    if (block.type === "heading")
+        el.setAttribute("aria-level", String(block.attributes?.level ?? 1));
+    applyStyle(el, resolveStyle(ctx.meta, "paragraph", block.style ?? defaultStyle(block)), true);
+    if (block.type === "list_item")
+        el.style.setProperty("margin-left", `${(block.attributes?.depth ?? 0) * 8 + 8}mm`);
+    if (typeof block.attributes?.align === "string" && ["left", "center", "right", "justify"].includes(block.attributes.align))
+        el.style.setProperty("text-align", block.attributes.align);
+    for (const key of ["line_height", "space_before_pt", "space_after_pt", "indent_mm", "first_line_indent_mm"]) {
+        const value = block.attributes?.[key];
+        if (typeof value !== "number" || !Number.isFinite(value))
+            continue;
+        const css = { line_height: "line-height", space_before_pt: "margin-top", space_after_pt: "margin-bottom", indent_mm: "padding-left", first_line_indent_mm: "text-indent" }[key];
+        const unit = key === "line_height" ? "" : key.endsWith("_mm") ? "mm" : "pt";
+        el.style.setProperty(css, `${value}${unit}`);
+    }
+    fillText(el, ctx, block);
+    return el;
+}
+function defaultStyle(block) {
+    if (block.type === "heading")
+        return `Heading ${Math.min(6, Math.max(1, block.attributes?.level ?? 1))}`;
+    if (block.type === "quote")
+        return "Quote";
+    return block.type === "paragraph" || block.type === "list_item" ? "Body Text" : undefined;
+}
+/** Dark or light text for a cell fill, whatever the page colour is (a shaded cell must stay readable on a dark page). */
+function contrastInk(fill) {
+    const n = parseInt(fill.slice(1), 16);
+    const lin = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => { const x = v / 255; return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4; });
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2] < 0.35 ? "#F4F4F4" : "#1B1B1B";
+}
+/** The table styles the person saved in this document (they are used by name: "custom:Name"). */
+export function customTableStyles(meta) {
+    const mine = meta.extensions?.["slai.writer"];
+    return mine?.table_styles ?? {};
+}
+function tableElement(block, ctx) {
+    const data = block.table;
+    const table = h("table", { class: "tbl", attrs: { role: "table" } });
+    const layout = block.extensions?.[LAYOUT_KEY];
+    const cellStyles = block.extensions?.[CELLS_KEY];
+    const looks = data ? resolveTable(block, customTableStyles(ctx.meta)) : new Map();
+    const fit = layout?.fit ?? "auto";
+    const columnWidths = layout?.column_widths_mm;
+    const hasWidths = Boolean(columnWidths && columnWidths.length === data?.columns);
+    if (fit === "content" && !hasWidths) {
+        table.style.tableLayout = "auto";
+        table.style.width = "auto";
+    }
+    if (layout?.width_mm && fit !== "window")
+        table.style.width = `${layout.width_mm}mm`;
+    if (fit === "window")
+        table.style.width = "100%";
+    if (layout?.align === "center") {
+        table.style.marginLeft = "auto";
+        table.style.marginRight = "auto";
+    }
+    if (layout?.align === "right") {
+        table.style.marginLeft = "auto";
+        table.style.marginRight = "0";
+    }
+    if (layout?.align === "left") {
+        table.style.marginLeft = "0";
+        table.style.marginRight = "auto";
+    }
+    if (layout?.indent_mm && layout.align !== "center" && layout.align !== "right") {
+        table.style.marginLeft = `${layout.indent_mm}mm`;
+        table.style.width = layout.width_mm ? `${layout.width_mm}mm` : `calc(100% - ${layout.indent_mm}mm)`;
+    }
+    if (hasWidths && columnWidths) {
+        const colgroup = h("colgroup");
+        for (const width of columnWidths) {
+            const col = h("col");
+            col.style.width = `${width}mm`;
+            colgroup.appendChild(col);
+        }
+        table.appendChild(colgroup);
+        if (fit !== "window")
+            table.style.width = `${columnWidths.reduce((a, b) => a + b, 0)}mm`;
+    }
+    if (layout?.keep_rows_together)
+        table.setAttribute("data-keep-together", "");
+    if (layout?.allow_row_split === false)
+        table.setAttribute("data-no-row-split", "");
+    if (block.text)
+        table.appendChild(h("caption", { text: block.text }));
+    const headerRows = data?.header_rows ?? 0;
+    (data?.rows ?? []).forEach((row, r) => {
+        const tr = h("tr");
+        if (r < headerRows)
+            tr.setAttribute("data-header", "");
+        const rowHeight = layout?.row_heights_mm?.[r];
+        if (rowHeight) {
+            tr.style.height = `${rowHeight}mm`;
+            if (layout?.row_height_rule === "exact")
+                tr.setAttribute("data-exact-height", "");
+        }
+        row.forEach((cell, c) => {
+            const isHeader = r < headerRows;
+            const td = h(isHeader ? "th" : "td", { class: "cell", attrs: { "data-edit": "cell", "data-row": r, "data-col": c, contenteditable: ctx.readOnly ? "false" : EDIT_MODE, colspan: cell.colspan && cell.colspan > 1 ? cell.colspan : null, rowspan: cell.rowspan && cell.rowspan > 1 ? cell.rowspan : null, scope: isHeader ? "col" : null, "aria-label": `Row ${r + 1}, column ${c + 1}`, tabindex: "0" }, text: cell.text });
+            if (cell.align)
+                td.style.textAlign = cell.align;
+            const look = looks.get(`${r},${c}`);
+            if (look) {
+                td.style.backgroundColor = look.fill ?? "transparent";
+                td.style.fontWeight = look.bold ? "700" : "400";
+                const ink = look.color ?? (look.fill ? contrastInk(look.fill) : null);
+                if (ink)
+                    td.style.color = ink;
+                td.style.borderTop = borderCss(look.borders.top);
+                td.style.borderBottom = borderCss(look.borders.bottom);
+                td.style.borderLeft = borderCss(look.borders.left);
+                td.style.borderRight = borderCss(look.borders.right);
+            }
+            if (layout?.cell_padding_mm !== undefined)
+                td.style.padding = `${layout.cell_padding_mm}mm`;
+            const style = cellStyles?.[`${r},${c}`];
+            if (style) {
+                if (style.paragraph_style)
+                    applyStyle(td, resolveStyle(ctx.meta, "paragraph", style.paragraph_style), true);
+                if (style.valign)
+                    td.style.verticalAlign = style.valign;
+                if (style.padding_mm !== undefined)
+                    td.style.padding = `${style.padding_mm}mm`;
+                if (style.line_height)
+                    td.style.lineHeight = String(style.line_height);
+                if (style.space_before_pt)
+                    td.style.paddingTop = `${style.space_before_pt}pt`;
+                if (style.space_after_pt)
+                    td.style.paddingBottom = `${style.space_after_pt}pt`;
+                if (style.indent_mm)
+                    td.style.textIndent = `${style.indent_mm}mm`;
+            }
+            if (cell.spans?.length)
+                fillText(td, ctx, { ...block, text: cell.text, spans: cell.spans });
+            tr.appendChild(td);
+        });
+        table.appendChild(tr);
+    });
+    return table;
+}
+function figureElement(block, ctx) {
+    const fig = block.figure;
+    const img = h("img", { class: "fig-img", attrs: { src: fig ? assetUrl(ctx.sid, fig.asset) : null, alt: fig?.decorative ? "" : fig?.alt ?? "", draggable: "false" } });
+    const frame = h("div", { class: "fig-frame" }, img);
+    const box = h("div", { class: "fig-box" }, frame);
+    const cap = h("figcaption", { class: "cap", attrs: { "data-edit": "caption", contenteditable: ctx.readOnly ? "false" : EDIT_MODE, "aria-label": "Caption", tabindex: "0", "data-placeholder": "Add a caption" }, text: block.text });
+    const figure = h("figure", { class: `fig align-${fig?.align ?? "center"}` }, box, cap);
+    if (fig) {
+        const maxPx = (ctx.contentMm?.(block.section) ?? 0) * MM_PX;
+        paintFigure(box, frame, img, fig, maxPx);
+        // Until the picture has loaded its proportions are a guess; once it has, the layout is redone with the real ones.
+        img.addEventListener("load", () => { paintFigure(box, frame, img, fig, maxPx); ctx.mediaLoaded?.(); }, { once: true });
+        const place = fig.placement;
+        if (place) {
+            figure.setAttribute("data-floating", place.layer ?? "content");
+            figure.style.setProperty("left", `${place.x_mm * MM_PX}px`);
+            figure.style.setProperty("top", `${place.y_mm * MM_PX}px`);
+        }
+    }
+    if (fig?.decorative)
+        figure.setAttribute("data-decorative", "");
+    else if (!fig?.alt)
+        figure.setAttribute("data-missing-alt", "");
+    return figure;
+}
+function equationElement(block) {
+    const eq = block.equation;
+    return h("div", { class: `eqn align-${eq?.align ?? "center"}`, attrs: { role: "math", tabindex: "0", "aria-label": `Equation: ${eq?.source ?? ""}`, "data-equation": "" } }, h("code", { class: "eqn-src", text: eq?.source ?? "" }), eq?.numbered ? h("span", { class: "eqn-no", text: "(#)" }) : null, h("span", { class: "eqn-note muted", text: `${eq?.syntax ?? "latex"} source; typeset preview is not available offline` }));
+}
+function embedDecl(ctx, block) { return ctx.meta.embeds?.find((e) => e.id === block.embed); }
+function embedElement(block, ctx) {
+    const decl = embedDecl(ctx, block);
+    const locked = block.embed ? ctx.locks.has(block.embed) : false;
+    const restricted = locked && ctx.role !== "owner";
+    const card = h("div", { class: `embed${restricted ? " locked" : ""}`, attrs: { tabindex: "0", role: "group", "aria-label": restricted ? "EMBED component, locked" : `EMBED component ${decl?.kind ?? ""}`, "data-embed": block.embed ?? "" } }, h("div", { class: "embed-head" }, glyph(restricted ? "lock" : "layout"), h("strong", { text: restricted ? "EMBED / Locked" : "EMBED" }), h("span", { class: "muted", text: decl?.kind ?? "" })), h("p", { class: "embed-out", text: block.text || "(no output yet)" }), h("p", { class: "embed-note muted", text: restricted ? "Locked. The public summary above stays readable; open the panel to see access options." : "Inert declaration: it shows its last valid output and never runs code." }));
+    return card;
+}
+/** The marker (bullet or number) of every list item, restarting after any other block. */
+export function listMarkers(blocks) {
+    const out = new Map();
+    const counters = [];
+    for (const b of blocks) {
+        if (b.type !== "list_item") {
+            counters.length = 0;
+            continue;
+        }
+        const depth = Math.min(b.attributes?.depth ?? 0, 8);
+        counters.length = depth + 1;
+        for (let i = 0; i <= depth; i += 1)
+            counters[i] = counters[i] ?? 0;
+        counters[depth] = (counters[depth] ?? 0) + 1;
+        out.set(b.id, b.attributes?.ordered ? `${counters[depth]}.` : depth % 2 ? "◦" : "•");
+    }
+    return out;
+}
+/** Numbers of footnotes in reading order. */
+export function footnoteNumbers(blocks, meta) {
+    const kind = new Map((meta.references ?? []).map((r) => [r.id, r.kind]));
+    const out = new Map();
+    for (const b of blocks)
+        for (const s of b.spans ?? []) {
+            if (s.type === "ref" && s.ref && kind.get(s.ref) === "footnote" && !out.has(s.ref))
+                out.set(s.ref, out.size + 1);
+        }
+    return out;
+}
+export function renderBlock(block, ctx) {
+    const wrap = h("div", { class: `blk b-${block.type}`, data: { id: block.id, type: block.type } });
+    const toc = block.extensions?.["slai.sldc.toc"];
+    if (toc?.role === "entry" && toc.heading) {
+        wrap.dataset["tocEntry"] = toc.heading;
+        wrap.dataset["tocId"] = toc.id ?? "";
+        wrap.dataset["tocLevel"] = String(toc.level ?? 1);
+    }
+    if (block.type === "list_item")
+        wrap.appendChild(h("span", { class: "marker", text: ctx.markers.get(block.id) ?? "•", attrs: { "aria-hidden": "true", contenteditable: "false" } }));
+    if (!ctx.readOnly)
+        wrap.appendChild(h("button", { class: "grip", type: "button", attrs: { "aria-label": "Move block (or Alt+Shift+arrow keys)", title: "Drag to move", draggable: "true", tabindex: "-1" }, data: { grip: "" } }, glyph("drag")));
+    switch (block.type) {
+        case "table": {
+            wrap.appendChild(tableElement(block, ctx));
+            if (!ctx.readOnly) {
+                wrap.appendChild(h("button", { class: "table-grow table-grow-row", type: "button", text: "+", attrs: {
+                        "data-table-add": "row", "aria-label": "Add table row", title: "Add row below", contenteditable: "false"
+                    } }));
+                wrap.appendChild(h("button", { class: "table-grow table-grow-col", type: "button", text: "+", attrs: {
+                        "data-table-add": "col", "aria-label": "Add table column", title: "Add column right", contenteditable: "false"
+                    } }));
+            }
+            break;
+        }
+        case "figure":
+            wrap.appendChild(figureElement(block, ctx));
+            break;
+        case "equation":
+            wrap.appendChild(equationElement(block));
+            break;
+        case "embed":
+            wrap.appendChild(embedElement(block, ctx));
+            break;
+        default: {
+            const shape = shapeOf(block);
+            const rule = shape ? null : ruleOf(block);
+            if (rule) {
+                wrap.classList.add("b-rule"); // a horizontal line: a drawn element, not text, so it holds no caret and is selected as one object
+                wrap.appendChild(ruleElement(rule));
+            }
+            else if (shape) {
+                const node = paintShape(shape, paragraphStyler(ctx.meta));
+                if (shape.layout?.mode === "floating") {
+                    if (shape.layout.wrap === "top_bottom") {
+                        // A top-and-bottom shape consumes normal block-flow space,
+                        // so the existing pagination engine measures its actual height.
+                        wrap.setAttribute("data-shape-wrap", "top_bottom");
+                        node.style.position = "relative";
+                        node.style.left = `${shape.layout.x_mm ?? 0}mm`;
+                        node.style.marginTop = `${Math.max(0, shape.layout.y_mm ?? 0)}mm`;
+                        node.style.marginBottom = "2mm";
+                    }
+                    else {
+                        node.style.left = `${shape.layout.x_mm ?? 0}mm`;
+                        node.style.top = `${shape.layout.y_mm ?? 0}mm`;
+                        node.style.zIndex = String(shape.z_index ?? 0);
+                        wrap.setAttribute("data-floating", shape.layout.layer ?? "content");
+                    }
+                }
+                wrap.appendChild(node);
+            }
+            else
+                wrap.appendChild(textElement(block, ctx));
+        }
+    }
+    if (block.type === "figure" && block.figure?.placement)
+        wrap.setAttribute("data-floating", block.figure.placement.layer ?? "content");
+    syncLayer(wrap, block, ctx);
+    return wrap;
+}
+/** Show whether the block's layer is hidden or locked. Called when a block is drawn and again when only the layers changed. */
+export function syncLayer(wrap, block, ctx) {
+    const layer = ctx.layerOf(block);
+    wrap.toggleAttribute("data-layer-hidden", ctx.hidden.has(layer));
+    wrap.toggleAttribute("data-layer-locked", ctx.locks.has(`layer:${layer}`));
+}
+/** Re-render one block in place when only its text or spans changed (keeps the wrapper, so focus handling stays simple). */
+export function refreshBlock(wrapper, block, ctx) {
+    if (wrapper.dataset["type"] !== block.type)
+        return false;
+    if (block.type === "heading") {
+        const el = wrapper.querySelector("[data-edit=text]");
+        if (!el || el.tagName !== `H${block.attributes?.level ?? 1}`)
+            return false;
+    }
+    if (block.type === "list_item" || block.type === "table" || block.type === "figure" || block.type === "equation" || block.type === "embed")
+        return false;
+    const el = wrapper.querySelector("[data-edit=text]");
+    if (!el)
+        return false;
+    el.removeAttribute("style");
+    applyStyle(el, resolveStyle(ctx.meta, "paragraph", block.style ?? defaultStyle(block)), true);
+    if (typeof block.attributes?.align === "string" && ["left", "center", "right", "justify"].includes(block.attributes.align))
+        el.style.setProperty("text-align", block.attributes.align);
+    fillText(el, ctx, block);
+    return true;
+}

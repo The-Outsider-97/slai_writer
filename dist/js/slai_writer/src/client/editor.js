@@ -1,0 +1,977 @@
+/** The editor: a server-authoritative document view.
+ *
+ *  The browser never decides what the document says. Every change is sent as an operation (see ops.py) tagged with the version the
+ *  browser last saw; the server applies it, remembers how to undo it and answers with a patch, which this class applies to its mirror
+ *  (DocModel) and to the DOM. Typing is the one exception to "ask first": the browser edits the text natively (so IME, accents and
+ *  speed behave) and the difference is sent right after, coalesced while an earlier request is still on its way.
+ *
+ *  All blocks live in ONE contenteditable root, so selections, arrow keys and drag-selection cross paragraphs and pages naturally. */
+import { ApiError, announce, Emitter, uid } from "./kit.js";
+import { Decor } from "./decor.js";
+import { blockIdOf, caretAt, editableOf, placeCaret, pointFor, serialise } from "./domtext.js";
+import { contentSize, storedFromLine } from "./book_layout.js";
+import { columnSpec, pageGroups } from "./column_layout.js";
+import { DocModel, OpQueue, layerOf } from "./model.js";
+import { api, errorText } from "./net.js";
+import { PageView } from "./page.js";
+import { EDIT_MODE, footnoteNumbers, listMarkers, refreshBlock, renderBlock, syncLayer } from "./render.js";
+import { resolveLook } from "./toc_layout.js";
+import { paintTocEntries } from "./toc_paint.js";
+import { BandEditor } from "./band_edit.js";
+import { AutoCorrect } from "./autocorrect_dom.js";
+import { RULE_KEY } from "./rule_look.js";
+import { cleanInsert, diffText, MM_PX, splitLines, toCodepointEdit, toCodepoints } from "./textops.js";
+import { COLUMN_BREAK, OBJECT_CHAR, TEXT_TYPES } from "./types.js";
+const NEW_ID = () => `b${uid().slice(0, 16)}`;
+const SIG = (b) => JSON.stringify([b.type, b.style, b.attributes, b.spans, b.table, b.figure, b.equation, b.embed, b.extensions, b.type === "table" || b.type === "figure" ? b.text : 0]);
+export class Editor {
+    hooks;
+    /** Measured PDF layout, never the editor's approximate block-granular sheet positions. */
+    printLayout = null;
+    model;
+    queue;
+    page;
+    decor;
+    events = new Emitter();
+    els = new Map();
+    sent = new Map();
+    /** AutoCorrect and AutoFormat: one pipeline for typing, Enter and paste (see autocorrect_dom.ts). */
+    autocorrect = new AutoCorrect(this);
+    dirty = new Set();
+    composing = false;
+    selectedBlock = null;
+    /** Multi-object selection for vector illustrations; current selectedBlock remains the focus. */
+    selectedShapes = new Set();
+    sigs = new Map();
+    deferred = new Set();
+    ctxCache = null;
+    reflowTimer;
+    settleTimer;
+    flushTimer;
+    retryTimer;
+    retryDelayMs = 1000;
+    heldSaid = false;
+    printLayoutTimer;
+    tocRefreshTimer;
+    tocPaintFrame;
+    lastTocLabels = {};
+    /** How many times the contents entries were painted (the browser tests wait for it). */
+    tocPaintCount = 0;
+    lastTocHeadingSignature = "";
+    destroyed = false;
+    stale = false;
+    /** Formatting switched on with the caret in place (Ctrl+B with nothing selected): applied to the next text typed. */
+    pendingFormat = new Set();
+    /** Inline typing attributes for a collapsed selection (same operation stream as bold/italic). */
+    pendingInline = new Map();
+    constructor(state, hooks) {
+        this.hooks = hooks;
+        this.model = new DocModel(state);
+        const pageEvents = {
+            rulerDouble: () => this.events.emit({ type: "ruler-double" }),
+            pageDouble: (sheetIndex, section, xMm, yMm) => this.events.emit({ type: "page-double", sheetIndex, section, xMm, yMm }),
+            margin: (section, side, mm, physical) => { void this.setMargin(section, side, mm, physical); },
+            band: (section, edge, mm) => { void this.setBand(section, edge, mm); },
+            guideMove: (axis, index, mm) => { void this.moveGuide(axis, index, mm); },
+            guideAdd: (axis, mm) => { void this.addGuide(axis, mm); },
+        };
+        this.page = new PageView(pageEvents, this.model.readOnly ? "false" : EDIT_MODE);
+        this.decor = new Decor((id) => this.textEl(id));
+        this.queue = new OpQueue(this.model, (patch, op) => this.afterPatch(patch, op, true), () => { this.stale = true; this.events.emit({ type: "stale" }); });
+        this.page.setHeaderFooter((section) => {
+            const sec = (this.model.meta.sections ?? []).find((x) => x.id === section) ?? (this.model.meta.sections ?? [])[0];
+            const hf = {};
+            if (sec?.header)
+                hf.header = sec.header;
+            if (sec?.footer)
+                hf.footer = sec.footer;
+            if (sec?.numbering)
+                hf.numbering = sec.numbering;
+            if (sec?.role)
+                hf.role = sec.role;
+            return hf;
+        });
+        this.bands = new BandEditor(this);
+        this.renderAll();
+        this.lastTocHeadingSignature = this.headingSignature();
+        this.schedulePrintLayout();
+        document.addEventListener("selectionchange", this.onSelectionChange);
+        void document.fonts?.ready.then(() => this.scheduleTocPaint()); // the entries are measured again once the fonts are there
+    }
+    /** The shapes of headers and footers: what the sheets draw of them, and the mode in which they are edited. */
+    bands;
+    destroy() {
+        this.destroyed = true;
+        this.bands.destroy();
+        document.removeEventListener("selectionchange", this.onSelectionChange);
+        window.clearTimeout(this.reflowTimer);
+        window.clearTimeout(this.settleTimer);
+        window.clearTimeout(this.flushTimer);
+        window.clearTimeout(this.printLayoutTimer);
+        window.clearTimeout(this.tocRefreshTimer);
+        if (this.tocPaintFrame !== undefined)
+            window.cancelAnimationFrame(this.tocPaintFrame);
+        this.decor.clear();
+    }
+    /** The last place the caret was inside the page. Panels, menus and dialogs take focus away, and commands still need to know where to act. */
+    lastSel = null;
+    onSelectionChange = () => {
+        if (this.destroyed)
+            return;
+        const now = this.readSelection();
+        if (now)
+            this.lastSel = now;
+        this.events.emit({ type: "selection" });
+    };
+    /** The caret if it is in the page now, otherwise where it last was. */
+    recallSelection() { return this.readSelection() ?? this.lastSel; }
+    /** Put focus and the caret back into the page (after a dialog, menu or panel). */
+    refocus(sel = this.lastSel) {
+        if (this.destroyed)
+            return;
+        this.host.focus({ preventScroll: true });
+        this.restoreSelection(sel);
+    }
+    get host() { return this.page.host; }
+    get readOnly() { return this.model.readOnly; }
+    get sid() { return this.model.sid; }
+    /* ---------------------------------------------------------------------------------------------- rendering */
+    ctx() {
+        if (this.ctxCache)
+            return this.ctxCache;
+        const blocks = this.model.list();
+        const ext = this.model.ext;
+        const hidden = new Set();
+        const locks = new Set(Object.keys(ext.locks ?? {}));
+        for (const layer of ext.layers ?? []) {
+            if (!layer.visible)
+                hidden.add(layer.id);
+            if (layer.locked)
+                locks.add(`layer:${layer.id}`);
+        }
+        this.ctxCache = {
+            sid: this.model.sid, meta: this.model.meta, readOnly: this.model.readOnly, markers: listMarkers(blocks), footnotes: footnoteNumbers(blocks, this.model.meta),
+            locked: (id) => locks.has(id), role: this.model.state.access.role, hidden, locks,
+            layerOf: (block) => layerOf(block, ext),
+            contentMm: (section) => { const g = this.model.geometry(section); return g.widthMm - g.margins.left - g.margins.right; },
+            mediaLoaded: () => { if (!this.destroyed)
+                this.scheduleReflow(); },
+        };
+        return this.ctxCache;
+    }
+    invalidate() { this.ctxCache = null; }
+    renderAll() {
+        this.invalidate();
+        this.els.clear();
+        this.sigs.clear();
+        this.sent.clear();
+        const ctx = this.ctx();
+        for (const block of this.model.list()) {
+            this.els.set(block.id, renderBlock(block, ctx));
+            this.sigs.set(block.id, SIG(block));
+            this.rememberFields(block);
+        }
+        this.layout();
+    }
+    rememberFields(block) {
+        this.sent.set(block.id, block.text);
+        if (block.type === "table")
+            block.table?.rows.forEach((row, r) => row.forEach((cell, c) => {
+                const key = `${block.id}#${r},${c}`;
+                if (!this.dirty.has(key))
+                    this.sent.set(key, cell.text);
+            }));
+    }
+    textEl(id) { return this.els.get(id)?.querySelector("[data-edit=text]") ?? null; }
+    fieldEl(key) {
+        const [id, field] = key.split("#");
+        const wrap = this.els.get(id);
+        if (!wrap)
+            return null;
+        if (!field)
+            return wrap.querySelector("[data-edit=text]");
+        if (field === "cap")
+            return wrap.querySelector("[data-edit=caption]");
+        const [r, c] = field.split(",");
+        return this.page.cellEl(id, Number(r), Number(c)) ?? wrap.querySelector(`[data-edit=cell][data-row="${r}"][data-col="${c}"]`);
+    }
+    /** A page break, or a column break (which starts a new page in a section of one column). */
+    breakFlags(b) {
+        const column = b.extensions?.[COLUMN_BREAK] !== undefined;
+        const cols = column ? columnSpec(this.model.meta, b.section) : null;
+        return { page: b.attributes?.["page_break_before"] === true || (column && !cols), column: column && cols !== null };
+    }
+    /** Full layout: distribute every block over the sheets. */
+    layout() {
+        const ctx = this.ctx();
+        const prefs = this.hooks.prefs();
+        const saved = this.saveSelection();
+        const groups = pageGroups(this.model.meta);
+        const blocks = this.model.list().map((b) => {
+            const el = this.els.get(b.id);
+            const cols = columnSpec(this.model.meta, b.section);
+            const flags = this.breakFlags(b);
+            el.toggleAttribute("data-break", flags.page);
+            el.toggleAttribute("data-colbreak", flags.column);
+            return {
+                id: b.id, el, section: b.section === undefined ? undefined : (groups.get(b.section) ?? b.section), pageBreak: flags.page, cols,
+                footnotes: (b.spans ?? []).filter((s) => s.type === "ref" && s.ref && ctx.footnotes.has(s.ref)).map((s) => ({ n: ctx.footnotes.get(s.ref), text: referenceText(this.model.meta.references, s.ref) })),
+            };
+        });
+        const ext = this.model.ext;
+        const onLine = this.page.holdsLineFocus();
+        this.page.layout({
+            blocks, geometry: (section) => this.model.geometry(section), title: this.model.meta.title,
+            guides: ext.guides ?? {}, background: /^#[0-9a-fA-F]{6}$/.test(ext.background?.color ?? "") ? ext.background?.color : undefined,
+            showMargins: true, showGuides: prefs.show_guides, showRulers: prefs.show_rulers, unit: prefs.units === "in" ? "in" : "mm",
+        });
+        // A margin, header or footer line (or its ruler handle) that has the focus keeps it: putting the caret back would take it away.
+        if (!onLine)
+            this.restoreSelection(saved);
+        if (this.selectedBlock)
+            this.els.get(this.selectedBlock)?.setAttribute("data-selected", "");
+        for (const selected of this.selectedShapes)
+            this.els.get(selected)?.setAttribute("data-shape-multi", "");
+        this.decor.refresh();
+        this.paintTocNumbers();
+        this.events.emit({ type: "layout" });
+    }
+    /** Exact TOC page labels and leaders are non-editable CSS decorations, not serialized text: `toc_paint.ts` measures every entry and draws them with the
+     *  same engine as the exported pages, from the table's own settings (where the number goes, how it and the text are aligned, the leader). */
+    paintTocNumbers() {
+        // while the pages are measured again the numbers of the last measurement stay (they are right until the layout says otherwise): nothing flickers
+        if (this.printLayout?.blockLabels)
+            this.lastTocLabels = this.printLayout.blockLabels;
+        const labels = this.printLayout?.blockLabels ?? this.lastTocLabels;
+        const tables = new Map();
+        for (const block of this.model.list()) {
+            const toc = block.extensions?.["slai.sldc.toc"];
+            if (toc?.role !== "title" || !toc.id)
+                continue;
+            tables.set(toc.id, resolveLook(block.extensions?.["slai.writer.toc_style"], toc.show_page_numbers !== false, toc.leader_dots !== false));
+        }
+        const items = [];
+        for (const element of this.els.values()) {
+            const heading = element.dataset["tocEntry"];
+            if (!heading)
+                continue;
+            const text = element.querySelector("[data-edit=text]");
+            if (!text)
+                continue;
+            const id = element.dataset["tocId"] ?? "";
+            const look = tables.get(id) ?? resolveLook(null);
+            // The editable text element keeps its inline formatting and selection model untouched; page references are decorations on its block wrapper.
+            items.push({ wrapper: element, text, label: look.position === "hidden" ? "" : labels[heading] ?? "", group: id, look });
+        }
+        paintTocEntries(items);
+        this.tocPaintCount += 1;
+    }
+    /** Entries are measured again after their text changes or the fonts arrive: one repaint per frame at most. */
+    scheduleTocPaint() {
+        if (this.tocPaintFrame !== undefined)
+            return;
+        this.tocPaintFrame = window.requestAnimationFrame(() => { this.tocPaintFrame = undefined; if (!this.destroyed)
+            this.paintTocNumbers(); });
+    }
+    headingSignature() {
+        return JSON.stringify(this.model.list().filter((b) => b.type === "heading")
+            .map((b) => [b.id, b.text, b.attributes?.level ?? 1]));
+    }
+    /** Refresh only managed automatic TOCs after the heading outline actually changes.
+     * Each refresh is an ordinary server transaction and patch, so undo and local
+     * selections are preserved. Debouncing avoids regenerating on every keypress. */
+    scheduleTocRefresh() {
+        window.clearTimeout(this.tocRefreshTimer);
+        this.tocRefreshTimer = window.setTimeout(async () => {
+            if (this.destroyed || this.model.readOnly)
+                return;
+            await this.flush();
+            await this.queue.idle();
+            if (this.destroyed)
+                return;
+            const ids = this.model.list().flatMap((b) => {
+                const meta = b.extensions?.["slai.sldc.toc"];
+                return meta?.role === "title" && meta.refresh_mode !== "manual" && meta.id ? [meta.id] : [];
+            });
+            for (const id of ids) {
+                if (this.destroyed)
+                    return;
+                try {
+                    await this.call(() => api.post(`/docs/${encodeURIComponent(this.sid)}/contents/${encodeURIComponent(id)}/refresh`, {}), (result) => result.patch);
+                }
+                catch (error) {
+                    this.events.emit({ type: "error", error });
+                    return;
+                }
+            }
+        }, 1000);
+    }
+    /** Debounced PDF measurement: one native layout source for preview and TOC references. */
+    schedulePrintLayout() {
+        window.clearTimeout(this.printLayoutTimer);
+        this.printLayout = null;
+        this.scheduleTocPaint();
+        this.printLayoutTimer = window.setTimeout(async () => {
+            if (this.destroyed || this.queue.pending) {
+                if (!this.destroyed)
+                    this.schedulePrintLayout();
+                return;
+            }
+            const version = this.model.version;
+            try {
+                const layout = await api.get(`/docs/${encodeURIComponent(this.sid)}/layout`);
+                if (this.destroyed || this.model.version !== version || layout.version !== version)
+                    return;
+                this.printLayout = layout;
+                this.paintTocNumbers();
+                this.events.emit({ type: "layout" });
+            }
+            catch { /* Local editing still works if Documaster is not installed. */ }
+        }, 1200);
+    }
+    scheduleReflow() {
+        window.clearTimeout(this.reflowTimer);
+        this.reflowTimer = window.setTimeout(() => {
+            if (this.destroyed || this.composing)
+                return;
+            const saved = this.saveSelection();
+            // Where the line being written is on the screen: if reflow moves its paragraph (to the next page, say), the page scrolls with it, so the line stays put under the eyes
+            const sel = window.getSelection();
+            const at = sel && sel.rangeCount && sel.isCollapsed && this.host.contains(sel.anchorNode) ? editableOf(sel.anchorNode) : null;
+            const before = at?.getBoundingClientRect().top ?? 0;
+            const changed = this.page.reflow();
+            if (changed)
+                this.page.redecorate();
+            this.restoreSelection(saved);
+            if (changed && at?.isConnected) {
+                const drift = at.getBoundingClientRect().top - before;
+                if (Math.abs(drift) > 1)
+                    this.page.scroller.scrollTop += drift;
+            }
+            this.decor.refresh();
+            this.events.emit({ type: "layout" });
+        }, 120);
+    }
+    /* ---------------------------------------------------------------------------------------------- selection */
+    pointOf(node, offset) {
+        if (!node)
+            return null;
+        const caret = caretAt(node, offset);
+        if (caret) {
+            const pt = { block: caret.block, offset: caret.offset, field: caret.field };
+            if (caret.row !== undefined) {
+                pt.row = caret.row;
+                pt.col = caret.col;
+            }
+            return pt;
+        }
+        const id = blockIdOf(node);
+        return id ? { block: id, offset: 0, field: "text" } : null;
+    }
+    before(a, b) {
+        const ia = this.model.indexOf(a.block);
+        const ib = this.model.indexOf(b.block);
+        if (ia !== ib)
+            return ia < ib;
+        if (a.field === "cell" && b.field === "cell" && (a.row !== b.row || a.col !== b.col))
+            return (a.row ?? 0) * 1000 + (a.col ?? 0) < (b.row ?? 0) * 1000 + (b.col ?? 0);
+        return a.offset <= b.offset;
+    }
+    readSelection() {
+        const s = window.getSelection();
+        if (!s || !s.rangeCount || !s.anchorNode || !s.focusNode)
+            return null;
+        if (!this.host.contains(s.anchorNode) || !this.host.contains(s.focusNode))
+            return null;
+        const a = this.pointOf(s.anchorNode, s.anchorOffset);
+        const f = this.pointOf(s.focusNode, s.focusOffset);
+        if (!a || !f)
+            return null;
+        const [start, end] = this.before(a, f) ? [a, f] : [f, a];
+        return { start, end, collapsed: s.isCollapsed };
+    }
+    saveSelection() { return this.readSelection(); }
+    restoreSelection(sel) {
+        if (!sel)
+            return;
+        const a = this.setPoint(sel.start);
+        const b = sel.collapsed ? a : this.setPoint(sel.end);
+        if (!a || !b)
+            return;
+        const s = window.getSelection();
+        if (!s)
+            return;
+        const range = document.createRange();
+        range.setStart(a.node, a.offset);
+        range.setEnd(b.node, b.offset);
+        s.removeAllRanges();
+        s.addRange(range);
+    }
+    setPoint(pt) {
+        const key = pt.field === "text" ? pt.block : pt.field === "caption" ? `${pt.block}#cap` : `${pt.block}#${pt.row},${pt.col}`;
+        const el = this.fieldEl(key);
+        return el ? pointFor(el, pt.offset) : null;
+    }
+    focusBlock(id, offset) {
+        const el = this.textEl(id) ?? this.els.get(id)?.querySelector("[data-edit], [tabindex]") ?? null;
+        if (!el)
+            return;
+        el.focus({ preventScroll: true });
+        if (el.dataset["edit"] === "text")
+            placeCaret(el, offset ?? serialise(el).length);
+        this.els.get(id)?.scrollIntoView({ block: "nearest" });
+    }
+    scrollToBlock(id, offset) {
+        const el = this.els.get(id);
+        if (!el)
+            return;
+        el.scrollIntoView({ block: "center" });
+        if (offset !== undefined)
+            this.focusBlock(id, offset);
+    }
+    currentPage() {
+        const s = this.readSelection();
+        const el = s ? this.els.get(s.start.block) : null;
+        if (el)
+            return this.page.pageIndexOf(el) + 1;
+        const rect = this.page.scroller.getBoundingClientRect();
+        const mid = rect.top + rect.height / 3;
+        const hit = this.page.sheets.findIndex((sh) => { const r = sh.el.getBoundingClientRect(); return r.top <= mid && r.bottom >= mid; });
+        return hit >= 0 ? hit + 1 : 1;
+    }
+    selectionText(sel = this.readSelection()) {
+        if (!sel || sel.collapsed)
+            return "";
+        if (sel.start.field === "cell" && sel.end.field === "cell" && sel.start.block === sel.end.block) {
+            const table = this.model.block(sel.start.block)?.table;
+            if (!table)
+                return "";
+            const sr = sel.start.row ?? 0, sc = sel.start.col ?? 0;
+            const er = sel.end.row ?? 0, ec = sel.end.col ?? 0;
+            if (sr === er && sc === ec)
+                return table.rows[sr]?.[sc]?.text.slice(sel.start.offset, sel.end.offset) ?? "";
+            return table.rows.slice(sr, er + 1).map((row, index) => {
+                const r = sr + index, left = r === sr ? sc : 0, right = r === er ? ec : row.length - 1;
+                return row.slice(left, right + 1).map((cell, indexInRow) => {
+                    const c = left + indexInRow;
+                    const from = r === sr && c === sc ? sel.start.offset : 0;
+                    const to = r === er && c === ec ? sel.end.offset : cell.text.length;
+                    return cell.text.slice(from, to).replaceAll("\t", " ").replaceAll("\n", " ");
+                }).join("\t");
+            }).join("\n");
+        }
+        const i = this.model.indexOf(sel.start.block);
+        const j = this.model.indexOf(sel.end.block);
+        const parts = [];
+        for (let k = i; k <= j; k += 1) {
+            const b = this.model.block(this.model.order[k]);
+            if (!b)
+                continue;
+            if (b.type === "table" || b.type === "figure" || b.type === "embed" || b.type === "equation") {
+                parts.push(b.type === "equation" ? b.equation?.source ?? "" : b.text);
+                continue;
+            }
+            const from = k === i ? sel.start.offset : 0;
+            const to = k === j ? sel.end.offset : b.text.length;
+            parts.push(this.plain(b, from, to));
+        }
+        return parts.join("\n");
+    }
+    /** Text of a range of a block with inline equations written out as their source (so copying never yields a bare placeholder). */
+    plain(b, from, to) {
+        let out = "";
+        const spans = b.spans ?? [];
+        for (let i = from; i < to; i += 1) {
+            const ch = b.text[i];
+            if (ch === OBJECT_CHAR) {
+                const o = spans.find((s) => s.start === i && (s.type === "equation" || s.type === "image"));
+                out += o?.equation?.source ?? o?.figure?.alt ?? "";
+            }
+            else
+                out += ch ?? "";
+        }
+        return out;
+    }
+    /* ---------------------------------------------------------------------------------------------- sending */
+    /** Set by the keyboard layer: resolves when keys that were held while a structural edit was in flight have all been applied. */
+    settleHook = null;
+    /** Wait for held keystrokes, then send everything typed. Use this before saving, exporting or searching; actions that run inside the held queue use flush(). */
+    async whenIdle() {
+        await this.settleHook?.();
+        await this.flush();
+    }
+    /** Send everything typed so far (text diffs), in order, then wait for the server. */
+    async flush() {
+        window.clearTimeout(this.flushTimer);
+        const keys = [...this.dirty];
+        this.dirty.clear();
+        for (const key of keys) {
+            const el = this.fieldEl(key);
+            if (!el)
+                continue;
+            const [id, field] = key.split("#");
+            const now = serialise(el);
+            const was = this.sent.get(key) ?? (field && field !== "cap"
+                ? this.model.block(id)?.table?.rows[Number(field.split(",")[0])]?.[Number(field.split(",")[1])]?.text
+                : this.model.block(id)?.text) ?? "";
+            if (now === was)
+                continue;
+            this.sent.set(key, now);
+            if (!field) {
+                const caret = this.readSelection();
+                const browserEdit = diffText(was, now, caret && caret.start.block === id && caret.collapsed ? caret.start.offset : undefined);
+                const edit = browserEdit ? toCodepointEdit(was, browserEdit) : null; // the server counts code points, the browser UTF-16
+                if (edit) {
+                    void this.queue.send({ op: "text", block: id, start: edit.start, end: edit.end, insert: edit.insert }).catch((e) => this.failed(e));
+                    if ((this.pendingFormat.size || this.pendingInline.size) && edit.insert) {
+                        const set = Object.fromEntries([...this.pendingFormat].map((f) => [f, true]));
+                        const unset = [];
+                        for (const [key, value] of this.pendingInline) {
+                            if (value === null)
+                                unset.push(key);
+                            else
+                                set[key] = value;
+                        }
+                        this.pendingFormat.clear();
+                        this.pendingInline.clear();
+                        void this.queue.send({ op: "format", block: id, start: edit.start, end: edit.start + Array.from(edit.insert).length, set, unset }).catch((e) => this.failed(e));
+                    }
+                }
+            }
+            else if (field === "cap") {
+                void this.queue.send({ op: "caption", block: id, text: now }).catch((e) => this.failed(e));
+            }
+            else {
+                const [r, c] = field.split(",").map(Number);
+                void this.queue.send({ op: "table_cell", block: id, row: r, col: c, text: now }).catch((e) => this.failed(e));
+                if ((this.pendingFormat.size || this.pendingInline.size) && now !== was) {
+                    const diff = diffText(was, now);
+                    if (diff?.insert) {
+                        const set = Object.fromEntries([...this.pendingFormat].map((name) => [name, true]));
+                        const unset = [];
+                        for (const [name, value] of this.pendingInline) {
+                            if (value === null)
+                                unset.push(name);
+                            else
+                                set[name] = value;
+                        }
+                        this.pendingFormat.clear();
+                        this.pendingInline.clear();
+                        void this.queue.send({ op: "format", block: id, row: r, col: c,
+                            start: toCodepoints(now, diff.start), end: toCodepoints(now, diff.start + diff.insert.length), set, unset })
+                            .catch((e) => this.failed(e));
+                    }
+                }
+            }
+        }
+        await this.queue.idle();
+        this.settle();
+    }
+    /** The browser changed a field natively (typing); remember it and send soon. */
+    touched(el) {
+        const id = blockIdOf(el);
+        if (!id)
+            return;
+        const field = el.dataset["edit"];
+        const key = field === "caption" ? `${id}#cap` : field === "cell" ? `${id}#${el.dataset["row"]},${el.dataset["col"]}` : id;
+        if (!this.sent.has(key))
+            this.sent.set(key, field === "cell"
+                ? this.model.block(id)?.table?.rows[Number(el.dataset["row"])]?.[Number(el.dataset["col"])]?.text ?? ""
+                : this.model.block(id)?.text ?? "");
+        this.dirty.add(key);
+        window.clearTimeout(this.flushTimer);
+        if (!this.composing)
+            this.flushTimer = window.setTimeout(() => { void this.flush(); }, 60);
+    }
+    /** An operation from a command (not typing). Typed text is sent first so the order of events is the order of the person's actions. */
+    async op(op) {
+        await this.flush();
+        return this.queue.send(op);
+    }
+    async batch(ops, label) { return this.op({ op: "batch", ops, label }); }
+    /** Other server calls that change the document: ordered with the edits, and their patch (if any) applied to the view. */
+    async call(work, patchOf) {
+        await this.flush();
+        return this.queue.run(async () => {
+            const result = await work();
+            const patch = patchOf?.(result);
+            if (patch)
+                this.applyExternalPatch(patch);
+            return result;
+        });
+    }
+    /** The server could not be reached (or answered 502 and above): nothing was refused, so what was typed is kept, not thrown away. */
+    unreachable(error) {
+        return error instanceof ApiError && (error.code === "offline" || error.status === 0 || error.status >= 502);
+    }
+    /** Typed text that the server has not got: the field differs from what the server last confirmed. It goes out again, with growing pauses, until it does. */
+    holdTyping() {
+        for (const key of [...this.sent.keys()]) {
+            const el = this.fieldEl(key);
+            if (!el)
+                continue;
+            const [id, field] = key.split("#");
+            const block = this.model.block(id);
+            const confirmed = (field && field !== "cap" ? block?.table?.rows[Number(field.split(",")[0])]?.[Number(field.split(",")[1])]?.text : block?.text) ?? "";
+            if (serialise(el) === confirmed)
+                continue;
+            this.sent.set(key, confirmed);
+            this.dirty.add(key);
+        }
+        if (!this.heldSaid) {
+            this.heldSaid = true;
+            announce("The server cannot be reached. What you type is kept and will be saved as soon as it is back.");
+        }
+        window.clearTimeout(this.retryTimer);
+        this.retryTimer = window.setTimeout(() => { void this.flush(); }, this.retryDelayMs);
+        this.retryDelayMs = Math.min(15000, this.retryDelayMs * 2);
+    }
+    failed(error) {
+        this.events.emit({ type: "error", error });
+        if (this.unreachable(error)) {
+            this.holdTyping();
+            return;
+        }
+        announce(errorText(error), "assertive");
+        // The mirror may be ahead of the server (a typed change was refused): fetch the truth.
+        void this.resync();
+    }
+    /** Replace the mirror with the server's state (after a refused edit, a restore, a merge, an external change). */
+    async resync(state) {
+        const fresh = state ?? (await api.get(`/docs/${encodeURIComponent(this.model.sid)}`));
+        this.autocorrect.reset();
+        const saved = this.saveSelection();
+        this.dirty.clear();
+        this.deferred.clear();
+        this.model.load(fresh);
+        this.lastTocHeadingSignature = this.headingSignature();
+        this.stale = false;
+        this.renderAll();
+        this.restoreSelection(saved);
+        this.events.emit({ type: "reloaded" });
+    }
+    /** Comment calls change the server's version without returning blocks: take the new version and thread list so the next edit is not seen as stale. */
+    applyComments(reply) {
+        this.model.version = reply.version;
+        this.model.comments = reply.comments;
+        this.model.state = { ...this.model.state, version: reply.version, dirty: reply.dirty, comments: reply.comments };
+        this.events.emit({ type: "comments" });
+    }
+    /** Re-read the comment threads (their anchors move as the text is edited). Only applied when no edit happened in between. */
+    async refreshComments() {
+        const fresh = await api.get(`/docs/${encodeURIComponent(this.model.sid)}`);
+        if (fresh.version !== this.model.version)
+            return;
+        this.model.comments = fresh.comments;
+        this.model.state = { ...this.model.state, comments: fresh.comments, dirty: fresh.dirty, savedAt: fresh.savedAt, lastEdit: fresh.lastEdit };
+        this.events.emit({ type: "comments" });
+    }
+    /** A patch the server produced outside of /ops (citations, EMBED apply, AI apply, signature graphic placement). */
+    applyExternalPatch(patch) { this.afterPatch(patch, { op: "external" }, false); }
+    afterPatch(patch, op, local) {
+        if (this.heldSaid) {
+            this.heldSaid = false;
+            this.retryDelayMs = 1000;
+            window.clearTimeout(this.retryTimer);
+            announce("Saved again. The server is back.");
+        }
+        const { changed, removed, reordered, documentChanged } = this.model.applyPatch(patch);
+        const headingSignature = this.headingSignature();
+        if (headingSignature !== this.lastTocHeadingSignature) {
+            this.lastTocHeadingSignature = headingSignature;
+            this.scheduleTocRefresh();
+        }
+        this.invalidate();
+        const ctx = this.ctx();
+        let relayout = reordered || documentChanged;
+        for (const id of removed) {
+            this.els.get(id)?.remove();
+            this.els.delete(id);
+            this.sigs.delete(id);
+            this.sent.delete(id);
+            relayout = true;
+        }
+        const active = this.readSelection()?.start.block;
+        const pendingTyping = this.dirty.size > 0 || this.composing;
+        for (const id of changed) {
+            const block = this.model.block(id);
+            const wrapper = this.els.get(id);
+            if (!wrapper) {
+                this.els.set(id, renderBlock(block, ctx));
+                this.sigs.set(id, SIG(block));
+                this.rememberFields(block);
+                relayout = true;
+                continue;
+            }
+            const sig = SIG(block);
+            const flags = this.breakFlags(block);
+            if (wrapper.hasAttribute("data-break") !== flags.page || wrapper.hasAttribute("data-colbreak") !== flags.column)
+                relayout = true; // a page or column break was added or removed: the pages are laid out again
+            const textBlock = TEXT_TYPES.includes(block.type) && !block.extensions?.["slai.writer.shape"] && !block.extensions?.[RULE_KEY] && wrapper.dataset["type"] === block.type;
+            if (textBlock) {
+                const el = this.textEl(id);
+                const domText = el ? serialise(el) : block.text;
+                const same = domText === block.text && this.sigs.get(id) === sig;
+                if (same)
+                    continue;
+                if (domText === block.text && sig !== this.sigs.get(id)) {
+                    if (id === active && (pendingTyping || this.queue.pending > 1)) {
+                        this.deferred.add(id);
+                        this.sigs.set(id, sig);
+                        continue;
+                    }
+                    this.rerender(id, block, wrapper);
+                    relayout = relayout || false;
+                    continue;
+                }
+                if (id === active && (pendingTyping || this.queue.pending > 1)) {
+                    this.deferred.add(id);
+                    continue;
+                }
+                this.rerender(id, block, wrapper);
+                this.scheduleReflow();
+            }
+            else {
+                // A cell edit is acknowledged as a whole table patch. Never replace the
+                // browser's active cell while more native keystrokes or IME input are
+                // outstanding; its DOM is ahead of the last server patch.
+                if (block.type === "table" && id === active && (pendingTyping || this.queue.pending > 1)) {
+                    this.deferred.add(id);
+                    this.sigs.set(id, sig);
+                    continue;
+                }
+                this.rerender(id, block, wrapper);
+                this.scheduleReflow();
+            }
+            this.rememberFields(block);
+        }
+        if (documentChanged) {
+            const sel = this.readSelection(); // one read for the whole sweep, not one per block
+            for (const [id, block] of this.model.blocks) {
+                const w = this.els.get(id);
+                if (w && !changed.includes(id))
+                    this.rerender(id, block, w, sel, false);
+            }
+        }
+        if (relayout) {
+            const sel = this.readSelection();
+            for (const [id, block] of this.model.blocks)
+                if (listMarkersChanged(this.els.get(id), ctx, block)) {
+                    const w = this.els.get(id);
+                    if (w)
+                        this.rerender(id, block, w, sel, false);
+                }
+            this.layout();
+        }
+        else
+            this.scheduleReflow();
+        if (documentChanged || relayout)
+            this.decor.refresh();
+        this.events.emit({ type: "patch", patch, local });
+        this.schedulePrintLayout();
+        void op;
+    }
+    /** Re-render one block in place and put the caret back where it was. */
+    rerender(id, block, wrapper, selection, refreshDecor = true) {
+        const saved = selection === undefined ? this.readSelection() : selection;
+        const hadFocus = wrapper.contains(document.activeElement);
+        const ctx = this.ctx();
+        if (block.type === "table")
+            this.page.dropFragments(id); // the whole table is drawn again; the next reflow cuts it across pages
+        if (!refreshBlock(wrapper, block, ctx)) {
+            const fresh = renderBlock(block, ctx);
+            for (const name of ["data-colkey", "data-colbreak", "data-break"])
+                if (wrapper.hasAttribute(name))
+                    fresh.setAttribute(name, wrapper.getAttribute(name) ?? "");
+            wrapper.replaceWith(fresh);
+            this.els.set(id, fresh);
+        }
+        else
+            syncLayer(wrapper, block, ctx);
+        this.sigs.set(id, SIG(block));
+        this.rememberFields(block);
+        if (hadFocus && saved?.start.block === id) {
+            const key = saved.start.field === "cell" ? `${id}#${saved.start.row},${saved.start.col}`
+                : saved.start.field === "caption" ? `${id}#cap` : id;
+            this.fieldEl(key)?.focus({ preventScroll: true });
+        }
+        if (saved && (saved.start.block === id || saved.end.block === id))
+            this.restoreSelection(saved);
+        if (refreshDecor)
+            this.decor.refresh();
+    }
+    /** Called when typing has been sent and answered: bring deferred blocks in line with the server. */
+    settle() {
+        window.clearTimeout(this.settleTimer);
+        this.settleTimer = window.setTimeout(() => {
+            if (this.destroyed || this.composing || this.dirty.size || this.queue.pending)
+                return;
+            for (const id of [...this.deferred]) {
+                const block = this.model.block(id);
+                const wrapper = this.els.get(id);
+                if (block && wrapper)
+                    this.rerender(id, block, wrapper);
+                this.deferred.delete(id);
+            }
+        }, 350);
+    }
+    /* ---------------------------------------------------------------------------------------------- document-level settings */
+    /** A margin line of the sheet at position `physical` was moved to `mm`. The line may stand for the inside or the outside margin, or include the gutter: what is stored
+     *  is always the margin itself, and the text area keeps at least 30 mm. */
+    async setMargin(section, side, mm, physical = 1) {
+        const g = this.model.geometry(section);
+        const vertical = side === "top" || side === "bottom";
+        let key = side;
+        let value = Math.max(0, Math.round(mm * 2) / 2);
+        if (!vertical) {
+            const target = storedFromLine(g.stored, g.book, physical, side, value);
+            key = target.key;
+            value = Math.max(0, Math.round(target.value * 2) / 2);
+        }
+        const room = contentSize(g.widthMm, g.heightMm, g.stored, g.book);
+        const free = (vertical ? room.height : room.width) - 30; // how much this margin may still grow
+        value = Math.min(value, g.stored[key] + Math.max(0, free));
+        try {
+            await this.op({ op: "page_setup", section: section ?? undefined, page: { margins_mm: { [key]: value } }, label: "margins" });
+        }
+        catch (e) {
+            this.failed(e);
+        }
+    }
+    /** Move where the header or footer text sits (the .sldc page's header_mm / footer_mm). */
+    async setBand(section, edge, mm) {
+        const g = this.model.geometry(section);
+        const other = edge === "header" ? g.footerMm : g.headerMm;
+        const clamped = Math.max(0, Math.min(g.heightMm - other - 30, Math.round(mm * 2) / 2));
+        try {
+            await this.op({ op: "page_setup", section: section ?? undefined, page: { [edge === "header" ? "header_mm" : "footer_mm"]: clamped }, label: edge === "header" ? "header position" : "footer position" });
+        }
+        catch (e) {
+            this.failed(e);
+        }
+    }
+    async moveGuide(axis, index, mm) {
+        if (this.readOnly)
+            return;
+        const guides = { v: [...(this.model.ext.guides?.v ?? [])], h: [...(this.model.ext.guides?.h ?? [])] };
+        const list = guides[axis];
+        if (index < 0 || index >= list.length)
+            return;
+        const g = this.model.geometry();
+        const limit = axis === "v" ? g.widthMm : g.heightMm;
+        if (mm !== null && (!Number.isFinite(mm) || mm < 0 || mm > limit))
+            return;
+        if (mm === null)
+            list.splice(index, 1);
+        else
+            list[index] = Math.round(mm * 2) / 2;
+        try {
+            await this.op({ op: "ext_set", values: { guides: guides.v.length || guides.h.length ? guides : null }, label: "guides" });
+        }
+        catch (e) {
+            this.failed(e);
+        }
+    }
+    async addGuide(axis, mm) {
+        if (!Number.isFinite(mm) || this.readOnly)
+            return;
+        const g = this.model.geometry();
+        if (mm < 0 || mm > (axis === "v" ? g.widthMm : g.heightMm))
+            return;
+        const guides = { v: [...(this.model.ext.guides?.v ?? [])], h: [...(this.model.ext.guides?.h ?? [])] };
+        if (guides[axis].length >= 200)
+            return;
+        guides[axis].push(Math.round(mm * 2) / 2);
+        try {
+            await this.op({ op: "ext_set", values: { guides }, label: "add guide" });
+        }
+        catch (e) {
+            this.failed(e);
+        }
+    }
+    async addGuides(xMm, yMm) {
+        const guides = { v: [...(this.model.ext.guides?.v ?? []), Math.round(xMm * 2) / 2], h: [...(this.model.ext.guides?.h ?? []), Math.round(yMm * 2) / 2] };
+        try {
+            await this.op({ op: "ext_set", values: { guides }, label: "guides" });
+        }
+        catch (e) {
+            this.failed(e);
+        }
+    }
+    /** Begin the next ordinary flow paragraph at a blank-page double-click.
+     * Uses existing paragraph indentation and leading space (both SLDC and PDF
+     * supported), never absolute CSS or a run of blank paragraphs. As preceding
+     * content changes, this remains a flow paragraph rather than a fixed frame. */
+    async placeTextAt(sheetIndex, xMm, yMm) {
+        if (this.readOnly || !Number.isFinite(xMm) || !Number.isFinite(yMm))
+            return false;
+        const sheet = this.page.sheets[sheetIndex];
+        if (!sheet)
+            return false;
+        const { widthMm, heightMm, margins } = sheet.geometry;
+        if (xMm < margins.left || xMm > widthMm - margins.right - 5 ||
+            yMm < margins.top || yMm > heightMm - margins.bottom - 5)
+            return false;
+        const last = sheet.blocks[sheet.blocks.length - 1];
+        if (!last)
+            return false;
+        const lastId = last.dataset["id"];
+        const block = lastId ? this.model.block(lastId) : undefined;
+        if (!block)
+            return false;
+        const reuseEmpty = block.type === "paragraph" && block.text.length === 0 && !block.spans?.length;
+        const previous = reuseEmpty ? sheet.blocks[sheet.blocks.length - 2] : last;
+        const sheetRect = sheet.el.getBoundingClientRect();
+        const previousBottom = previous ? (previous.getBoundingClientRect().bottom - sheetRect.top) / this.page.zoom / MM_PX : margins.top;
+        // A paragraph cannot be moved on top of earlier content. A positive gap
+        // is a genuine paragraph-space-before value, not artificial newlines.
+        if (yMm < previousBottom + (previous ? 2 : 0))
+            return false;
+        const before = Math.round(Math.max(0, yMm - previousBottom) * 72 / 25.4 * 10) / 10;
+        const indent = Math.round((xMm - margins.left) * 10) / 10;
+        const attrs = { space_before_pt: before, indent_mm: indent };
+        const guides = { v: [...(this.model.ext.guides?.v ?? []), Math.round(xMm * 2) / 2],
+            h: [...(this.model.ext.guides?.h ?? []), Math.round(yMm * 2) / 2] };
+        const newId = reuseEmpty ? lastId : NEW_ID();
+        if (!newId)
+            return false;
+        const edit = reuseEmpty
+            ? { op: "block_set", block: lastId, attributes: attrs }
+            : { op: "block_insert", after: lastId, block: { id: newId, type: "paragraph", text: "", attributes: attrs, ...(sheet.section ? { section: sheet.section } : {}) } };
+        await this.op({ op: "batch", ops: [edit, { op: "ext_set", values: { guides } }], label: "position paragraph with guides" });
+        this.focusBlock(newId, 0);
+        return true;
+    }
+    setCursors(prefs, custom) {
+        const css = (value, fallback) => {
+            if (value.startsWith("custom:")) {
+                const c = custom.find((x) => `custom:${x.id}` === value);
+                if (c)
+                    return `url("/api/cursors/${c.id}.png") ${c.hotspot[0] ?? 0} ${c.hotspot[1] ?? 0}, ${fallback}`;
+                return fallback;
+            }
+            return value;
+        };
+        const root = this.page.el;
+        root.style.setProperty("--cur-default", css(prefs.cursor_default, "default"));
+        root.style.setProperty("--cur-drag", css(prefs.cursor_drag, "grab"));
+        root.style.setProperty("--cur-draw", css(prefs.cursor_draw, "crosshair"));
+        root.style.setProperty("--cur-text", css(prefs.cursor_text, "text"));
+    }
+    setZoom(percent) { this.page.setZoom(percent); this.page.redecorate(); }
+    /** Mean millimetre size of the current page, for dialogs. */
+    get pageMm() { const g = this.model.geometry(this.model.list()[0]?.section); return { w: g.widthMm, h: g.heightMm }; }
+    get pxPerMm() { return MM_PX; }
+    newId() { return NEW_ID(); }
+    isText(id) { const b = this.model.block(id); return !!b && TEXT_TYPES.includes(b.type) && !b.extensions?.[RULE_KEY]; }
+    clean(text) { return cleanInsert(text); }
+    lines(text) { return splitLines(text); }
+    editable(node) { return editableOf(node); }
+}
+function referenceText(refs, id) { const r = refs?.find((x) => x.id === id); return r?.text ?? r?.title ?? ""; }
+function listMarkersChanged(wrapper, ctx, block) {
+    if (!wrapper || block.type !== "list_item")
+        return false;
+    const marker = wrapper.querySelector(".marker");
+    return !!marker && marker.textContent !== (ctx.markers.get(block.id) ?? "•");
+}
