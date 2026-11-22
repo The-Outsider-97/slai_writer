@@ -1,0 +1,929 @@
+/** What the person can do to a document, expressed as operations. Each action works out the operations from the current selection and
+ *  sends them through the editor (never touching the DOM itself), so undo, redo, history and conflict detection treat them all alike. */
+import { announce, toast } from "./kit.js";
+import type { Editor, Pt, Sel } from "./editor.js";
+import { api, errorText } from "./net.js";
+import { analyzeMarkdownTable, MM_PX, toCodepoints, typedTableStart } from "./textops.js";
+import { layerList, type LayerRow } from "./model.js";
+import type { Block, DocState, Op, Patch, Span, TableData } from "./types.js";
+import { TEXT_TYPES } from "./types.js";
+import { RULE_KEY } from "./rule_look.js";
+import { FRONT_MATTER_STYLES } from "./named_styles.js";
+import { ensureBundledFont } from "./font_catalog.js";
+import { placeCaret } from "./domtext.js";
+
+const FLAGS = ["bold", "italic", "underline", "strike", "code", "superscript", "subscript"] as const;
+export type FormatFlag = (typeof FLAGS)[number];
+
+type TextType = "heading" | "paragraph" | "list_item" | "quote" | "code";
+interface TextBlock extends Block { type: TextType }
+/** A rule is stored as an empty paragraph but holds no text and no caret: it is an object, selected and deleted as a whole. */
+function isTextBlock(b: Block | undefined): b is TextBlock { return !!b && TEXT_TYPES.includes(b.type) && !b.extensions?.[RULE_KEY]; }
+
+/** Text blocks touched by a selection, each with the covered range. */
+export function textRanges(ed: Editor, sel: Sel): Array<{ block: Block; from: number; to: number }> {
+  const i = ed.model.indexOf(sel.start.block);
+  const j = ed.model.indexOf(sel.end.block);
+  const out: Array<{ block: Block; from: number; to: number }> = [];
+  for (let k = i; k <= j; k += 1) {
+    const b = ed.model.block(ed.model.order[k] as string);
+    if (!isTextBlock(b)) continue;
+    const from = k === i ? sel.start.offset : 0;
+    const to = k === j ? sel.end.offset : b.text.length;
+    if (to > from || (sel.collapsed && k === i)) out.push({ block: b, from, to });
+  }
+  return out;
+}
+
+function covered(b: Block, from: number, to: number, flag: FormatFlag): boolean {
+  if (to <= from) return false;
+  const spans = (b.spans ?? []).filter((s: Span) => s.type === "format" && s[flag]);
+  let at = from;
+  for (const s of [...spans].sort((x, y) => x.start - y.start)) {
+    if (s.start > at) return false;
+    at = Math.max(at, s.end);
+    if (at >= to) return true;
+  }
+  return at >= to;
+}
+
+interface FormatTarget { block: Block; from: number; to: number; text: string; spans?: Span[]; row?: number; col?: number }
+
+/** Formatting ranges are document text or table-cell text, never the table caption. */
+function formatTargets(ed: Editor, sel: Sel): FormatTarget[] {
+  if (sel.start.field === "cell" && sel.end.field === "cell" && sel.start.block === sel.end.block) {
+    const block = ed.model.block(sel.start.block);
+    if (!block?.table) return [];
+    const firstRow = sel.start.row ?? 0, lastRow = sel.end.row ?? 0;
+    const out: FormatTarget[] = [];
+    for (let r = firstRow; r <= lastRow; r += 1) {
+      const row = block.table.rows[r] ?? [];
+      const begin = r === firstRow ? sel.start.col ?? 0 : 0;
+      const finish = r === lastRow ? sel.end.col ?? 0 : row.length - 1;
+      for (let c = begin; c <= finish; c += 1) {
+        const cell = row[c];
+        if (!cell) continue;
+        const from = r === firstRow && c === begin ? sel.start.offset : 0;
+        const to = r === lastRow && c === finish ? sel.end.offset : cell.text.length;
+        if (to > from || sel.collapsed) out.push({ block, text: cell.text, spans: cell.spans, from, to, row: r, col: c });
+      }
+    }
+    return out;
+  }
+  return textRanges(ed, sel).map(({ block, from, to }) => ({ block, from, to, text: block.text, spans: block.spans }));
+}
+
+function formatOp(target: FormatTarget, props: Record<string, unknown>, unset: string[] = []): Op {
+  return { op: "format", block: target.block.id,
+    ...(target.row === undefined ? {} : { row: target.row, col: target.col }),
+    start: toCodepoints(target.text, target.from), end: toCodepoints(target.text, target.to),
+    ...(Object.keys(props).length ? { set: props } : {}), ...(unset.length ? { unset } : {}) };
+}
+
+async function guarded<T>(ed: Editor, work: () => Promise<T>): Promise<T | undefined> {
+  try { return await work(); } catch (error) {
+    const stale = (error as { details?: { kind?: string } }).details?.kind === "stale_version";
+    if (!stale) toast(errorText(error), { kind: "error" });
+    ed.events.emit({ type: "error", error });
+    return undefined;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------------- undo and redo */
+export async function undoRedo(ed: Editor, direction: "undo" | "redo", count = 1): Promise<void> {
+  await guarded(ed, async () => {
+    await ed.flush();
+    if (direction === "undo" && count === 1) ed.autocorrect.beforeUndo();                    // taking back a correction: it must not be made again
+    const reply = await ed.queue.run(async () => {
+      const r = await api.post<{ patch?: Patch; state?: DocState }>(`/docs/${encodeURIComponent(ed.sid)}/${direction}`, { count, base: ed.model.version });
+      if (r.patch) ed.applyExternalPatch(r.patch);
+      return r;
+    });
+    if (reply.state) await ed.resync(reply.state);
+    const first = reply.patch ? Object.keys(reply.patch.blocks).find((id) => ed.model.block(id)) : undefined;
+    if (first && ed.isText(first)) ed.focusBlock(first);
+    announce(direction === "undo" ? "Undone" : "Redone");
+  });
+}
+
+/* ---------------------------------------------------------------------------------------------- text */
+export async function replaceRange(ed: Editor, sel: Sel, insert: string): Promise<Pt | null> {
+  return (await guarded(ed, async () => {
+    await ed.flush();
+    const { start, end } = sel;
+    const first = ed.model.block(start.block);
+    const last = ed.model.block(end.block);
+    if (!first || !last) return null;
+    if (start.block === end.block) {
+      if (start.field === "cell" && end.field === "cell" && (start.row !== end.row || start.col !== end.col)) {
+        const rows = first.table?.rows;
+        if (!rows) return null;
+        const ops: Op[] = [];
+        for (let r = start.row ?? 0; r <= (end.row ?? 0); r++) {
+          const startCol = r === (start.row ?? 0) ? start.col ?? 0 : 0;
+          const endCol = r === (end.row ?? 0) ? end.col ?? 0 : (rows[r]?.length ?? 1) - 1;
+          for (let c = startCol; c <= endCol; c++) {
+            const cell = rows[r]?.[c];
+            if (!cell) continue;
+            const from = r === start.row && c === start.col ? start.offset : 0;
+            const to = r === end.row && c === end.col ? end.offset : cell.text.length;
+            ops.push({ op: "table_cell_text", block: start.block, row: r, col: c,
+              start: toCodepoints(cell.text, from), end: toCodepoints(cell.text, to),
+              insert: r === start.row && c === start.col ? insert : "" });
+          }
+        }
+        if (!ops.length) return null;
+        await ed.queue.send({ op: "batch", ops, label: "edit selected table cells" });
+        return { ...start, offset: start.offset + insert.length };
+      }
+      if (start.field === "cell" && end.field === "cell" && start.row === end.row && start.col === end.col) {
+        if (start.offset === end.offset && !insert) return start;
+        const cell = first.table?.rows[start.row ?? 0]?.[start.col ?? 0];
+        if (!cell) return null;
+        await ed.queue.send({ op: "table_cell_text", block: start.block, row: start.row, col: start.col,
+          start: toCodepoints(cell.text, start.offset), end: toCodepoints(cell.text, end.offset), insert });
+        return { ...start, offset: start.offset + insert.length };
+      }
+      if (start.field !== "text") return null;
+      if (start.offset === end.offset && !insert) return start;
+      await ed.queue.send({ op: "text", block: start.block, start: toCodepoints(first.text, start.offset), end: toCodepoints(first.text, end.offset), insert });
+      return { block: start.block, offset: start.offset + insert.length, field: "text" } as Pt;
+    }
+    const ids = ed.model.order.slice(ed.model.indexOf(start.block), ed.model.indexOf(end.block) + 1);
+    const middle = ids.slice(1, -1);
+    const ops: Op[] = [];
+    const firstText = isTextBlock(first);
+    const lastText = isTextBlock(last);
+    if (firstText) { if (start.offset < first.text.length || insert) ops.push({ op: "text", block: first.id, start: toCodepoints(first.text, start.offset), end: Array.from(first.text).length, insert }); } else middle.unshift(first.id);
+    if (lastText) { if (end.offset > 0) ops.push({ op: "text", block: last.id, start: 0, end: toCodepoints(last.text, end.offset), insert: "" }); } else middle.push(last.id);
+    if (middle.length) ops.push({ op: "block_delete", blocks: middle });
+    if (firstText && lastText) ops.push({ op: "merge", block: last.id });
+    if (!ops.length) return start;
+    await ed.queue.send({ op: "batch", ops, label: "delete" });
+    return firstText ? ({ block: first.id, offset: start.offset + insert.length, field: "text" } as Pt) : ({ block: last.id, offset: 0, field: "text" } as Pt);
+  })) ?? null;
+}
+
+/** Insert (possibly multi-line) text at the selection, replacing it. */
+export async function insertText(ed: Editor, raw: string): Promise<void> {
+  const text = ed.clean(raw);
+  const sel = ed.readSelection();
+  if (!sel || ed.readOnly) return;
+  const lines = ed.lines(text);
+  const block = ed.model.block(sel.start.block);
+  if (lines.length === 1 || block?.type === "code" || sel.start.field !== "text") {
+    const at = await replaceRange(ed, sel, lines.join(block?.type === "code" || sel.start.field === "cell" ? "\n" : " "));
+    if (at) {
+      if (at.field === "cell") focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+      else ed.focusBlock(at.block, at.offset);
+    }
+    return;
+  }
+  if (lines.length > 2400) { toast("That is a lot of text at once. Paste it in smaller parts (up to about 2,400 lines).", { kind: "error" }); return; }
+  await guarded(ed, async () => {
+    let at: Pt = sel.start;
+    if (!sel.collapsed) { const next = await replaceRange(ed, sel, ""); if (!next) return; at = next; }
+    await ed.flush();
+    const ops: Op[] = [];
+    let target = at.block;
+    let offset = at.offset;                                                        // UTF-16, for the caret
+    let serverOffset = toCodepoints(ed.model.block(at.block)?.text ?? "", at.offset);   // code points, for the operations
+    const [head = "", ...rest] = lines;
+    if (head) { ops.push({ op: "text", block: target, start: serverOffset, end: serverOffset, insert: head }); offset += head.length; serverOffset += Array.from(head).length; }
+    for (const line of rest) {
+      const id = ed.newId();
+      ops.push({ op: "split", block: target, at: serverOffset, new_id: id, keep_type: true });
+      target = id;
+      offset = 0;
+      serverOffset = 0;
+      if (line) { ops.push({ op: "text", block: id, start: 0, end: 0, insert: line }); offset = line.length; serverOffset = Array.from(line).length; }
+    }
+    await ed.queue.send({ op: "batch", ops, label: "paste" });
+    ed.focusBlock(target, offset);
+  });
+}
+
+/** Tell the person why text that looked like a Markdown table was left as ordinary text. */
+export function tableLeftAsText(reason: string): void { toast(`Left as text, not a table. ${reason}`, { kind: "info" }); }
+
+/** Make a table from Markdown pipe-table text that is already in the document as plain paragraphs: the paragraphs the selection covers, or, with only a
+ *  caret, the run of plain paragraphs round it that forms a table. The same strict recognizer as paste, the same operations as Insert → Table, one undo step.
+ *  Whatever stops it (formatting in the lines, a table that is too big, uneven rows) is said, and nothing is changed. */
+export async function convertMarkdownToTable(ed: Editor): Promise<void> {
+  if (ed.readOnly) return;
+  await ed.flush();
+  const sel = ed.readSelection();
+  if (!sel) { toast("Place the cursor in the Markdown table text first.", { kind: "info" }); return; }
+  const plain = (b: Block | undefined): b is TextBlock => !!b && b.type === "paragraph" && !b.spans?.length && !Object.keys(b.attributes ?? {}).length;
+  const at = (id: string): number => ed.model.indexOf(id);
+  const blockAt = (index: number): Block | undefined => ed.model.block(ed.model.order[index] as string);
+  let first = Math.min(at(sel.start.block), at(sel.end.block));
+  let last = Math.max(at(sel.start.block), at(sel.end.block));
+  const caret = at(sel.start.block);
+  let found: ReturnType<typeof analyzeMarkdownTable> = { kind: "text" };
+  const texts = (from: number, to: number): string | null => {
+    const out: string[] = [];
+    for (let k = from; k <= to; k += 1) {
+      const b = blockAt(k);
+      if (!plain(b) || b.section !== (blockAt(from) as Block).section) return null;
+      out.push(b.text);
+    }
+    return out.join("\n");
+  };
+  if (sel.collapsed) {
+    let lo = caret;
+    let hi = caret;
+    const piped = (k: number): boolean => { const b = blockAt(k); return plain(b) && b.text.includes("|") && b.section === (blockAt(caret) as Block).section; };
+    if (!piped(caret)) { toast("Place the cursor in a line of the Markdown table first.", { kind: "info" }); return; }
+    while (lo > 0 && caret - lo < 300 && piped(lo - 1)) lo -= 1;
+    while (hi < ed.model.order.length - 1 && hi - caret < 300 && piped(hi + 1)) hi += 1;
+    let rejected: ReturnType<typeof analyzeMarkdownTable> | null = null;
+    search: for (let s = lo; s <= caret; s += 1) {
+      for (let e = hi; e >= caret; e -= 1) {
+        const text = texts(s, e);
+        const result = text === null ? ({ kind: "text" } as const) : analyzeMarkdownTable(text);
+        if (result.kind === "table") { found = result; first = s; last = e; break search; }
+        if (result.kind === "rejected" && !rejected) rejected = result;
+      }
+    }
+    if (found.kind !== "table" && rejected) found = rejected;
+  } else {
+    const text = texts(first, last);
+    if (text === null) { toast("Select only plain paragraphs: the lines of the Markdown table, without formatting or other objects.", { kind: "info" }); return; }
+    found = analyzeMarkdownTable(text);
+  }
+  if (found.kind === "rejected") { tableLeftAsText(found.message); return; }
+  if (found.kind === "text") {
+    toast("That is not a Markdown table. It needs a header line with | between the cells, then a line like | --- | --- |.", { kind: "info" });
+    return;
+  }
+  const head = blockAt(first) as Block;
+  const ids = Array.from({ length: last - first + 1 }, (_, k) => ed.model.order[first + k] as string);
+  const id = ed.newId();
+  const data = found.table;
+  const spec: Record<string, unknown> = { id, type: "table", text: "", rows: data.rows.length, columns: data.columns, table: data };
+  if (head.section) spec["section"] = head.section;
+  const before = first > 0 ? ed.model.order[first - 1] as string : null;
+  await guarded(ed, async () => {
+    await ed.op({ op: "batch", ops: [{ op: "block_insert", after: before, block: spec }, { op: "block_delete", blocks: ids }], label: "insert table" });
+    ed.scrollToBlock(id);
+    focusCell(ed, id, Math.min(1, data.rows.length - 1), 0);
+    toast("Table created from Markdown.", { kind: "ok", action: { label: "Undo", run: () => { void undoRedo(ed, "undo"); } } });
+  });
+}
+
+/** Enter at the end of a Markdown delimiter line (`| --- | --- |`) directly under a header line (`| A | B |`) turns both into a table with one
+ *  empty row to type in, through the same operations as Insert → Table. One undo step brings the two paragraphs back. Lines that carry
+ *  formatting, links or any other attribute stay as typed, so nothing the person made is lost. */
+async function startTypedTable(ed: Editor, delimiter: TextBlock, offset: number): Promise<boolean> {
+  const plain = (b: Block | undefined): b is TextBlock => !!b && b.type === "paragraph" && !b.spans?.length && !Object.keys(b.attributes ?? {}).length;
+  if (!plain(delimiter) || offset !== delimiter.text.length) return false;
+  const index = ed.model.indexOf(delimiter.id);
+  const header = index > 0 ? ed.model.block(ed.model.order[index - 1] as string) : undefined;
+  if (!plain(header) || header.section !== delimiter.section) return false;
+  const data = typedTableStart(header.text, delimiter.text);
+  if (!data) {
+    const found = analyzeMarkdownTable(`${header.text}\n${delimiter.text}`);              // the two lines tried to be a table: say why they are not one
+    if (found.kind === "rejected") tableLeftAsText(found.message);
+    return false;
+  }
+  const id = ed.newId();
+  const spec: Record<string, unknown> = { id, type: "table", text: "", rows: data.rows.length, columns: data.columns, table: data };
+  if (header.section) spec["section"] = header.section;
+  const before = index > 1 ? ed.model.order[index - 2] as string : null;
+  await ed.op({ op: "batch", ops: [{ op: "block_insert", after: before, block: spec }, { op: "block_delete", blocks: [header.id, delimiter.id] }], label: "insert table" });
+  ed.scrollToBlock(id);
+  focusCell(ed, id, 1, 0);
+  toast("Table created from Markdown.", { kind: "ok", action: { label: "Undo", run: () => { void undoRedo(ed, "undo"); } } });
+  return true;
+}
+
+/** Shift+Enter: a line break inside the paragraph (the text holds "\n", which every export writes as a line break), not a new paragraph. */
+export async function lineBreak(ed: Editor): Promise<void> {
+  const sel = ed.readSelection();
+  if (!sel || ed.readOnly) return;
+  const block = ed.model.block(sel.start.block);
+  if (!block || (sel.start.field !== "cell" && !isTextBlock(block))) return;
+  await guarded(ed, async () => {
+    const at = await replaceRange(ed, sel, "\n");
+    if (!at) return;
+    if (at.field === "cell") focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+    else ed.focusBlock(at.block, at.offset);
+  });
+}
+
+export async function enter(ed: Editor): Promise<void> {
+  let sel = ed.readSelection();
+  if (!sel || ed.readOnly) return;
+  if (!sel.collapsed) {
+    const at = await replaceRange(ed, sel, "");
+    if (!at) return;
+    if (at.field === "cell") focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+    else ed.focusBlock(at.block, at.offset);
+    sel = ed.readSelection();
+    if (!sel) return;
+  }
+  const pt = sel.start;
+  const block = ed.model.block(pt.block);
+  if (!block) return;
+  await guarded(ed, async () => {
+    if (pt.field === "cell") {
+      const at = await replaceRange(ed, sel, "\n");
+      if (at) focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+      return;
+    }
+    if (pt.field === "caption") { moveToNext(ed, block.id); return; }
+    if (!isTextBlock(block)) return;
+    if (block.type === "code") {
+      await ed.flush();
+      const at = toCodepoints(ed.model.block(block.id)?.text ?? block.text, pt.offset);
+      await ed.queue.send({ op: "text", block: block.id, start: at, end: at, insert: "\n" });
+      ed.focusBlock(block.id, pt.offset + 1);
+      return;
+    }
+    if (block.type === "list_item" && !block.text) {
+      await ed.op({ op: "block_set", block: block.id, type: "paragraph", attributes: { ordered: null, depth: null } });
+      ed.focusBlock(block.id, 0);
+      return;
+    }
+    if ((block.type === "heading" || block.type === "quote") && pt.offset === 0 && block.text) {
+      const index = ed.model.indexOf(block.id);
+      const after = index > 0 ? (ed.model.order[index - 1] as string) : null;
+      const id = ed.newId();
+      await ed.op({ op: "block_insert", after, block: { id, type: "paragraph", text: "" } });
+      ed.focusBlock(block.id, 0);
+      return;
+    }
+    await ed.flush();                                           // what is on screen must be in the model before it is read or cut
+    if (!ed.model.block(block.id)) return;
+    if (await ed.autocorrect.ruleOnEnter(block.id, pt.offset)) return;                       // ___ and Enter: a horizontal rule
+    const offset = await ed.autocorrect.beforeEnter(block.id, pt.offset);                    // the last word of the paragraph may still need its capital
+    const live = ed.model.block(block.id);
+    if (!live || !isTextBlock(live)) return;
+    if (await startTypedTable(ed, live, offset)) return;
+    const id = ed.newId();
+    await ed.op({ op: "split", block: live.id, at: toCodepoints(live.text, offset), new_id: id });
+    ed.focusBlock(id, 0);
+  });
+}
+
+export function focusCell(ed: Editor, id: string, row: number, col: number, offset?: number): void {
+  const cell = (ed.page as Editor["page"] | undefined)?.cellEl(id, row, col) ?? ed.els.get(id)?.querySelector<HTMLElement>(`[data-edit=cell][data-row="${row}"][data-col="${col}"]`);
+  if (!cell) return;
+  cell.focus();
+  placeCaret(cell, offset ?? cell.textContent?.length ?? 0);
+}
+
+export function focusNextCell(ed: Editor, pt: Pt, backwards: boolean): boolean {
+  const block = ed.model.block(pt.block);
+  const grid = block?.table?.rows;
+  const rows = grid?.length ?? 0;
+  if (!block || !grid?.length) return false;
+  let r = pt.row ?? 0;
+  let c = (pt.col ?? 0) + (backwards ? -1 : 1);
+  if (c >= (grid[r]?.length ?? 0)) { c = 0; r += 1; }
+  if (c < 0) { r -= 1; c = (grid[r]?.length ?? 1) - 1; }
+  if (r < 0) { moveToPrevious(ed, block.id); return true; }
+  if (r >= rows) {
+    void (async () => { await ed.op({ op: "table_edit", block: block.id, action: "insert_row", index: rows }); focusCell(ed, block.id, rows, 0); })();
+    return true;
+  }
+  focusCell(ed, block.id, r, c);
+  return true;
+}
+
+function moveToNext(ed: Editor, id: string): void {
+  const next = ed.model.order[ed.model.indexOf(id) + 1];
+  if (next) ed.focusBlock(next, 0);
+}
+function moveToPrevious(ed: Editor, id: string): void {
+  const prev = ed.model.order[ed.model.indexOf(id) - 1];
+  if (prev) ed.focusBlock(prev);
+}
+
+/** Backspace. Returns true when it handled the key (the browser's own deletion must then be cancelled). */
+export async function backspace(ed: Editor): Promise<boolean> {
+  const sel = ed.readSelection();
+  if (!sel || ed.readOnly) return false;
+  if (!sel.collapsed) { const at = await replaceRange(ed, sel, ""); if (at) {
+    if (at.field === "cell") focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+    else ed.focusBlock(at.block, at.offset);
+  } return true; }
+  const pt = sel.start;
+  if (pt.field !== "text") return pt.offset === 0;          // at the start of a cell or caption nothing may be merged away
+  if (pt.offset > 0) return false;                          // ordinary deletion inside the text: the browser does it, the diff is sent
+  const block = ed.model.block(pt.block);
+  if (!isTextBlock(block)) return true;
+  await guarded(ed, async () => {
+    if (block.type === "list_item" && (block.attributes?.depth ?? 0) > 0) { await ed.op({ op: "block_set", block: block.id, attributes: { depth: (block.attributes?.depth ?? 1) - 1 } }); ed.focusBlock(block.id, 0); return; }
+    if (block.type !== "paragraph") { await ed.op({ op: "block_set", block: block.id, type: "paragraph", attributes: { ordered: null, depth: null, level: null } }); ed.focusBlock(block.id, 0); return; }
+    const index = ed.model.indexOf(block.id);
+    if (index === 0) return;
+    const prev = ed.model.block(ed.model.order[index - 1] as string);
+    if (isTextBlock(prev)) {
+      const joinAt = prev.text.length;
+      await ed.op({ op: "merge", block: block.id });
+      ed.focusBlock(prev.id, joinAt);
+    } else if (prev) {
+      if (!block.text) { await ed.op({ op: "block_delete", block: block.id }); }
+      selectBlock(ed, prev.id);
+    }
+  });
+  return true;
+}
+
+export async function forwardDelete(ed: Editor): Promise<boolean> {
+  const sel = ed.readSelection();
+  if (!sel || ed.readOnly) return false;
+  if (!sel.collapsed) { const at = await replaceRange(ed, sel, ""); if (at) {
+    if (at.field === "cell") focusCell(ed, at.block, at.row ?? 0, at.col ?? 0, at.offset);
+    else ed.focusBlock(at.block, at.offset);
+  } return true; }
+  const pt = sel.start;
+  if (pt.field !== "text") return false;
+  const block = ed.model.block(pt.block);
+  if (!isTextBlock(block) || pt.offset < block.text.length) return false;
+  await guarded(ed, async () => {
+    const next = ed.model.block(ed.model.order[ed.model.indexOf(block.id) + 1] as string);
+    if (!next) return;
+    if (isTextBlock(next)) { await ed.op({ op: "merge", block: next.id }); ed.focusBlock(block.id, pt.offset); }
+    else { if (!block.text) await ed.op({ op: "block_delete", block: block.id }); selectBlock(ed, next.id); }
+  });
+  return true;
+}
+
+/** Select a picture, table, equation or EMBED as a whole (Delete then removes it). */
+export function selectBlock(ed: Editor, id: string, append = false): void {
+  if (!append) {
+    if (ed.selectedBlock) ed.els.get(ed.selectedBlock)?.removeAttribute("data-selected");
+    for (const prev of ed.selectedShapes) ed.els.get(prev)?.removeAttribute("data-shape-multi");
+    ed.selectedShapes.clear();
+  }
+  const block = ed.model.block(id);
+  const shape = block?.extensions?.["slai.writer.shape"] as {group_id?:string|null}|undefined;
+  if (shape) {
+    const cohort = shape.group_id
+      ? ed.model.list().filter(b=>(b.extensions?.["slai.writer.shape"] as {group_id?:string}|undefined)?.group_id===shape.group_id).map(b=>b.id)
+      : [id];
+    for (const other of cohort) {
+      if (append && ed.selectedShapes.has(other)) {
+        ed.selectedShapes.delete(other);ed.els.get(other)?.removeAttribute("data-shape-multi");
+      } else {
+        ed.selectedShapes.add(other);ed.els.get(other)?.setAttribute("data-shape-multi","");
+      }
+    }
+  }
+  if (ed.selectedBlock && ed.selectedBlock!==id) ed.els.get(ed.selectedBlock)?.removeAttribute("data-selected");
+  ed.selectedBlock = id;
+  const el = ed.els.get(id);
+  el?.setAttribute("data-selected", "");
+  el?.scrollIntoView({ block: "nearest" });
+  const label = shape ? "Shape" : block?.type ?? "block";
+  announce(`${label} selected. Press Delete to remove it, or Enter to edit it.`);
+  ed.events.emit({ type: "block-selected", id });
+}
+
+export function clearBlockSelection(ed: Editor): void {
+  if (ed.selectedBlock) ed.els.get(ed.selectedBlock)?.removeAttribute("data-selected");
+  for (const prev of ed.selectedShapes) ed.els.get(prev)?.removeAttribute("data-shape-multi");
+  const had = ed.selectedBlock !== null;
+  ed.selectedBlock = null;
+  ed.selectedShapes.clear();
+  if (had) ed.events.emit({ type: "block-selected", id: null });
+}
+
+export async function deleteBlocks(ed: Editor, ids: string[]): Promise<void> {
+  if (!ids.length || ed.readOnly) return;
+  const next = ed.model.order[Math.max(0, ed.model.indexOf(ids[0] as string) - 1)];
+  await guarded(ed, async () => { await ed.op({ op: "block_delete", blocks: ids }); clearBlockSelection(ed); if (next && ed.model.block(next)) ed.focusBlock(next); });
+}
+
+/* ---------------------------------------------------------------------------------------------- formatting */
+export async function toggleFormat(ed: Editor, flag: FormatFlag): Promise<void> {
+  const sel = ed.recallSelection();
+  if (!sel || ed.readOnly) return;
+  if (sel.collapsed) {
+    if (ed.pendingFormat.has(flag)) ed.pendingFormat.delete(flag); else ed.pendingFormat.add(flag);
+    announce(`${flag} ${ed.pendingFormat.has(flag) ? "on" : "off"} for the next text you type`);
+    return;
+  }
+  const ranges = formatTargets(ed, sel).filter((r) => r.to > r.from);
+  if (!ranges.length) return;
+  const all = ranges.every((r) => covered({ ...r.block, text: r.text, spans: r.spans }, toCodepoints(r.text, r.from), toCodepoints(r.text, r.to), flag));
+  const ops: Op[] = ranges.map((r) => all ? formatOp(r, {}, [flag]) : formatOp(r, { [flag]: true }));
+  await guarded(ed, async () => { await ed.op(ops.length === 1 ? (ops[0] as Op) : { op: "batch", ops, label: "formatting" }); ed.restoreSelection(sel); });
+}
+
+export type FormattingScope = "selection" | "character" | "word" | "sentence" | "paragraph" | "section" | "page" | "document";
+
+/** Resolve each scope against stable block IDs; visible page numbers are never stored as text identities. */
+export function scopedTextRanges(ed: Editor, sel: Sel, scope: FormattingScope): Array<{ block: Block; from: number; to: number }> {
+  if (scope === "selection") return textRanges(ed, sel);
+  const caret = ed.model.block(sel.start.block);
+  if (!caret || !isTextBlock(caret)) return [];
+  if (["character", "word", "sentence"].includes(scope)) {
+    const text = caret.text;
+    const granularity = scope === "character" ? "grapheme" : scope;
+    const segments = [...new Intl.Segmenter(undefined, { granularity: granularity as "grapheme" | "word" | "sentence" }).segment(text)];
+    const at = sel.start.offset;
+    const part = segments.find((s) => s.index <= at && s.index + s.segment.length > at && (scope !== "word" || s.isWordLike))
+      ?? segments.find((s) => s.index === at && (scope !== "word" || s.isWordLike));
+    return part ? [{ block: caret, from: part.index, to: part.index + part.segment.length }] : [];
+  }
+  if (scope === "paragraph") return textRanges(ed, sel).map(({ block }) => ({ block, from: 0, to: block.text.length }));
+  if (scope === "document") return ed.model.list().filter(isTextBlock).map((block) => ({ block, from: 0, to: block.text.length }));
+  if (scope === "section") {
+    const section = caret.section ?? ed.model.meta.sections?.[0]?.id;
+    return ed.model.list().filter(isTextBlock).filter((block) => (block.section ?? ed.model.meta.sections?.[0]?.id) === section)
+      .map((block) => ({ block, from: 0, to: block.text.length }));
+  }
+  const page = ed.page.sheets.find((sheet) => sheet.blocks.some((node) => node.dataset["id"] === caret.id));
+  const ids = new Set(page?.blocks.map((node) => node.dataset["id"]));
+  return ed.model.list().filter(isTextBlock).filter((block) => ids.has(block.id))
+    .map((block) => ({ block, from: 0, to: block.text.length }));
+}
+
+export async function setInlineProperty(ed: Editor, key: "color" | "background" | "font_family" | "font_size_pt" | "letter_spacing_pt" | "word_spacing_pt", value: string | number | null, scope: FormattingScope = "selection"): Promise<void> {
+  const sel = ed.recallSelection();
+  if (!sel || ed.readOnly) return;
+  if (sel.collapsed && scope === "selection") {
+    ed.pendingInline.set(key, value);
+    announce(`${key.replaceAll("_", " ")} ${value === null ? "reset to default" : "set"} for the next text you type`);
+    return;
+  }
+  const ranges = sel.start.field === "cell" ? formatTargets(ed, sel) : scopedTextRanges(ed, sel, scope).map((r) => ({ ...r, text: r.block.text, spans: r.block.spans }));
+  const ops: Op[] = ranges.filter((r) => r.to > r.from).map((r) => value !== null ? formatOp(r, { [key]: value }) : formatOp(r, {}, [key]));
+  if (ops.length) await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "inline formatting" }); ed.restoreSelection(sel); });
+}
+
+export async function setColour(ed: Editor, key: "color" | "background", value: string | null, scope: FormattingScope = "selection"): Promise<void> {
+  await setInlineProperty(ed, key, value, scope);
+}
+
+/** Change the real text, not a CSS presentation effect; the backend remaps format/link spans. */
+export async function transformCase(ed: Editor, mode: "upper" | "lower"): Promise<void> {
+  const sel = ed.readSelection();
+  if (!sel || sel.collapsed || ed.readOnly) { toast("Select text to change its case.", { kind: "info" }); return; }
+  const ranges = textRanges(ed, sel).filter((r) => r.to > r.from);
+  if (!ranges.length) return;
+  await guarded(ed, async () => {
+    const oldEnd = ed.model.block(sel.end.block)?.text.length ?? 0;
+    const ops: Op[] = ranges.map((r) => ({ op: "case", block: r.block.id,
+      start: toCodepoints(r.block.text, r.from), end: toCodepoints(r.block.text, r.to), mode }));
+    await ed.op({ op: "batch", ops, label: mode === "upper" ? "uppercase" : "lowercase" });
+    const newEnd = ed.model.block(sel.end.block)?.text.length ?? oldEnd;
+    ed.restoreSelection({ ...sel, end: { ...sel.end, offset: sel.end.offset + newEnd - oldEnd } });
+  });
+}
+
+export async function clearFormatting(ed: Editor): Promise<void> {
+  const sel = ed.recallSelection();
+  if (!sel || sel.collapsed || ed.readOnly) return;
+  const ops: Op[] = formatTargets(ed, sel).filter((r) => r.to > r.from)
+    .map((r) => formatOp(r, {}, [...FLAGS, "color", "background", "font_family", "font_size_pt", "letter_spacing_pt", "word_spacing_pt"]));
+  if (ops.length) await guarded(ed, async () => { await ed.op({ op: "batch", ops, label: "clear formatting" }); ed.restoreSelection(sel); });
+}
+
+export async function setLink(ed: Editor, href: string | null): Promise<void> {
+  const sel = ed.readSelection();
+  if (!sel || sel.collapsed || sel.start.block !== sel.end.block || ed.readOnly) { toast("Select some text in one paragraph to make a link.", { kind: "info" }); return; }
+  const text = ed.model.block(sel.start.block)?.text ?? "";
+  const [from, to] = [toCodepoints(text, sel.start.offset), toCodepoints(text, sel.end.offset)];       // the server counts code points
+  const op: Op = href ? { op: "span", block: sel.start.block, start: from, end: to, kind: "link", href } : { op: "span", block: sel.start.block, start: from, end: to, kind: "link", clear: true };
+  await guarded(ed, async () => { await ed.op(op); ed.restoreSelection(sel); });
+}
+
+/* ---------------------------------------------------------------------------------------------- blocks */
+function selectedTextIds(ed: Editor): string[] {
+  const sel = ed.readSelection();
+  if (!sel) return [];
+  return textRanges(ed, sel).map((r) => r.block.id);
+}
+
+export async function setBlockType(ed: Editor, type: "paragraph" | "heading" | "list_item" | "quote" | "code", attrs: Record<string, unknown> = {}): Promise<void> {
+  const ids = selectedTextIds(ed);
+  if (!ids.length || ed.readOnly) return;
+  const clear = { ordered: null, depth: null, level: null, language: null };
+  const same = ids.every((id) => { const b = ed.model.block(id); return b?.type === type && Object.entries(attrs).every(([k, v]) => b.attributes?.[k] === v); });
+  const target = same && type !== "paragraph" ? "paragraph" : type;
+  const attributes = target === "paragraph" ? clear : { ...clear, ...attrs };
+  const semanticName = target === "heading" ? `Heading ${String(attrs["level"] ?? 1)}` : target === "paragraph" ? "Body Text" : target === "quote" ? "Quote" : null;
+  const definedStyle = semanticName && ed.model.meta.styles?.paragraph?.[semanticName] ? semanticName : null;
+  const sel = ed.readSelection();
+  await guarded(ed, async () => {
+    const ops: Op[] = ids.map((id) => ({ op: "block_set", block: id, type: target, attributes, style: definedStyle }));
+    await ed.op(ops.length === 1 ? (ops[0] as Op) : { op: "batch", ops, label: "paragraph type" });
+    ed.restoreSelection(sel);
+  });
+}
+
+export async function setBlockAttribute(ed: Editor, attrs: Record<string, unknown>, label = "paragraph"): Promise<void> {
+  const cellSel = ed.recallSelection();
+  if (cellSel?.start.field === "cell" && !ed.readOnly) {
+    const allowed = ["align", "valign", "background", "padding_mm", "border_color", "border_width_pt", "border_style",
+      "line_height", "space_before_pt", "space_after_pt", "indent_mm"];
+    const props = Object.fromEntries(Object.entries(attrs).filter(([key]) => allowed.includes(key)));
+    const cells = formatTargets(ed, cellSel);
+    if (!cells.length || !Object.keys(props).length) return;
+    await guarded(ed, async () => {
+      await ed.op({ op: "batch", ops: cells.map((cell) => ({ op: "table_cell_style", block: cell.block.id,
+        row: cell.row, col: cell.col, props })), label });
+      ed.restoreSelection(cellSel);
+    });
+    return;
+  }
+  const ids = selectedTextIds(ed);
+  if (!ids.length || ed.readOnly) return;
+  const sel = ed.readSelection();
+  await guarded(ed, async () => {
+    const ops: Op[] = ids.map((id) => ({ op: "block_set", block: id, attributes: attrs }));
+    await ed.op({ op: "batch", ops, label });
+    ed.restoreSelection(sel);
+  });
+}
+
+export async function setParagraphStyle(ed: Editor, name: string | null): Promise<void> {
+  const cellSel = ed.recallSelection();
+  if (cellSel?.start.field === "cell" && !ed.readOnly) {
+    const cells = formatTargets(ed, cellSel);
+    if (!cells.length) return;
+    await guarded(ed, async () => {
+      await ed.op({ op: "batch", ops: cells.map((cell) => ({ op: "table_cell_style", block: cell.block.id,
+        row: cell.row, col: cell.col, props: { paragraph_style: name } })), label: "paragraph style" });
+      ed.restoreSelection(cellSel);
+    });
+    return;
+  }
+  const ids = selectedTextIds(ed);
+  if (!ids.length || ed.readOnly) return;
+  const sel = ed.readSelection();
+  await guarded(ed, async () => { await ed.op({ op: "batch", ops: ids.map((id) => ({ op: "block_set", block: id, style: name })), label: "paragraph style" }); ed.restoreSelection(sel); });
+}
+
+/** Apply a front-matter style without changing a paragraph into a semantic heading. */
+export async function applyNamedStyle(ed: Editor, name: string): Promise<void> {
+  const ids = selectedTextIds(ed);
+  if (!ids.length || ed.readOnly) return;
+  const defaults = FRONT_MATTER_STYLES[name];
+  if (!defaults) return;
+  const selection = ed.readSelection();
+  const defined = ed.model.meta.styles?.paragraph?.[name] !== undefined;
+  const ops: Op[] = [];
+  if (!defined) ops.push({ op: "style_define", kind: "paragraph", name, props: defaults });
+  for (const id of ids) ops.push({ op: "block_set", block: id, type: "paragraph",
+    style: name, attributes: { ordered: null, depth: null, level: null, language: null } });
+  await guarded(ed, async () => {
+    await ed.op({ op: "batch", ops, label: `apply ${name} style` });
+    ed.restoreSelection(selection);
+    const family = (defined ? ed.model.meta.styles?.paragraph?.[name]?.["font_family"] : defaults["font_family"]);
+    if (typeof family === "string") void ensureBundledFont(family).then(() => ed.layout()).catch(() => {});
+  });
+}
+
+/** Insert a semantic cover section; its editable content lives in the ordinary editor. */
+export async function insertCoverPage(ed: Editor): Promise<void> {
+  if (ed.readOnly) return;
+  await guarded(ed, async () => {
+    await ed.op({ op: "cover_insert" });
+    const first = ed.model.list()[0];
+    if (first) ed.focusBlock(first.id, 0);
+  });
+}
+
+/** Keep first-page content, isolating it as a semantic cover section when needed. */
+export async function convertFirstPageToCover(ed: Editor): Promise<void> {
+  if (ed.readOnly) return;
+  const [first, second] = ed.page.sheets;
+  if (!first) return;
+  if (ed.model.meta.sections?.some((s) => s.role === "cover")) {
+    toast("This document already has a cover page.", { kind: "info" }); return;
+  }
+  const firstSection = first.section ?? ed.model.meta.sections?.[0]?.id ?? "s1";
+  const split = second && second.section === first.section;
+  if (split && (ed.model.meta.sections?.length ?? 0) > 1) {
+    toast("Split the first page into its own section before converting it to a cover.", { kind: "info" }); return;
+  }
+  const splitAt = split ? second?.blocks[0]?.dataset["id"] : undefined;
+  if (split && !splitAt) return;
+  const ops: Op[] = [];
+  if (splitAt) ops.push({ op: "section_break", block: splitAt });
+  ops.push({ op: "page_setup", section: firstSection, role: "cover", numbering: { show: false } });
+  await guarded(ed, () => ed.op({ op: "batch", ops, label: "convert first page to cover" }).then(() => {}));
+}
+
+/** Remove cover designation only, retaining all the document's text and images. */
+export async function removeCoverDesignation(ed: Editor): Promise<void> {
+  if (ed.readOnly) return;
+  await guarded(ed, async () => { await ed.op({ op: "cover_unmark" }); });
+}
+
+export async function indent(ed: Editor, delta: 1 | -1): Promise<boolean> {
+  const ids = selectedTextIds(ed);
+  if (!ids.length) return false;
+  const sel = ed.readSelection();
+  await guarded(ed, async () => {
+    const ops: Op[] = ids.map((id) => {
+      const block = ed.model.block(id);
+      if (block?.type === "list_item") return { op: "block_set", block: id, attributes: { depth: Math.max(0, Math.min(8, (block.attributes?.depth ?? 0) + delta)) } };
+      const current = Number(block?.attributes?.indent_mm ?? 0);
+      return { op: "block_set", block: id, attributes: { indent_mm: Math.max(0, Math.min(1000, current + delta * 5)) } };
+    });
+    await ed.op({ op: "batch", ops, label: delta > 0 ? "indent" : "outdent" });
+    ed.restoreSelection(sel);
+  });
+  return true;
+}
+
+export async function moveBlocks(ed: Editor, direction: -1 | 1): Promise<void> {
+  const sel = ed.readSelection();
+  const ids = ed.selectedBlock ? [ed.selectedBlock] : sel ? ed.model.order.slice(ed.model.indexOf(sel.start.block), ed.model.indexOf(sel.end.block) + 1) : [];
+  if (!ids.length || ed.readOnly) return;
+  const first = ed.model.indexOf(ids[0] as string);
+  const last = ed.model.indexOf(ids[ids.length - 1] as string);
+  let after: string | null;
+  if (direction < 0) { if (first === 0) return; after = first - 2 >= 0 ? (ed.model.order[first - 2] as string) : null; }
+  else { if (last >= ed.model.order.length - 1) return; after = ed.model.order[last + 1] as string; }
+  await guarded(ed, async () => { await ed.op({ op: "move", blocks: ids, after }); announce(direction < 0 ? "Moved up" : "Moved down"); if (sel) ed.restoreSelection(sel); });
+}
+
+export async function moveBlocksTo(ed: Editor, ids: string[], after: string | null): Promise<void> {
+  if (!ids.length || ed.readOnly || (after && ids.includes(after))) return;
+  await guarded(ed, async () => { await ed.op({ op: "move", blocks: ids, after }); announce("Moved"); });
+}
+
+/** The block after which new content goes: the one holding the caret (or the selected object), else the last block. */
+export function anchorBlock(ed: Editor): string | null {
+  if (ed.selectedBlock) return ed.selectedBlock;
+  const sel = ed.recallSelection();
+  return sel ? sel.end.block : (ed.model.order[ed.model.order.length - 1] ?? null);
+}
+
+export async function insertBlock(ed: Editor, spec: Record<string, unknown>, after?: string | null): Promise<string | undefined> {
+  if (ed.readOnly) return undefined;
+  return guarded(ed, async () => {
+    const id = ed.newId();
+    await ed.op({ op: "block_insert", after: after === undefined ? anchorBlock(ed) : after, block: { id, ...spec } });
+    return id;
+  });
+}
+
+/** The caret is not inside any paragraph (after Ctrl+End past a picture, say). Put it in the last text block, adding an empty paragraph when the document ends in an object. */
+export async function landCaret(ed: Editor): Promise<false | "existing" | "created"> {
+  if (ed.readOnly) return false;
+  const order = ed.model.order;
+  const last = order[order.length - 1];
+  if (last && ed.isText(last)) { ed.focusBlock(last, ed.model.block(last)?.text.length ?? 0); return "existing"; }
+  const id = await insertBlock(ed, { type: "paragraph", text: "" }, last ?? null);
+  if (id) { ed.focusBlock(id, 0); return "created"; }
+  return false;
+}
+
+/** Where a table goes, taken before a dialog or menu steals focus. The caret wins while it is in the page; otherwise the object the person
+ *  selected (a picture, an equation, a table); otherwise where the caret last was. `selection` and `object` are never both set. */
+export interface InsertPoint { selection: Sel | null; object: string | null }
+
+export function captureInsertPoint(ed: Editor): InsertPoint {
+  const live = ed.readSelection();
+  if (live) return { selection: live, object: null };
+  if (ed.selectedBlock) return { selection: null, object: ed.selectedBlock };
+  return { selection: ed.lastSel, object: null };
+}
+
+/** Insert a table at `where`, even if an insertion dialog has focus. A mid-paragraph insertion splits through the canonical text model so
+ *  inline formatting and the suffix survive; a selected object gets the table right after it. With no caret and no object anywhere the table
+ *  goes after the last block, as typing does (landCaret). The whole action is one undo step. */
+export async function insertTable(ed: Editor, rows: number, columns: number, where: InsertPoint = captureInsertPoint(ed), data?: TableData): Promise<boolean> {
+  if (ed.readOnly) return false;
+  const inserted = await guarded(ed, async () => {
+    await ed.flush();
+    const object = where.object ? ed.model.block(where.object) : undefined;
+    if (where.object && !object) throw new Error("The selected object is no longer available. Select it again.");
+    const pt = where.selection?.start;
+    const target = object ?? (pt ? ed.model.block(pt.block) : undefined);
+    if (pt && !target) throw new Error("The insertion position is no longer available. Place the caret again.");
+    const id = ed.newId();
+    const spec: Record<string, unknown> = { id, type: "table", text: "", rows, columns };
+    if (data) spec["table"] = data;
+    if (target?.section) spec["section"] = target.section;
+    let after: string | null = target?.id ?? (ed.model.order[ed.model.order.length - 1] ?? null);
+    const ops: Op[] = [];
+    if (!object && target && pt?.field === "text" && isTextBlock(target)) {
+      if (pt.offset === 0) {
+        const index = ed.model.indexOf(target.id);
+        after = index > 0 ? ed.model.order[index - 1] as string : null;
+      } else if (pt.offset < target.text.length) {
+        ops.push({ op: "split", block: target.id, at: toCodepoints(target.text, pt.offset), new_id: ed.newId() });
+      }
+    }
+    ops.push({ op: "block_insert", after, block: spec });
+    await ed.op({ op: "batch", ops, label: "insert table" });
+    ed.scrollToBlock(id);
+    focusCell(ed, id, 0, 0);
+    return true;
+  });
+  return inserted === true;
+}
+
+export async function insertEquationBlock(ed: Editor, source: string, syntax = "latex"): Promise<void> {
+  const id = await insertBlock(ed, { type: "equation", text: "", equation: { syntax, source, domain: syntax === "mhchem" ? "chemistry" : syntax === "sequence" ? "biology" : "mathematics" } });
+  if (id) selectBlock(ed, id);
+}
+
+export async function insertInlineEquation(ed: Editor, source: string, syntax = "latex"): Promise<void> {
+  const sel = ed.readSelection();
+  if (!sel || sel.start.field !== "text") { toast("Place the cursor in a paragraph first.", { kind: "info" }); return; }
+  await guarded(ed, async () => { await ed.op({ op: "inline_object", block: sel.start.block, at: toCodepoints(ed.model.block(sel.start.block)?.text ?? "", sel.start.offset), kind: "equation", equation: { syntax, source, domain: syntax === "mhchem" ? "chemistry" : "mathematics" } }); });
+}
+
+export async function insertPageBreak(ed: Editor): Promise<void> {
+  const sel = ed.readSelection();
+  const id = sel?.start.block;
+  if (!id || !isTextBlock(ed.model.block(id))) return;
+  const current = ed.model.block(id)?.attributes?.["page_break_before"] === true;
+  await guarded(ed, async () => { await ed.op({ op: "block_set", block: id, attributes: { page_break_before: current ? null : true }, label: "page break" }); });
+}
+
+/** New page at the caret, as Ctrl+Enter does in Word and Canva: the text after the caret (or an empty paragraph, when the caret is at the end) starts the next page and the caret goes there.
+ *  With the caret at the very start of a paragraph the break goes before that paragraph (pressing it again takes the break away). */
+export async function newPage(ed: Editor): Promise<void> {
+  const sel = ed.readSelection();
+  if (!sel || ed.readOnly) return;
+  const block = ed.model.block(sel.start.block);
+  if (!block || !isTextBlock(block) || sel.start.field !== "text") return;
+  if (block.type === "code" || (sel.collapsed && sel.start.offset === 0)) { await insertPageBreak(ed); return; }
+  await enter(ed);
+  const id = ed.readSelection()?.start.block;
+  if (!id || id === block.id) return;
+  await guarded(ed, async () => { await ed.op({ op: "block_set", block: id, attributes: { page_break_before: true }, label: "new page" }); });
+  ed.focusBlock(id, 0);
+  announce("New page.");
+}
+
+export async function sectionBreak(ed: Editor): Promise<void> {
+  const sel = ed.readSelection();
+  if (!sel) return;
+  await guarded(ed, async () => { await ed.op({ op: "section_break", block: sel.start.block }); toast("A new section starts here. Change its page setup from Pages / Chapters / Sections.", { kind: "ok" }); });
+}
+
+export async function tableEdit(ed: Editor, block: string, action: string, index = 0, count?: number): Promise<void> {
+  await guarded(ed, async () => { await ed.op({ op: "table_edit", block, action, index, ...(count !== undefined ? { count } : {}) }); });
+}
+
+export function pxToMm(px: number): number { return px / MM_PX; }
+
+
+/* ------------------------------------------------------------------------------------------------------------- layers */
+/** Write the layers and which block is on which. Nothing is stored while everything is as in a new document. */
+export async function writeLayers(ed: Editor, rows: LayerRow[], onLayer: Record<string, string>): Promise<void> {
+  const plain = rows.every((r) => !r.custom && r.visible && !r.locked);
+  const saved = rows.map((r) => ({ id: r.id, name: r.name, visible: r.visible, ...(r.locked ? { locked: true } : {}), ...(r.custom ? { custom: true } : {}) }));
+  await ed.op({ op: "ext_set", values: { layers: plain ? null : saved, layer_of: Object.keys(onLayer).length ? onLayer : null }, label: "layers" });
+}
+
+/** The blocks an action on "the selection" means: the selected object, or the blocks the text selection touches. */
+export function selectedBlockIds(ed: Editor): string[] {
+  if (ed.selectedBlock) return [ed.selectedBlock];
+  const sel = ed.recallSelection();
+  return sel ? ed.model.order.slice(ed.model.indexOf(sel.start.block), ed.model.indexOf(sel.end.block) + 1) : [];
+}
+
+/** Put blocks on a layer (a block is on the layer of its kind unless it was moved, so moving it back removes the note). */
+export async function moveToLayer(ed: Editor, layer: string, ids: string[]): Promise<void> {
+  if (ed.readOnly || !ids.length) return;
+  const next = { ...(ed.model.ext.layer_of ?? {}) };
+  for (const id of ids) {
+    const block = ed.model.block(id);
+    if (!block) continue;
+    if (layer === (block.type === "figure" ? "illustrations" : "text")) delete next[id]; else next[id] = layer;
+  }
+  await guarded(ed, () => writeLayers(ed, layerList(ed.model.ext), next));
+}
+
+/** A new, empty layer. If a picture, table or other object is selected, it goes onto the new layer (like "new layer from selection"). Returns the layer's id. */
+export async function newLayer(ed: Editor): Promise<string | undefined> {
+  if (ed.readOnly) return undefined;
+  const rows = layerList(ed.model.ext);
+  let n = rows.filter((r) => r.custom).length + 1;
+  while (rows.some((r) => r.name === `Layer ${n}`)) n += 1;
+  const id = `layer-${Math.random().toString(36).slice(2, 10)}`;
+  const taken = ed.selectedBlock ? [ed.selectedBlock] : [];
+  const onLayer = { ...(ed.model.ext.layer_of ?? {}) };
+  for (const b of taken) onLayer[b] = id;
+  const ok = await guarded(ed, async () => { await writeLayers(ed, [...rows, { id, name: `Layer ${n}`, visible: true, locked: false, custom: true }], onLayer); return true; });
+  if (!ok) return undefined;
+  announce(taken.length ? `Layer ${n} added, with the selected object on it.` : `Layer ${n} added. Select something and use Move selection here in the Layers panel to put it on this layer.`);
+  return id;
+}
+
+export async function renameLayer(ed: Editor, id: string, name: string): Promise<void> {
+  const rows = layerList(ed.model.ext).map((r) => (r.id === id && r.custom ? { ...r, name: name.trim().slice(0, 80) || r.name } : r));
+  await guarded(ed, () => writeLayers(ed, rows, ed.model.ext.layer_of ?? {}));
+}
+
+/** Delete one of the person's layers; what was on it goes back to its own layer. */
+export async function deleteLayer(ed: Editor, id: string): Promise<void> {
+  const rows = layerList(ed.model.ext).filter((r) => r.id !== id);
+  const onLayer = Object.fromEntries(Object.entries(ed.model.ext.layer_of ?? {}).filter(([, layer]) => layer !== id));
+  await guarded(ed, () => writeLayers(ed, rows, onLayer));
+}
+

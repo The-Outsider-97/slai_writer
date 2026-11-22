@@ -1,0 +1,518 @@
+/** The editor screen, laid out as in the design (SLAI Writer (main), pages 11 to 14): top bar, a rail of icons on each side that opens into the
+ *  Tools panel and the Pages / Layers panel, the page with its rulers, the three panels attached to each page (corrections, notes, EMBED)
+ *  and the status bar. Everything starts collapsed. This file only assembles and wires; the work lives in the modules it imports. */
+import type { App, Route, Screen } from "../app.js";
+import * as A from "../actions.js";
+import { COMMANDS, contextMenu, openPalette } from "../commands.js";
+import { equationDialog, figureDialog, pageSetupDialog, pictureDialog, tableToolsDialog } from "../dialogs.js";
+import { buildFormatBar, buildStatusBar, buildTopBar } from "../docbars.js";
+import { PageAttachments, type PanelKind } from "../attach.js";
+import { createNavMenu, type NavMenu } from "../navmenu.js";
+import { createLeftSide, createRightSide } from "../sidepanels.js";
+import { ImageTools } from "../imageedit.js";
+import { editShape } from "../shape_ui.js";
+import { ShapeTools } from "../shapetools.js";
+import { shapeOf } from "../shape.js";
+import type { Dock, DocCtx, DocUi, Panel, ViewState, ZoomRequest } from "../docctx.js";
+import { externalDialog, saveAsDialog, saveDocument } from "../docsave.js";
+import { Editor } from "../editor.js";
+import { Find } from "../find.js";
+import { RenderedView } from "../rendered.js";
+import { clampPerRow, type PerRow } from "../arrangement.js";
+import { documentIsBook } from "../book_layout.js";
+import { installInput } from "../input.js";
+import { announce, clear, h, openMenu, toast } from "../kit.js";
+import { api, errorText } from "../net.js";
+import { createEmbedDrawer } from "../panels/embed.js";
+import { createCommentsPanel, createNotesPanel, loadNotes, noteFromMatch, paintCommentMarks, paintNoteMarks, type NoteRow } from "../panels/notes.js";
+import { createProofPanel } from "../panels/proof.js";
+import { createRightPanel } from "../panels/right.js";
+import { createSourcesPanel } from "../panels/sources.js";
+import type { DocState } from "../types.js";
+import { button, fill, notice } from "../widgets.js";
+
+// A new ribbon is visible on documents by default, independently of the old optional-format-bar preference.
+const BAR_KEY = "writer.documentRibbon";
+function barPref(): boolean { try { return window.localStorage.getItem(BAR_KEY) !== "0"; } catch { return true; } }
+function setBarPref(on: boolean): void { try { window.localStorage.setItem(BAR_KEY, on ? "1" : "0"); } catch { /* a per-viewer convenience only */ } }
+
+export async function docScreen(app: App, route: Route): Promise<Screen> {
+  const sid = route.sid ?? "";
+  // The document is the only thing the editor needs before it can open. The list of open documents and the custom cursors are asked for at the same
+  // time, and either one failing leaves the editor usable (the list is refreshed by the next event, the cursors fall back to the built-in ones).
+  app.report("Reading the document ...", 0.78);
+  const [state, , cursors] = await Promise.all([
+    api.get<DocState>(`/docs/${encodeURIComponent(sid)}`),
+    app.openDocs().catch(() => undefined),
+    api.get<{ custom: Array<{ id: string; hotspot: number[] }> }>("/cursors").catch(() => ({ custom: [] })),
+  ]);
+  app.remember(state);
+  app.report("Laying out the pages ...", 0.9);
+
+  const ed = new Editor(state, { prefs: () => app.prefs });
+  const uninstall = installInput(ed);
+  ed.setCursors(app.prefs, cursors.custom);
+  document.title = `${state.title} – SLAI Writer`;
+
+  let ctx!: DocCtx;
+  const dockPanels = new Map<string, Panel>();
+  let noteCache: NoteRow[] = [];
+  let staleBanner = false;
+  let externalBanner = false;
+  let hiddenMode = false;
+  let zoomMode: "custom" | "height" | "width" | "entire" = app.prefs.zoom_mode;
+  let zoomSave: number | undefined;
+  let rendered: RenderedView | null = null;
+  let renderedBusy = false;
+  let perRow: PerRow = clampPerRow(app.prefs.view_pages);
+  let bookView: "facing" | "single" = app.prefs.book_view;
+  let wasBook = documentIsBook(ed.model.meta);
+  let perRowBeforeBook: PerRow | null = null;
+  let sheetSelection: ReturnType<typeof ed.recallSelection> = null;
+  let currentPercent = app.prefs.zoom;
+
+  /* ---------------------------------------------------------------------------------------------- the pieces */
+  const find = new Find({ get app() { return app; }, get ed() { return ed; }, sid, get ui() { return ui; } } as DocCtx);
+  const root = h("div", { class: "doc" });
+  const banners = h("div", { class: "banners", attrs: { "aria-live": "polite" } });
+  let yellowTabName = "notes";
+  let attachments!: PageAttachments;
+  let quiet = false;
+  let nav!: NavMenu;
+  const embedHost = { show: (): void => { if (!attachments.isOpen("embed")) { quiet = true; attachments.open("embed"); quiet = false; } }, hide: (): void => attachments.close("embed"), isOpen: (): boolean => attachments.isOpen("embed") };
+  const drawer = createEmbedDrawer({ get app() { return app; }, get ed() { return ed; }, sid, get ui() { return ui; } } as DocCtx, embedHost);
+
+  /* ------------------------------------------------------------------------------------------------- the UI hooks */
+  const ui: DocUi = {
+    openPanel(kind: Dock, tab?: string): void { openPanel(kind, tab); },
+    focusFind(): void { top.openFind(); },
+    save: () => saveDocument(ctx),
+    saveAs: () => saveAsDialog(ctx),
+    refreshStatus(): void { top.update(); status.update(); format.update(); document.title = `${ed.model.meta.title} – SLAI Writer`; },
+    showEmbed(block: string | null): void {
+      if (block === null) { drawer.close(); return; }
+      const at = block === "new" ? -1 : ed.page.sheets.findIndex((s) => s.blocks.some((el) => el.dataset["id"] === block));
+      quiet = true; attachments.open("embed", at >= 0 ? at : currentSheet()); quiet = false;
+      void drawer.open(block);
+    },
+    toggleRight(): void { rightSide.toggle(); },
+    showLayers(): void { rightSide.set(true); rightPanel.openSection("layers"); },
+    toggleLeft(): void { leftSide.toggle(); },
+    toggleFormatBar(): void { format.el.hidden = !format.el.hidden; setBarPref(!format.el.hidden); window.setTimeout(() => { ed.page.redecorate(); }, 0); },
+    palette(x: number, y: number): void { const sel = ed.recallSelection(); openPalette(ctx, x, y, () => ed.refocus(sel)); },
+    setZoom: (request: ZoomRequest) => setZoom(request),
+    async reload(next?: DocState): Promise<void> { await ed.resync(next); ui.refreshStatus(); },
+    setRendered: (on: boolean) => setRendered(on),
+    setPages: (count, options) => setPages(count, options),
+    viewState: (): ViewState => viewState(),
+    toggleHidden(): void { hiddenMode = !hiddenMode; if (hiddenMode) root.dataset["hidden"] = ""; else delete root.dataset["hidden"]; status.el.querySelector<HTMLElement>("button[aria-pressed]")?.setAttribute("aria-pressed", String(hiddenMode)); const label = status.el.querySelector<HTMLElement>("button[aria-pressed] span"); if (label) label.textContent = hiddenMode ? "Reveal" : "Hide"; announce(hiddenMode ? "Everything except the page is hidden. Press Reveal or Escape to show it." : "Revealed."); },
+  };
+  ctx = { app, ed, sid, ui };
+  const imageTools = new ImageTools(ed, { details: (block) => { void figureDialog(ctx, block); } });
+  const shapeTools = new ShapeTools(ed, (id) => { void editShape(ctx, id); });
+
+  const top = buildTopBar(ctx, find, () => nav);
+  nav = createNavMenu(ctx, () => top.menuButton, (open) => top.setMenuOpen(open));
+  const format = buildFormatBar(ctx);
+  const headerMenu = (e: Event): void => {
+    const target = e.target;
+    if (target instanceof Element && target.closest("button, input, select, a, [role=button]")) return;
+    e.preventDefault();
+    openMenu(top.el, [
+      { label: format.el.hidden ? "Show ribbon" : "Hide ribbon", run: () => ui.toggleFormatBar() },
+      { label: "Show ribbon and all sections", run: () => {
+        if (format.el.hidden) ui.toggleFormatBar();
+        try { window.localStorage.removeItem("writer.ribbonGroups.v1"); } catch { /* preference */ }
+        format.el.querySelectorAll<HTMLElement>(".ribbon-group").forEach((group) => { group.hidden = false; });
+      } },
+    ], { label: "Application header" });
+  };
+  top.el.addEventListener("contextmenu", headerMenu);
+  top.el.tabIndex = 0;
+  top.el.addEventListener("keydown", (e) => { if (e.target === top.el && (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10"))) headerMenu(e); });
+  format.el.hidden = !barPref();
+  const status = buildStatusBar(ctx, (r) => setZoom(r));
+  const currentSheet = (): number => Math.max(0, ed.currentPage() - 1);
+
+  /* ------------------------------------------------------------------------------- panels attached to a page */
+  const panelFor = (name: string): Panel => {
+    const have = dockPanels.get(name);
+    if (have) return have;
+    let panel: Panel;
+    if (name === "proofing") panel = createProofPanel(ctx);
+    else if (name === "notes") panel = createNotesPanel(ctx, (notes) => { noteCache = notes; paintNoteMarks(ctx, notes); });
+    else if (name === "comments") panel = createCommentsPanel(ctx);
+    else panel = createSourcesPanel(ctx);
+    dockPanels.set(name, panel);
+    return panel;
+  };
+  // Proofreading decorations must run even while the corrections panel is
+  // collapsed (the authoritative design keeps all side panels hidden).
+  panelFor("proofing");
+
+  const yellowTabs = h("div", { class: "tabs", attrs: { role: "tablist", "aria-label": "Notes, comments and sources" } });
+  const yellowBody = h("div", { class: "dock-body" });
+  const yellowContent = h("div", { class: "pcontent" }, yellowTabs, yellowBody);
+  const redContent = h("div", { class: "pcontent" });
+  const paintYellow = (): void => {
+    const hadFocus = yellowContent.contains(document.activeElement);
+    clear(yellowTabs);
+    for (const [id, label] of [["notes", "Notes"], ["comments", "Comments"], ["sources", "Sources"]] as const) {
+      const b = h("button", { class: "tabbtn", type: "button", text: label, attrs: { role: "tab", "aria-selected": String(id === yellowTabName), tabindex: id === yellowTabName ? "0" : "-1" } });
+      b.addEventListener("click", () => { yellowTabName = id; paintYellow(); });
+      yellowTabs.appendChild(b);
+    }
+    clear(yellowBody);
+    const panel = panelFor(yellowTabName);
+    yellowBody.appendChild(panel.el);
+    void panel.refresh();
+    if (hadFocus) yellowTabs.querySelector<HTMLElement>("[aria-selected=true]")?.focus();   // rebuilding the tabs must not drop keyboard focus
+  };
+  yellowTabs.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    const order = ["notes", "comments", "sources"];
+    yellowTabName = order[(order.indexOf(yellowTabName) + (e.key === "ArrowRight" ? 1 : order.length - 1)) % order.length] as string;
+    paintYellow();
+    yellowTabs.querySelector<HTMLElement>("[aria-selected=true]")?.focus();
+  });
+  attachments = new PageAttachments(ed.page, [
+    { kind: "red", label: "Corrections: spelling, grammar and the AI Assistant", content: redContent },
+    { kind: "yellow", label: "Notes, comments and sources", content: yellowContent },
+    { kind: "embed", label: "EMBED component", content: drawer.el },
+  ], currentSheet);
+  attachments.onChange = (kind, open): void => {
+    if (!open) { window.setTimeout(() => ed.layout(), 0); return; }
+    // one panel per side: Corrections replace the Tools panel, Notes replace the organisation panel (EMBED is below the page and is unaffected)
+    if (kind === "red") leftSide.set(false);
+    if (kind === "yellow") rightSide.set(false);
+    if (kind === "red") { if (!redContent.firstChild) redContent.appendChild(panelFor("proofing").el); void panelFor("proofing").refresh(); }
+    if (kind === "yellow") paintYellow();
+    if (kind === "embed" && !quiet) void drawer.openFromTab();   // opened from the page's own tab; opening for a component fills it itself
+    window.setTimeout(() => ed.layout(), 0);
+  };
+
+  /** Open one of the page's panels; with a tab it opens (never toggles), without one the page's tab toggles it. */
+  function openPanel(kind: PanelKind, tab?: string): void {
+    const sheet = currentSheet();
+    if (kind === "red") {
+      if (tab) attachments.open("red", sheet); else attachments.toggle("red", sheet);
+      if (tab === "ai" && attachments.isOpen("red")) window.setTimeout(() => Array.from(redContent.querySelectorAll("h2")).find((x) => x.textContent === "AI Assistant")?.scrollIntoView({ block: "start" }), 0);
+    } else if (kind === "yellow") {
+      if (tab && ["notes", "comments", "sources"].includes(tab)) { yellowTabName = tab; attachments.open("yellow", sheet); paintYellow(); } else attachments.toggle("yellow", sheet);
+    } else if (attachments.isOpen("embed") && !tab) attachments.close("embed");
+    else { quiet = true; attachments.open("embed", sheet); quiet = false; void drawer.openFromTab(); }
+  }
+
+  /* ------------------------------------------------------------------------------------------------ layout */
+  const rightPanel = createRightPanel(ctx);
+  const leftSide = createLeftSide(ctx);
+  const rightSide = createRightSide(ctx, rightPanel);
+  leftSide.onToggle = (open): void => { if (open) attachments.close("red"); };
+  rightSide.onToggle = (open): void => { if (open) attachments.close("yellow"); };
+  ed.page.cornerLeft.appendChild(leftSide.arrow);
+  ed.page.cornerRight.appendChild(rightSide.arrow);
+  const body = h("div", { class: "doc-body" }, leftSide.el, ed.page.el, rightSide.el);
+  fill(root, top.el, format.el, top.replaceRow, banners, body, status.el, h("div", { class: "reveal-veil", attrs: { "aria-hidden": "true" } }));
+
+  /* ---------------------------------------------------------------------------------------------- banners */
+  let notesDismissed = false;
+  const paintBanners = (): void => {
+    clear(banners);
+    if (ed.readOnly) banners.appendChild(notice(h("span", {}, state.access.readOnlyReason ?? ed.model.state.access.readOnlyReason ?? "This document is read-only.", " ", button("Save an editable copy…", () => { void saveAsDialog(ctx); }, "", "save")), "info", "Read-only."));
+    if (staleBanner) banners.appendChild(notice(h("span", {}, "This document was changed somewhere else (another window or program) after your screen last updated. Your latest typing may not be saved. ", button("Load the latest version", async () => { await ed.resync(); staleBanner = false; paintBanners(); ui.refreshStatus(); }, "primary")), "danger", "Out of date."));
+    if (externalBanner) banners.appendChild(notice(h("span", {}, "The file was changed by another program. Nothing was overwritten. ", button("Decide what to do…", async () => { if (await externalDialog(ctx)) { externalBanner = false; paintBanners(); } }, "primary")), "warn", "File changed on disk."));
+    const notes = ed.model.state.notices;
+    if (notes.length && !notesDismissed) {
+      const dismiss = h("button", { class: "linkbtn", type: "button", text: "Dismiss" });
+      dismiss.addEventListener("click", () => { notesDismissed = true; paintBanners(); });
+      banners.appendChild(notice(h("span", {}, h("ul", {}, notes.map((n) => h("li", { text: n }))), dismiss), "info", "About this document."));
+    }
+  };
+
+  /* ------------------------------------------------------------------------------------------ pages per view, rendered view */
+  function isBook(): boolean { return documentIsBook(ed.model.meta); }
+  /** What is on the desk: the pages-per-view choice, or the two-page book view for a document with mirrored margins (page 1 alone on the right). */
+  function arrangementNow(): { perRow: PerRow; facing: boolean } {
+    const facing = isBook() && perRow <= 2 && bookView === "facing";
+    return { perRow: facing ? 2 : perRow, facing };
+  }
+  const applyArrangement = (): void => {
+    const now = arrangementNow();
+    ed.page.setArrangement(now.perRow, now.facing);
+    rendered?.setArrangement(now.perRow, now.facing);
+    if (zoomMode !== "custom") setZoom(zoomMode);
+    ui.refreshStatus();
+  };
+  const savePrefs = (extra: Record<string, unknown> = {}): void => { void app.setPrefs({ view_pages: perRow, book_view: bookView, ...extra }).catch(() => undefined); };
+  function setPages(count: 1 | 2 | 3 | 4, options?: { book?: boolean }): void {
+    perRow = clampPerRow(count);
+    if (count <= 2 && isBook()) bookView = count === 2 && options?.book !== false ? "facing" : "single";
+    perRowBeforeBook = null;
+    applyArrangement();
+    savePrefs();
+    announce(arrangementNow().facing ? "Two pages, book view: page 1 on the right." : `${arrangementNow().perRow} ${arrangementNow().perRow === 1 ? "page" : "pages"} across.`);
+  }
+  /** Turning mirrored margins on makes a book of the document, and a book is read as spreads: two pages, page 1 alone on the right. Turning them off again
+   *  returns to what was shown before. Opening a document that already is a book keeps what the person last chose. */
+  const syncBook = (): void => {
+    const now = isBook();
+    if (now === wasBook) return;
+    wasBook = now;
+    if (now) { perRowBeforeBook = perRow; perRow = 2; bookView = "facing"; savePrefs(); }
+    else if (perRowBeforeBook) { perRow = perRowBeforeBook; perRowBeforeBook = null; savePrefs(); }
+    applyArrangement();
+    announce(now ? "Mirrored margins are on. The pages are shown as a book, two at a time." : "Mirrored margins are off.");
+  };
+  function renderedUnavailable(): string | null {
+    const pdf = app.boot.capabilities.exportFormats.export.find((f) => f.id === "pdf");
+    if (!app.boot.capabilities.documaster.available) return app.boot.capabilities.documaster.reason ?? "Documaster, which draws the pages, is not available.";
+    if (pdf && !pdf.available) return pdf.reason ?? "PDF export is not available.";
+    return null;
+  }
+  function viewState(): ViewState {
+    const now = arrangementNow();
+    const at = rendered?.currentPage() ?? 0;
+    return { rendered: !!rendered, perRow: now.perRow, facing: now.facing, book: isBook(), renderedUnavailable: renderedUnavailable(),
+      renderedPage: rendered ? { page: at, total: rendered.total, label: rendered.labelOf(at) } : null };
+  }
+  /** The page of the exported PDF that the editing view is on: the page of the block with the caret (measured by Documaster), else the editor's own count. */
+  const editingPdfPage = (): number => {
+    const block = ed.recallSelection()?.start.block;
+    const exact = block ? ed.printLayout?.blockPages[block] : undefined;
+    return exact ?? ed.currentPage();
+  };
+  async function setRendered(on: boolean): Promise<void> {
+    if (renderedBusy || on === !!rendered) return;
+    renderedBusy = true;
+    try {
+      if (on) {
+        const why = renderedUnavailable();
+        if (why) { toast(`The rendered view is not available: ${why}`, { kind: "info" }); return; }
+        ed.bands.exit();                                              // the Rendered View is the exported pages: there is nothing to edit in it
+        const sel = ed.recallSelection();
+        const page = editingPdfPage();
+        await ed.whenIdle();                                                   // what was typed is sent first, so the pages drawn are of the text on screen
+        const view = new RenderedView(sid, {
+          changed: () => { status.update(); },
+          leave: () => { void setRendered(false); },
+          zoom: (percent) => setZoom(percent),
+          stale: () => { toast("The document changed while the rendered view was open. Showing it again.", { kind: "info" }); void reopenRendered(); },
+        });
+        try { await view.load(); } catch (e) { view.destroy(); toast(`The rendered view could not be drawn. ${errorText(e)}`, { kind: "error", timeoutMs: 9000 }); return; }
+        rendered = view;
+        sheetSelection = sel;
+        root.dataset["view"] = "rendered";
+        ed.page.el.after(view.el);
+        const now = arrangementNow();
+        view.setArrangement(now.perRow, now.facing);
+        setZoom(zoomMode === "custom" ? currentPercent : zoomMode);
+        view.refresh();
+        view.goTo(page);
+        view.focus();
+        announce("Rendered view. The pages are shown as they export. Press Escape to return to editing.");
+      } else if (rendered) {
+        const view = rendered;
+        const page = view.currentPage();
+        rendered = null;
+        view.destroy();
+        delete root.dataset["view"];
+        ed.layout();
+        setZoom(zoomMode === "custom" ? currentPercent : zoomMode);
+        const first = ed.model.order.find((id) => (ed.printLayout?.blockPages[id] ?? 0) >= page);
+        const target = ed.recallSelection()?.start.block ?? sheetSelection?.start.block;
+        const inPage = target && ed.printLayout?.blockPages[target] === page ? target : first;
+        if (inPage) ed.page.el.querySelector<HTMLElement>(`[data-id="${CSS.escape(inPage)}"]`)?.scrollIntoView({ block: "start" });
+        if (sheetSelection && ed.printLayout?.blockPages[sheetSelection.start.block] === page) ed.refocus(sheetSelection); else ed.host.focus({ preventScroll: true });
+        sheetSelection = null;
+        announce("Editing view.");
+      }
+    } finally { renderedBusy = false; status.update(); }
+  }
+  /** The pictures no longer match the document (it changed under the view): draw it again where the reader was. */
+  async function reopenRendered(): Promise<void> {
+    const view = rendered;
+    if (!view) return;
+    const page = view.currentPage();
+    rendered = null; view.destroy(); delete root.dataset["view"];
+    ed.layout();
+    await setRendered(true);
+    const again = (): RenderedView | null => rendered;
+    again()?.goTo(page);
+  }
+  /* ------------------------------------------------------------------------------------------------- zoom */
+  function setZoom(request: ZoomRequest): void {
+    let percent: number;
+    if (request === "height" || request === "width" || request === "entire") { zoomMode = request; percent = rendered ? rendered.fitZoom(request) : ed.page.fitZoom(request); } else { zoomMode = "custom"; percent = Math.max(10, Math.min(400, Math.round(request))); }
+    currentPercent = percent;
+    if (rendered) rendered.setZoom(percent); else ed.setZoom(percent);
+    status.setZoom(percent, zoomMode);
+    window.clearTimeout(zoomSave);
+    zoomSave = window.setTimeout(() => { void app.setPrefs({ zoom: percent, zoom_mode: zoomMode }).catch(() => undefined); }, 700);
+  }
+  // A fit mode follows the window: when the window is resized the pages are fitted again (a custom zoom stays where it is).
+  let resizeTimer: number | undefined;
+  const onResize = (): void => { window.clearTimeout(resizeTimer); resizeTimer = window.setTimeout(() => { if (zoomMode !== "custom") setZoom(zoomMode); }, 120); };
+  window.addEventListener("resize", onResize);
+
+  /* ------------------------------------------------------------------------------------------------ events */
+  let frame = 0;
+  const refreshBars = (): void => {
+    if (frame) return;
+    frame = window.requestAnimationFrame(() => { frame = 0; top.update(); status.update(); format.update(); });
+  };
+  let marksTimer: number | undefined;
+  let findTimer: number | undefined;
+  const afterEdit = (): void => {
+    window.clearTimeout(marksTimer);
+    marksTimer = window.setTimeout(() => { paintNoteMarks(ctx, noteCache); paintCommentMarks(ctx); }, 250);
+    if (find.active) { window.clearTimeout(findTimer); findTimer = window.setTimeout(() => { void find.search(find.query, true); }, 500); }
+  };
+
+  const files = async (list: File[], after: string | null): Promise<void> => {
+    let anchor = after;
+    for (const file of list) {
+      if (!file.type.startsWith("image/")) { toast(`“${file.name}” is not a picture. To bring in a document, use Import.`, { kind: "info" }); continue; }
+      await pictureDialog(ctx, file, anchor);
+      anchor = null;
+    }
+  };
+
+  const offEditor = ed.events.on((e) => {
+    switch (e.type) {
+      case "patch": {
+        const summary = app.docs.get(sid);
+        if (summary && summary.dirty !== e.patch.dirty) app.docs.set(sid, { ...summary, dirty: e.patch.dirty });
+        ed.model.state = { ...ed.model.state, lastEdit: Date.now() / 1000 };
+        syncBook(); refreshBars(); afterEdit();
+        break;
+      }
+      case "selection": case "layout": case "comments": refreshBars(); if (e.type === "layout") afterEdit(); break;
+      case "reloaded": staleBanner = false; paintBanners(); syncBook(); refreshBars(); afterEdit(); break;
+      case "stale": staleBanner = true; paintBanners(); break;
+      case "slash": ui.palette(e.x, e.y); break;
+      case "context": { const sel = ed.recallSelection(); contextMenu(ctx, e.x, e.y, () => ed.refocus(sel)); break; }
+      case "files": void files(e.files, e.after); break;
+      case "open-object": {
+        const block = ed.model.block(e.block);
+        if (!block) break;
+        if (shapeOf(block)) { void editShape(ctx, block.id); break; }
+        if (e.kind === "embed") ui.showEmbed(e.block);
+        else if (e.kind === "equation") void equationDialog(ctx, block);
+        else if (e.kind === "figure") void figureDialog(ctx, block);
+        else void tableToolsDialog(ctx, e.block);
+        break;
+      }
+      case "note-from-match": void (async () => { try { const id = await noteFromMatch(ctx, e.block, e.start, e.end); if (id) { openPanel("yellow", "notes"); } } catch (err) { toast(errorText(err), { kind: "error" }); } })(); break;
+      case "page-double": {
+        if (ed.readOnly) { toast("This document is read-only.", { kind: "info" }); break; }
+        void ed.placeTextAt(e.sheetIndex, e.xMm, e.yMm).then((ok) => {
+          if (!ok) toast("Choose blank writable space below the existing text, inside the page margins.", { kind: "info" });
+        }).catch((error) => toast(errorText(error), { kind: "error" }));
+        break;
+      }
+      case "ruler-double": if (!ed.readOnly) void pageSetupDialog(ctx); break;
+      case "link": if (/^(https?:|mailto:)/i.test(e.href)) window.open(e.href, "_blank", "noopener,noreferrer"); break;
+      case "reference": openPanel("yellow", "sources"); break;
+      case "save": void saveDocument(ctx); break;
+      case "find": ui.focusFind(); break;
+      case "command": { const c = COMMANDS.find((x) => x.id === e.name); if (c) void Promise.resolve(c.run(ctx)); break; }
+      case "error": break;
+      default: break;
+    }
+  });
+  const offApp = app.events.on((e) => {
+    if (e.type === "docs" || e.type === "offline") refreshBars();
+    if (e.type === "prefs") { ed.setCursors(app.prefs, cursors.custom); ed.layout(); refreshBars(); }
+  });
+
+  /* screen-wide keys (the editor handles its own in input.ts) */
+  /** Run a Writer command from a shortcut, saying why when it cannot run right now (read-only document, no cursor in the text). */
+  const runCommand = (id: string): void => {
+    const command = COMMANDS.find((c) => c.id === id);
+    if (!command) return;
+    const why = command.unavailable?.(ctx) ?? null;
+    if (why) { toast(why, { kind: "info" }); return; }
+    void command.run(ctx);
+  };
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.defaultPrevented) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (e.key === "Escape" && ed.bands.active && !(e.target as Element | null)?.closest?.("dialog, [role=menu]") && ed.bands.escape()) { e.preventDefault(); return; }
+    if (e.key === "Escape" && rendered && !(e.target as Element | null)?.closest?.("dialog, [role=menu]")) { e.preventDefault(); void setRendered(false); return; }
+    if (e.key === "Escape" && hiddenMode) { e.preventDefault(); ui.toggleHidden(); return; }
+    if (e.key === "Escape" && !(e.target as Element | null)?.closest?.("dialog, [role=menu], .slash")) {
+      // Escape closes a panel attached to a page when focus is on its tab; inside a panel the panel handles it, inside the page it keeps its other meanings.
+      const tab = (e.target as Element | null)?.closest?.<HTMLElement>(".ptab.open");
+      const kind = (["red", "yellow", "embed"] as PanelKind[]).find((k) => tab?.classList.contains(k));
+      if (kind) { e.preventDefault(); attachments.close(kind); ed.refocus(); return; }
+    }
+    if (!mod) return;
+    const inField = !!(e.target as Element | null)?.closest?.("input, textarea, select");
+    const inDialog = (e.target as Element | null)?.closest?.("dialog");
+    if (inDialog) return;
+    const k = e.key.toLowerCase();
+    if (k === "s" && !e.shiftKey) { e.preventDefault(); void saveDocument(ctx); }
+    else if (k === "f" && !e.shiftKey) { e.preventDefault(); ui.focusFind(); }
+    else if (k === "h") { e.preventDefault(); top.showReplace(true); }
+    else if (e.altKey && e.code === "KeyM") { e.preventDefault(); void COMMANDS.find((c) => c.id === "comment")?.run(ctx); }
+    // New page, new section, new layer, add background, add illustration: the keys of Word, Canva and InDesign where they have one (see the shortcut list in Support)
+    else if (inField) return;                                  // in a text box elsewhere on the screen these keys keep their own meaning
+    else if (ed.bands.active && (k === "z" || k === "y" || k === "d") && !e.altKey) {          // while a header or footer is edited the body has no focus to take these keys
+      e.preventDefault();
+      if (k === "d") void ed.bands.duplicate(); else void A.undoRedo(ed, k === "y" || e.shiftKey ? "redo" : "undo");
+    }
+    else if (e.key === "Enter" && e.altKey && !e.shiftKey) { e.preventDefault(); runCommand("section-break"); }
+    else if (e.key === "Enter" && !e.altKey && !e.shiftKey) { e.preventDefault(); runCommand("page-break"); }
+    else if (e.code === "KeyN" && e.altKey && e.shiftKey) { e.preventDefault(); runCommand("layer-new"); }
+    else if (e.code === "KeyB" && e.altKey && !e.shiftKey) { e.preventDefault(); runCommand("background"); }
+    else if (k === "d" && !e.altKey && !e.shiftKey) { e.preventDefault(); runCommand("picture"); }
+    else if (k === "\\") { e.preventDefault(); void A.clearFormatting(ed); }
+    else if (k === "+" || k === "=") { e.preventDefault(); setZoom(currentPercent + 10); }
+    else if (k === "-") { e.preventDefault(); setZoom(currentPercent - 10); }
+    else if (k === "0" && !e.altKey) { e.preventDefault(); setZoom(100); }
+  };
+  document.addEventListener("keydown", onKey);
+
+  /* ------------------------------------------------------------------------------------------- polling */
+  const poll = window.setInterval(() => {
+    void app.openDocs().catch(() => undefined);
+    const summary = app.docs.get(sid);
+    if (summary?.path && !externalBanner) void api.get<{ changed: boolean }>(`/docs/${encodeURIComponent(sid)}/external`).then((r) => { if (r.changed) { externalBanner = true; paintBanners(); } }).catch(() => undefined);
+  }, 10000);
+
+  paintBanners();
+  void loadNotes(ctx).then((n) => { noteCache = n; paintNoteMarks(ctx, n); }).catch(() => undefined);
+  paintCommentMarks(ctx);
+
+  return {
+    el: root,
+    focus(): void {
+      // The page was built before it was on screen, so measure and lay it out again now, and again when fonts have loaded.
+      window.requestAnimationFrame(() => {
+        ed.layout();
+        applyArrangement();
+        setZoom(zoomMode === "custom" ? app.prefs.zoom : zoomMode);
+        status.update();
+        const first = ed.model.order[0];
+        if (first && !ed.readOnly && ed.model.order.length === 1 && ed.model.block(first)?.text === "") ed.focusBlock(first, 0); else ed.host.focus({ preventScroll: true });
+      });
+      void document.fonts?.ready.then(() => { ed.layout(); setZoom(zoomMode === "custom" ? app.prefs.zoom : zoomMode); });
+    },
+    destroy(): void {
+      void ed.whenIdle().catch(() => undefined);              // typing not yet sent goes out before the page is torn down
+      window.clearInterval(poll); window.clearTimeout(marksTimer); window.clearTimeout(findTimer); window.clearTimeout(zoomSave);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResize); window.clearTimeout(resizeTimer);
+      rendered?.destroy(); rendered = null;
+      offEditor(); offApp(); uninstall(); imageTools.destroy(); shapeTools.destroy();
+      top.dispose(); status.dispose();
+      for (const p of dockPanels.values()) p.destroy?.();
+      nav.dispose();
+      rightPanel.destroy?.();
+      ed.page.onPlace = null;
+      ed.destroy();
+      delete document.body.dataset["hidden"];
+      document.title = "SLAI Writer";
+    },
+  };
+}
